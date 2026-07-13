@@ -4,33 +4,43 @@ import StatusChip from '../components/StatusChip'
 
 export default function Dashboard() {
   const [counts, setCounts] = useState({ total: null, active: null, archived: null })
+  const [inventoryValue, setInventoryValue] = useState(null)
+  const [alerts, setAlerts] = useState([])
+  const [hasAnyStock, setHasAnyStock] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
 
   useEffect(() => {
-    async function loadCounts() {
+    async function loadAll() {
       try {
-        const [totalRes, activeRes, archivedRes] = await Promise.all([
+        const [totalRes, activeRes, archivedRes, invRes] = await Promise.all([
           supabase.from('products').select('*', { count: 'exact', head: true }),
           supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'active'),
           supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'archived'),
+          supabase.from('inventory_cache').select('*, product:products(name, sku, reorder_point)'),
         ])
 
-        const firstError = totalRes.error || activeRes.error || archivedRes.error
+        const firstError = totalRes.error || activeRes.error || archivedRes.error || invRes.error
         if (firstError) {
           setErrorMsg('Could not reach Supabase — check your .env values.')
           return
         }
 
-        setCounts({
-          total: totalRes.count,
-          active: activeRes.count,
-          archived: archivedRes.count,
-        })
+        setCounts({ total: totalRes.count, active: activeRes.count, archived: archivedRes.count })
+
+        const invRows = (invRes.data ?? []).filter((r) => r.product)
+        setHasAnyStock(invRows.length > 0)
+        setInventoryValue(invRows.reduce((sum, r) => sum + Number(r.inventory_value ?? 0), 0))
+
+        const lowStock = invRows
+          .filter((r) => r.current_stock <= 0 || (r.product.reorder_point && r.current_stock <= r.product.reorder_point))
+          .sort((a, b) => a.current_stock - b.current_stock)
+          .slice(0, 5)
+        setAlerts(lowStock)
       } catch {
         setErrorMsg('Could not reach Supabase — check your .env values.')
       }
     }
-    loadCounts()
+    loadAll()
   }, [])
 
   return (
@@ -51,12 +61,31 @@ export default function Dashboard() {
         <Kpi label="Total products" value={counts.total} />
         <Kpi label="Active products" value={counts.active} />
         <Kpi label="Archived" value={counts.archived} />
-        <Kpi label="Inventory value" value={null} note="Needs Purchases module" />
+        <Kpi
+          label="Inventory value"
+          value={hasAnyStock ? inventoryValue.toFixed(2) : null}
+          note={hasAnyStock ? null : 'Needs a posted purchase'}
+        />
       </div>
 
       <div className="mt-6 grid grid-cols-2 gap-4">
         <Panel title="Stock alerts">
-          <EmptyRow text="No purchases have been posted yet, so there's nothing to check against reorder points." />
+          {!hasAnyStock ? (
+            <EmptyRow text="No purchases have been posted yet, so there's nothing to check against reorder points." />
+          ) : alerts.length === 0 ? (
+            <EmptyRow text="Everything is above its reorder point right now." />
+          ) : (
+            <div className="space-y-2">
+              {alerts.map((r) => (
+                <div key={r.product_id} className="flex items-center justify-between text-sm">
+                  <span>{r.product.name}</span>
+                  <StatusChip tone={r.current_stock <= 0 ? 'critical' : 'attention'}>
+                    {r.current_stock <= 0 ? 'out of stock' : `${r.current_stock} left`}
+                  </StatusChip>
+                </div>
+              ))}
+            </div>
+          )}
         </Panel>
         <Panel title="Purchasing recommendations (Thursday)">
           <EmptyRow text="Recommendations need at least a few weeks of sales history to compute — nothing to show until Phase 2/3." />

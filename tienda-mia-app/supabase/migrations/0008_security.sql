@@ -30,6 +30,7 @@ begin
   ])
   loop
     execute format('alter table %I enable row level security', t);
+    execute format('drop policy if exists allow_all_%I on %I', t, t);
     execute format(
       'create policy allow_all_%I on %I for all using (true) with check (true)', t, t
     );
