@@ -6,6 +6,7 @@ import {
   Boxes,
   Receipt,
   ChefHat,
+  ClipboardEdit,
   Settings as SettingsIcon,
 } from 'lucide-react'
 
@@ -16,6 +17,7 @@ const NAV_ITEMS = [
   { to: '/inventory', label: 'Inventory', icon: Boxes },
   { to: '/sales', label: 'Sales', icon: Receipt },
   { to: '/kitchen', label: 'Kitchen', icon: ChefHat },
+  { to: '/adjustments', label: 'Adjustments', icon: ClipboardEdit },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 
@@ -47,7 +49,7 @@ export default function Layout() {
           ))}
         </nav>
         <div className="border-t border-white/10 px-5 py-4 text-xs text-[var(--color-paper)]/50">
-          Phase 1 — Foundation
+          Core modules live — Returns/Waste &amp; Analytics next
         </div>
       </aside>
 
