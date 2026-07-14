@@ -3,6 +3,7 @@ import { Plus, Trash2, Check, Ban, AlertTriangle } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
+import ProductPicker from '../components/ProductPicker'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
 
@@ -44,7 +45,7 @@ export default function Sales() {
   async function loadProducts() {
     const { data, error } = await supabase
       .from('products')
-      .select('id, sku, name, unit, selling_price')
+      .select('id, sku, name, unit, selling_price, barcode')
       .eq('status', 'active')
       .order('name')
     if (!error) setProducts(data ?? [])
@@ -465,17 +466,11 @@ export default function Sales() {
 
             <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
               <Field label="Product" required>
-                <select
-                  required
+                <ProductPicker
+                  products={products}
                   value={lineForm.product_id}
-                  onChange={(e) => onProductPick(e.target.value)}
-                  className="input"
-                >
-                  <option value="">Select a product…</option>
-                  {products.map((p) => (
-                    <option key={p.id} value={p.id}>{p.sku} — {p.name}</option>
-                  ))}
-                </select>
+                  onChange={onProductPick}
+                />
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Quantity" required>

@@ -3,6 +3,7 @@ import { Plus, Trash2, Send, Ban } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
+import ProductPicker from '../components/ProductPicker'
 
 const EMPTY_HEADER = { purchase_date: today(), invoice_number: '', supplier: '' }
 const EMPTY_LINE = { product_id: '', quantity: '', unit_cost: '', expiration_date: '' }
@@ -55,7 +56,7 @@ export default function Purchases() {
   async function loadProducts() {
     const { data, error } = await supabase
       .from('products')
-      .select('id, sku, name, unit')
+      .select('id, sku, name, unit, barcode')
       .eq('status', 'active')
       .order('name')
     if (!error) setProducts(data ?? [])
@@ -94,7 +95,7 @@ export default function Purchases() {
 
     // Drop it straight into the product list and select it for this line —
     // no need to leave the purchase, or wait on a full Products reload.
-    setProducts((prev) => [...prev, { id: data.id, sku: data.sku, name: data.name, unit: data.unit }].sort((a, b) => a.name.localeCompare(b.name)))
+    setProducts((prev) => [...prev, { id: data.id, sku: data.sku, name: data.name, unit: data.unit, barcode: data.barcode }].sort((a, b) => a.name.localeCompare(b.name)))
     setLineForm({ ...lineForm, product_id: data.id })
     setQuickAddOpen(false)
   }
@@ -424,19 +425,13 @@ export default function Purchases() {
               <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
                 <Field label="Product" required>
                   <div className="flex gap-2">
-                    <select
-                      required
-                      value={lineForm.product_id}
-                      onChange={(e) => setLineForm({ ...lineForm, product_id: e.target.value })}
-                      className="input"
-                    >
-                      <option value="">Select a product…</option>
-                      {products.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.sku} — {p.name}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="flex-1">
+                      <ProductPicker
+                        products={products}
+                        value={lineForm.product_id}
+                        onChange={(id) => setLineForm({ ...lineForm, product_id: id })}
+                      />
+                    </div>
                     <button
                       type="button"
                       onClick={openQuickAdd}
