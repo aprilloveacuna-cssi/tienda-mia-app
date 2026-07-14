@@ -78,8 +78,8 @@ export default function Purchases() {
       .from('products')
       .insert({
         barcode: quickAddForm.barcode.trim(),
-        name: quickAddForm.name.trim(),
-        unit: quickAddForm.unit.trim() || null,
+        name: quickAddForm.name.trim().toUpperCase(),
+        unit: quickAddForm.unit.trim() ? quickAddForm.unit.trim().toUpperCase() : null,
         selling_price: quickAddForm.selling_price === '' ? 0 : Number(quickAddForm.selling_price),
       })
       .select()

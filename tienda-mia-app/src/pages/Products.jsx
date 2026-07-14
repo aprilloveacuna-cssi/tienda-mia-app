@@ -66,6 +66,14 @@ function downloadFile(filename, content, mime) {
   URL.revokeObjectURL(url)
 }
 
+// Name/category/brand/etc. get forced to caps for consistency across the
+// catalog — matches the convention already used in the spreadsheet this
+// replaced. Barcode and Notes are left as typed (an identifier and free text,
+// not descriptive labels).
+function upper(v) {
+  return v ? v.toUpperCase() : v
+}
+
 const EMPTY_FORM = {
   barcode: '',
   name: '',
@@ -184,12 +192,12 @@ export default function Products() {
 
     const payload = {
       barcode: form.barcode.trim(),
-      name: form.name.trim(),
-      brand: form.brand.trim() || null,
-      category: form.category || null,
-      business_unit: form.business_unit || null,
-      product_type: form.product_type || null,
-      unit: form.unit || null,
+      name: upper(form.name.trim()),
+      brand: upper(form.brand.trim()) || null,
+      category: upper(form.category) || null,
+      business_unit: upper(form.business_unit) || null,
+      product_type: upper(form.product_type) || null,
+      unit: upper(form.unit) || null,
       selling_price: form.selling_price === '' ? 0 : Number(form.selling_price),
       minimum_stock: form.minimum_stock === '' ? 0 : Number(form.minimum_stock),
       reorder_point: form.reorder_point === '' ? 0 : Number(form.reorder_point),
@@ -307,12 +315,12 @@ export default function Products() {
 
           valid.push({
             barcode,
-            name,
-            brand: obj.brand || null,
-            category: obj.category || null,
-            business_unit: obj.business_unit || null,
-            product_type: obj.product_type || null,
-            unit: obj.unit || null,
+            name: upper(name),
+            brand: upper(obj.brand) || null,
+            category: upper(obj.category) || null,
+            business_unit: upper(obj.business_unit) || null,
+            product_type: upper(obj.product_type) || null,
+            unit: upper(obj.unit) || null,
             selling_price: obj.selling_price ? Number(obj.selling_price) || 0 : 0,
             minimum_stock: obj.minimum_stock ? Number(obj.minimum_stock) || 0 : 0,
             reorder_point: obj.reorder_point ? Number(obj.reorder_point) || 0 : 0,
@@ -333,6 +341,24 @@ export default function Products() {
     reader.readAsText(file)
   }
 
+  async function syncListsFromImport(rows) {
+    const buckets = { Category: new Set(), BusinessUnit: new Set(), ProductType: new Set(), Unit: new Set() }
+    for (const r of rows) {
+      if (r.category) buckets.Category.add(r.category)
+      if (r.business_unit) buckets.BusinessUnit.add(r.business_unit)
+      if (r.product_type) buckets.ProductType.add(r.product_type)
+      if (r.unit) buckets.Unit.add(r.unit)
+    }
+    const newListRows = []
+    for (const [listType, values] of Object.entries(buckets)) {
+      for (const value of values) newListRows.push({ list_type: listType, value })
+    }
+    if (newListRows.length === 0) return
+    // ignoreDuplicates: leaves any list value that already exists untouched
+    // (in case someone had deliberately deactivated it), only adds genuinely new ones.
+    await supabase.from('lists').upsert(newListRows, { onConflict: 'list_type,value', ignoreDuplicates: true })
+  }
+
   async function handleConfirmImport() {
     setImporting(true)
     let inserted = 0
@@ -345,9 +371,11 @@ export default function Products() {
         inserted++
       }
     }
+    await syncListsFromImport(importValid)
     setImporting(false)
     setImportResult({ inserted, failed })
     loadProducts()
+    loadLists() // pick up any new Category/Business Unit/Product Type/Unit values right away
   }
 
   return (
