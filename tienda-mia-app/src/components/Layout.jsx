@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard,
   Package,
@@ -11,6 +11,7 @@ import {
   FileText,
   Settings as SettingsIcon,
 } from 'lucide-react'
+import ErrorBoundary from './ErrorBoundary'
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
 ]
 
 export default function Layout() {
+  const location = useLocation()
   return (
     <div className="flex h-screen bg-[var(--color-paper)] text-[var(--color-ink)]">
       <aside className="flex w-60 flex-col bg-[var(--color-ink)] text-[var(--color-paper)]">
@@ -67,7 +69,9 @@ export default function Layout() {
           </div>
         </header>
         <main className="flex-1 overflow-y-auto p-6">
-          <Outlet />
+          <ErrorBoundary key={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

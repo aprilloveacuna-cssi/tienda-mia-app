@@ -207,10 +207,17 @@ const REPORTS = {
   },
 }
 
+// Falls back to a plain row[key] lookup when a column didn't define its own
+// value function — every column needs SOME way to produce a value, this
+// guarantees it instead of assuming each column definition remembered to.
+function getValue(column, row) {
+  return column.value ? column.value(row) : row[column.key]
+}
+
 function toCsv(columns, rows) {
   const header = columns.map((c) => `"${c.label.replace(/"/g, '""')}"`).join(',')
   const lines = rows.map((r) =>
-    columns.map((c) => `"${String(c.value(r) ?? '').replace(/"/g, '""')}"`).join(',')
+    columns.map((c) => `"${String(getValue(c, r) ?? '').replace(/"/g, '""')}"`).join(',')
   )
   return [header, ...lines].join('\n')
 }
@@ -339,7 +346,7 @@ export default function Reports() {
                 <tr key={i} className="border-b border-[var(--color-line)] last:border-0">
                   {report.columns.map((c) => (
                     <td key={c.key} className="px-4 py-3">
-                      {c.render ? c.render(row) : c.value(row)}
+                      {c.render ? c.render(row) : getValue(c, row)}
                     </td>
                   ))}
                 </tr>
