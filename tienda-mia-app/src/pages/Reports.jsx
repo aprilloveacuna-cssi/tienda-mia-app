@@ -305,10 +305,19 @@ export default function Reports() {
   const isMatrix = reportKey === 'dailyMatrix'
   const report = isMatrix ? null : REPORTS[reportKey]
 
+  function selectReport(key) {
+    // Reset rows/loading in the SAME event as the tab switch — doing this only
+    // inside the effect left a one-frame window where the new report's columns
+    // rendered against the previous report's leftover rows, which is what crashed.
+    setRows([])
+    setLoading(true)
+    setErrorMsg('')
+    setReportKey(key)
+  }
+
   useEffect(() => {
     if (isMatrix) return
     let cancelled = false
-    setRows([]) // clear stale rows from the previous report immediately, before fetching
     async function load() {
       setLoading(true)
       setErrorMsg('')
@@ -375,7 +384,7 @@ export default function Reports() {
         {Object.entries(REPORTS).map(([key, r]) => (
           <button
             key={key}
-            onClick={() => setReportKey(key)}
+            onClick={() => selectReport(key)}
             className={`px-3 py-2 text-sm font-medium ${
               reportKey === key ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
             }`}
@@ -384,7 +393,7 @@ export default function Reports() {
           </button>
         ))}
         <button
-          onClick={() => setReportKey('dailyMatrix')}
+          onClick={() => selectReport('dailyMatrix')}
           className={`px-3 py-2 text-sm font-medium ${
             isMatrix ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
           }`}
@@ -483,9 +492,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
             .order('name'),
           supabase
             .from('sale_lines')
-            .select('product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)')
-            .gte('sale_date', dateFrom, { foreignTable: 'sales' })
-            .lte('sale_date', dateTo, { foreignTable: 'sales' }),
+            .select('product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)'),
           supabase
             .from('waste')
             .select('product_id, quantity, waste_date')
@@ -497,7 +504,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         if (saleLinesRes.error) throw saleLinesRes.error
         if (wasteRes.error) throw wasteRes.error
 
-        const saleLines = saleLinesRes.data ?? []
+        const saleLines = (saleLinesRes.data ?? []).filter((l) => withinRange(l.sale?.sale_date, dateFrom, dateTo))
 
         // Detect up to 2 terminal labels actually in use, most frequent first.
         const terminalCounts = {}
