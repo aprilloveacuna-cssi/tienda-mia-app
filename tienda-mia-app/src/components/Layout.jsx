@@ -9,6 +9,7 @@ import {
   ClipboardEdit,
   RotateCcw,
   FileText,
+  TrendingUp,
   Settings as SettingsIcon,
 } from 'lucide-react'
 import ErrorBoundary from './ErrorBoundary'
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { to: '/adjustments', label: 'Adjustments', icon: ClipboardEdit },
   { to: '/returns-waste', label: 'Returns & Waste', icon: RotateCcw },
   { to: '/reports', label: 'Reports', icon: FileText },
+  { to: '/analytics', label: 'Analytics', icon: TrendingUp },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 
@@ -55,7 +57,7 @@ export default function Layout() {
           ))}
         </nav>
         <div className="border-t border-white/10 px-5 py-4 text-xs text-[var(--color-paper)]/50">
-          Core modules live — Analytics next
+          Full spec built — Analytics fills in as sales accumulate
         </div>
       </aside>
 

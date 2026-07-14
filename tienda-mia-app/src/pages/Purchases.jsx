@@ -6,6 +6,7 @@ import StatusChip from '../components/StatusChip'
 
 const EMPTY_HEADER = { purchase_date: today(), invoice_number: '', supplier: '' }
 const EMPTY_LINE = { product_id: '', quantity: '', unit_cost: '', expiration_date: '' }
+const EMPTY_QUICK_PRODUCT = { barcode: '', name: '', unit: '', selling_price: '' }
 
 function today() {
   return new Date().toISOString().slice(0, 10)
@@ -30,6 +31,11 @@ export default function Purchases() {
   const [lineForm, setLineForm] = useState(EMPTY_LINE)
   const [saving, setSaving] = useState(false)
 
+  const [quickAddOpen, setQuickAddOpen] = useState(false)
+  const [quickAddForm, setQuickAddForm] = useState(EMPTY_QUICK_PRODUCT)
+  const [quickAddSaving, setQuickAddSaving] = useState(false)
+  const [quickAddError, setQuickAddError] = useState('')
+
   async function loadPurchases() {
     setLoading(true)
     setErrorMsg('')
@@ -53,6 +59,44 @@ export default function Purchases() {
       .eq('status', 'active')
       .order('name')
     if (!error) setProducts(data ?? [])
+  }
+
+  function openQuickAdd() {
+    setQuickAddForm(EMPTY_QUICK_PRODUCT)
+    setQuickAddError('')
+    setQuickAddOpen(true)
+  }
+
+  async function handleQuickAddProduct(e) {
+    e.preventDefault()
+    if (!quickAddForm.barcode.trim() || !quickAddForm.name.trim()) return
+    setQuickAddSaving(true)
+    setQuickAddError('')
+
+    const { data, error } = await supabase
+      .from('products')
+      .insert({
+        barcode: quickAddForm.barcode.trim(),
+        name: quickAddForm.name.trim(),
+        unit: quickAddForm.unit.trim() || null,
+        selling_price: quickAddForm.selling_price === '' ? 0 : Number(quickAddForm.selling_price),
+      })
+      .select()
+      .single()
+
+    setQuickAddSaving(false)
+    if (error) {
+      setQuickAddError(
+        error.code === '23505' ? 'That barcode is already assigned to another product.' : error.message
+      )
+      return
+    }
+
+    // Drop it straight into the product list and select it for this line —
+    // no need to leave the purchase, or wait on a full Products reload.
+    setProducts((prev) => [...prev, { id: data.id, sku: data.sku, name: data.name, unit: data.unit }].sort((a, b) => a.name.localeCompare(b.name)))
+    setLineForm({ ...lineForm, product_id: data.id })
+    setQuickAddOpen(false)
   }
 
   async function loadLines(purchaseId) {
@@ -379,20 +423,93 @@ export default function Purchases() {
             {isDraft && (
               <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
                 <Field label="Product" required>
-                  <select
-                    required
-                    value={lineForm.product_id}
-                    onChange={(e) => setLineForm({ ...lineForm, product_id: e.target.value })}
-                    className="input"
-                  >
-                    <option value="">Select a product…</option>
-                    {products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.sku} — {p.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex gap-2">
+                    <select
+                      required
+                      value={lineForm.product_id}
+                      onChange={(e) => setLineForm({ ...lineForm, product_id: e.target.value })}
+                      className="input"
+                    >
+                      <option value="">Select a product…</option>
+                      {products.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.sku} — {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={openQuickAdd}
+                      className="whitespace-nowrap rounded-md border border-[var(--color-line)] px-3 text-sm font-medium hover:bg-[var(--color-paper)]"
+                    >
+                      + New
+                    </button>
+                  </div>
                 </Field>
+
+                {quickAddOpen && (
+                  <div className="space-y-3 rounded-md bg-[var(--color-paper)] p-3">
+                    <div className="text-xs font-medium text-[var(--color-ink-soft)]">
+                      Quick add — just enough to receive this purchase. Fill in the rest later on the Products page.
+                    </div>
+                    {quickAddError && (
+                      <div className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                        {quickAddError}
+                      </div>
+                    )}
+                    <Field label="Barcode" required>
+                      <input
+                        required
+                        value={quickAddForm.barcode}
+                        onChange={(e) => setQuickAddForm({ ...quickAddForm, barcode: e.target.value })}
+                        className="input"
+                      />
+                    </Field>
+                    <Field label="Product name" required>
+                      <input
+                        required
+                        value={quickAddForm.name}
+                        onChange={(e) => setQuickAddForm({ ...quickAddForm, name: e.target.value })}
+                        className="input"
+                      />
+                    </Field>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Unit">
+                        <input
+                          value={quickAddForm.unit}
+                          onChange={(e) => setQuickAddForm({ ...quickAddForm, unit: e.target.value })}
+                          className="input"
+                          placeholder="pcs"
+                        />
+                      </Field>
+                      <Field label="Selling price">
+                        <input
+                          type="number" step="0.01" min="0"
+                          value={quickAddForm.selling_price}
+                          onChange={(e) => setQuickAddForm({ ...quickAddForm, selling_price: e.target.value })}
+                          className="input"
+                        />
+                      </Field>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleQuickAddProduct}
+                        disabled={quickAddSaving}
+                        className="flex-1 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        {quickAddSaving ? 'Creating…' : 'Create & use'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setQuickAddOpen(false)}
+                        className="rounded-md border border-[var(--color-line)] px-3 text-sm font-medium"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-3">
                   <Field label="Quantity" required>
                     <input
