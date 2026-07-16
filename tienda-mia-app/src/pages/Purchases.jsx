@@ -209,8 +209,12 @@ export default function Purchases() {
 
   function handleDownloadLineTemplate() {
     const headers = ['Barcode', 'Quantity', 'Unit Cost', 'Expiration Date']
-    const example = ['4800123456789', '24', '42.50', '2026-12-31']
-    const csv = [headers, example].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    // Two rows share the same barcode on purpose — shows this delivery had two
+    // batches of the same product with different expiry dates, which is fine:
+    // each row becomes its own line, and its own batch, when the purchase posts.
+    const example1 = ['4800123456789', '24', '42.50', '2026-12-31']
+    const example2 = ['4800123456789', '12', '42.50', '2027-01-15']
+    const csv = [headers, example1, example2].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
     downloadFile('purchase-lines-template.csv', csv, 'text/csv;charset=utf-8;')
   }
 
@@ -504,6 +508,7 @@ export default function Purchases() {
                     <th className="px-3 py-2">Product</th>
                     <th className="px-3 py-2">Qty</th>
                     <th className="px-3 py-2">Cost</th>
+                    <th className="px-3 py-2">Expiry</th>
                     <th className="px-3 py-2">Total</th>
                     {isDraft && <th className="px-3 py-2" />}
                   </tr>
@@ -511,7 +516,7 @@ export default function Purchases() {
                 <tbody>
                   {lines.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-3 py-5 text-center text-[var(--color-ink-soft)]">
+                      <td colSpan={6} className="px-3 py-5 text-center text-[var(--color-ink-soft)]">
                         No lines yet.
                       </td>
                     </tr>
@@ -521,6 +526,7 @@ export default function Purchases() {
                       <td className="px-3 py-2">{l.product?.name ?? '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.product?.unit}</td>
                       <td className="px-3 py-2">{Number(l.unit_cost).toFixed(2)}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.expiration_date || '—'}</td>
                       <td className="px-3 py-2">{Number(l.total_cost).toFixed(2)}</td>
                       {isDraft && (
                         <td className="px-3 py-2">
@@ -538,7 +544,7 @@ export default function Purchases() {
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-[var(--color-line)] font-medium">
-                    <td colSpan={3} className="px-3 py-2 text-right text-[var(--color-ink-soft)]">
+                    <td colSpan={4} className="px-3 py-2 text-right text-[var(--color-ink-soft)]">
                       Total
                     </td>
                     <td className="px-3 py-2">{runningTotal.toFixed(2)}</td>
@@ -766,6 +772,7 @@ export default function Purchases() {
                   {lineImportValid.slice(0, 5).map((r, i) => (
                     <div key={i} className="rounded-md border border-[var(--color-line)] px-2.5 py-1.5 text-xs">
                       <span className="font-medium">{r.product_name}</span> — {r.quantity} {r.unit} @ {r.unit_cost.toFixed(2)}
+                      {r.expiration_date && <span className="text-[var(--color-ink-soft)]"> — exp {r.expiration_date}</span>}
                     </div>
                   ))}
                   {lineImportValid.length > 5 && (
