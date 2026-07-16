@@ -3,6 +3,8 @@ import { Plus, Search, Archive, RotateCcw, Pencil, Download, Upload, FileDown } 
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
+import SortableTh from '../components/SortableTh'
+import { useSort, sortRows } from '../lib/sort'
 
 // Maps flexible spreadsheet header names to the actual product columns, so an
 // import doesn't fail just because someone wrote "Price" instead of "Selling Price".
@@ -159,6 +161,13 @@ export default function Products() {
         p.sku?.toLowerCase().includes(q)
     )
   }, [products, search])
+
+  const { sortKey, sortDir, toggleSort } = useSort('name')
+  function sortAccessor(row, key) {
+    if (key === 'price') return Number(row.selling_price ?? 0)
+    return row[key]
+  }
+  const sorted = sortRows(filtered, sortKey, sortDir, sortAccessor)
 
   function openAddPanel() {
     setEditingId(null)
@@ -440,13 +449,13 @@ export default function Products() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
-              <th className="px-4 py-3">SKU</th>
-              <th className="px-4 py-3">Barcode</th>
-              <th className="px-4 py-3">Name</th>
-              <th className="px-4 py-3">Category</th>
-              <th className="px-4 py-3">Unit</th>
-              <th className="px-4 py-3">Price</th>
-              <th className="px-4 py-3">Status</th>
+              <SortableTh label="SKU" sortKey="sku" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Barcode" sortKey="barcode" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Name" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Category" sortKey="category" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Unit" sortKey="unit" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Price" sortKey="price" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <th className="px-4 py-3" />
             </tr>
           </thead>
@@ -459,7 +468,7 @@ export default function Products() {
               </tr>
             )}
 
-            {!loading && filtered.length === 0 && (
+            {!loading && sorted.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   {products.length === 0
@@ -469,7 +478,7 @@ export default function Products() {
               </tr>
             )}
 
-            {filtered.map((p) => (
+            {sorted.map((p) => (
               <tr key={p.id} className="border-b border-[var(--color-line)] last:border-0">
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.sku}</td>
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.barcode}</td>

@@ -3,11 +3,31 @@ import { Plus, RotateCcw, Trash } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
+import SortableTh from '../components/SortableTh'
+import { useSort, sortRows } from '../lib/sort'
 
 export default function ReturnsWaste() {
   const [tab, setTab] = useState('returns')
   const [returns, setReturns] = useState([])
   const [wastes, setWastes] = useState([])
+
+  const { sortKey: returnSortKey, sortDir: returnSortDir, toggleSort: toggleReturnSort } = useSort('return_date', 'desc')
+  function returnSortAccessor(row, key) {
+    if (key === 'product') return row.product?.name
+    if (key === 'quantity') return Number(row.quantity ?? 0)
+    if (key === 'restock') return row.restock ? 1 : 0
+    return row[key]
+  }
+  const sortedReturns = sortRows(returns, returnSortKey, returnSortDir, returnSortAccessor)
+
+  const { sortKey: wasteSortKey, sortDir: wasteSortDir, toggleSort: toggleWasteSort } = useSort('waste_date', 'desc')
+  function wasteSortAccessor(row, key) {
+    if (key === 'product') return row.product?.name
+    if (key === 'quantity') return Number(row.quantity ?? 0)
+    if (key === 'disposed_by') return row.disposed_by ?? ''
+    return row[key]
+  }
+  const sortedWastes = sortRows(wastes, wasteSortKey, wasteSortDir, wasteSortAccessor)
   const [products, setProducts] = useState([])
   const [returnReasons, setReturnReasons] = useState([])
   const [wasteReasons, setWasteReasons] = useState([])
@@ -261,21 +281,21 @@ export default function ReturnsWaste() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
               <tr>
-                <th className="px-4 py-3">Return #</th>
-                <th className="px-4 py-3">Date</th>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Product</th>
-                <th className="px-4 py-3">Qty</th>
+                <SortableTh label="Return #" sortKey="return_number" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
+                <SortableTh label="Date" sortKey="return_date" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
+                <SortableTh label="Type" sortKey="return_type" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
+                <SortableTh label="Product" sortKey="product" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
+                <SortableTh label="Qty" sortKey="quantity" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
                 <th className="px-4 py-3">Reason</th>
-                <th className="px-4 py-3">Restocked</th>
+                <SortableTh label="Restocked" sortKey="restock" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
               </tr>
             </thead>
             <tbody>
               {loading && <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
-              {!loading && returns.length === 0 && (
+              {!loading && sortedReturns.length === 0 && (
                 <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No returns recorded yet.</td></tr>
               )}
-              {returns.map((r) => (
+              {sortedReturns.map((r) => (
                 <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{r.return_number}</td>
                   <td className="px-4 py-3">{r.return_date}</td>
@@ -298,21 +318,21 @@ export default function ReturnsWaste() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
               <tr>
-                <th className="px-4 py-3">Waste #</th>
-                <th className="px-4 py-3">Date</th>
-                <th className="px-4 py-3">Product</th>
+                <SortableTh label="Waste #" sortKey="waste_number" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
+                <SortableTh label="Date" sortKey="waste_date" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
+                <SortableTh label="Product" sortKey="product" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <th className="px-4 py-3">Batch</th>
-                <th className="px-4 py-3">Qty</th>
+                <SortableTh label="Qty" sortKey="quantity" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <th className="px-4 py-3">Reason</th>
-                <th className="px-4 py-3">Disposed by</th>
+                <SortableTh label="Disposed by" sortKey="disposed_by" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
               </tr>
             </thead>
             <tbody>
               {loading && <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
-              {!loading && wastes.length === 0 && (
+              {!loading && sortedWastes.length === 0 && (
                 <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No waste recorded yet.</td></tr>
               )}
-              {wastes.map((w) => (
+              {sortedWastes.map((w) => (
                 <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{w.waste_number}</td>
                   <td className="px-4 py-3">{w.waste_date}</td>

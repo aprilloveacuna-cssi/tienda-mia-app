@@ -2,6 +2,8 @@ import { useEffect, useState, Fragment } from 'react'
 import { Printer, Download } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import StatusChip from '../components/StatusChip'
+import SortableTh from '../components/SortableTh'
+import { useSort, sortRows } from '../lib/sort'
 
 function daysUntil(dateStr) {
   if (!dateStr) return null
@@ -81,6 +83,65 @@ function downloadFile(filename, content, mime) {
 
 // ---------- Standard (flat-table) reports ----------
 const REPORTS = {
+  dailySales: {
+    label: 'Daily Sales Summary',
+    description: 'One row per day — transactions, quantity, revenue, cost, and profit. Voided sales excluded.',
+    dateField: (r) => r.date,
+    async fetch() {
+      const { data, error } = await supabase
+        .from('sale_lines')
+        .select('sale_id, quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_date, status)')
+      if (error) throw error
+      const byDay = {}
+      for (const l of data ?? []) {
+        if (l.sale?.status === 'voided') continue
+        const day = toDateOnly(l.sale?.sale_date)
+        if (!day) continue
+        byDay[day] = byDay[day] ?? { date: day, transactions: new Set(), qty: 0, revenue: 0, cost: 0, profit: 0 }
+        byDay[day].transactions.add(l.sale_id)
+        byDay[day].qty += Number(l.quantity)
+        byDay[day].revenue += Number(l.quantity) * Number(l.unit_price)
+        byDay[day].cost += Number(l.fifo_cost)
+        byDay[day].profit += Number(l.gross_profit)
+      }
+      return Object.values(byDay)
+        .map((d) => ({ ...d, transactions: d.transactions.size }))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+    },
+    columns: [
+      { key: 'date', label: 'Date' },
+      { key: 'transactions', label: 'Transactions' },
+      { key: 'qty', label: 'Qty sold', value: (r) => r.qty },
+      { key: 'revenue', label: 'Revenue', value: (r) => r.revenue.toFixed(2) },
+      { key: 'cost', label: 'FIFO cost', value: (r) => r.cost.toFixed(2) },
+      { key: 'profit', label: 'Gross profit', value: (r) => r.profit.toFixed(2) },
+    ],
+  },
+
+  dailyPurchases: {
+    label: 'Daily Purchases Summary',
+    description: 'One row per day — number of purchases posted and total cost received. Drafts and voided excluded.',
+    dateField: (r) => r.date,
+    async fetch() {
+      const { data, error } = await supabase.from('purchases').select('purchase_date, total_cost, status')
+      if (error) throw error
+      const byDay = {}
+      for (const p of data ?? []) {
+        if (p.status !== 'posted') continue
+        const day = p.purchase_date
+        byDay[day] = byDay[day] ?? { date: day, count: 0, totalCost: 0 }
+        byDay[day].count += 1
+        byDay[day].totalCost += Number(p.total_cost)
+      }
+      return Object.values(byDay).sort((a, b) => (a.date < b.date ? 1 : -1))
+    },
+    columns: [
+      { key: 'date', label: 'Date' },
+      { key: 'count', label: '# Purchases' },
+      { key: 'totalCost', label: 'Total cost', value: (r) => r.totalCost.toFixed(2) },
+    ],
+  },
+
   inventory: {
     label: 'Inventory',
     description: 'Current stock and value for every active product.',
@@ -305,6 +366,12 @@ export default function Reports() {
   const isMatrix = reportKey === 'dailyMatrix'
   const report = isMatrix ? null : REPORTS[reportKey]
 
+  const { sortKey, sortDir, toggleSort } = useSort(null)
+  function reportSortAccessor(row, key) {
+    const col = report?.columns.find((c) => c.key === key)
+    return col ? getValue(col, row) : row[key]
+  }
+
   function selectReport(key) {
     // Reset rows/loading in the SAME event as the tab switch — doing this only
     // inside the effect left a one-frame window where the new report's columns
@@ -337,11 +404,12 @@ export default function Reports() {
   const filteredRows = report?.dateField
     ? rows.filter((r) => withinRange(report.dateField(r), dateFrom, dateTo))
     : rows
+  const sortedFilteredRows = report ? sortRows(filteredRows, sortKey, sortDir, reportSortAccessor) : filteredRows
 
   const generatedAt = new Date().toLocaleString()
 
   function exportCsv() {
-    const csv = toCsv(report.columns, filteredRows)
+    const csv = toCsv(report.columns, sortedFilteredRows)
     downloadFile(`${reportKey}-report.csv`, csv, 'text/csv;charset=utf-8;')
   }
 
@@ -439,7 +507,7 @@ export default function Reports() {
               <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
                 <tr>
                   {report.columns.map((c) => (
-                    <th key={c.key} className="px-4 py-3">{c.label}</th>
+                    <SortableTh key={c.key} label={c.label} sortKey={c.key} activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
                   ))}
                 </tr>
               </thead>
@@ -447,10 +515,10 @@ export default function Reports() {
                 {loading && (
                   <tr><td colSpan={report.columns.length} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
                 )}
-                {!loading && filteredRows.length === 0 && (
+                {!loading && sortedFilteredRows.length === 0 && (
                   <tr><td colSpan={report.columns.length} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No data for this report or date range.</td></tr>
                 )}
-                {!loading && filteredRows.map((row, i) => (
+                {!loading && sortedFilteredRows.map((row, i) => (
                   <tr key={i} className="border-b border-[var(--color-line)] last:border-0">
                     {report.columns.map((c) => (
                       <td key={c.key} className="px-4 py-3">

@@ -1,9 +1,19 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Plus, Trash2, Send, Ban } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Plus, Trash2, Send, Ban, Upload, FileDown } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import ProductPicker from '../components/ProductPicker'
+import SortableTh from '../components/SortableTh'
+import { useSort, sortRows } from '../lib/sort'
+import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
+
+const LINE_HEADER_ALIASES = {
+  barcode: 'barcode', sku: 'sku',
+  quantity: 'quantity', qty: 'quantity',
+  unitcost: 'unit_cost', cost: 'unit_cost', unitprice: 'unit_cost',
+  expirationdate: 'expiration_date', expiry: 'expiration_date', expdate: 'expiration_date',
+}
 
 const EMPTY_HEADER = { purchase_date: today(), invoice_number: '', supplier: '' }
 const EMPTY_LINE = { product_id: '', quantity: '', unit_cost: '', expiration_date: '' }
@@ -21,6 +31,13 @@ function statusTone(status) {
 
 export default function Purchases() {
   const [purchases, setPurchases] = useState([])
+
+  const { sortKey: purchaseSortKey, sortDir: purchaseSortDir, toggleSort: togglePurchaseSort } = useSort('purchase_date', 'desc')
+  function purchaseSortAccessor(row, key) {
+    if (key === 'total_cost') return Number(row.total_cost ?? 0)
+    return row[key]
+  }
+  const sortedPurchases = sortRows(purchases, purchaseSortKey, purchaseSortDir, purchaseSortAccessor)
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -31,6 +48,13 @@ export default function Purchases() {
   const [headerForm, setHeaderForm] = useState(EMPTY_HEADER)
   const [lineForm, setLineForm] = useState(EMPTY_LINE)
   const [saving, setSaving] = useState(false)
+
+  const lineFileInputRef = useRef(null)
+  const [lineImportPanelOpen, setLineImportPanelOpen] = useState(false)
+  const [lineImportValid, setLineImportValid] = useState([])
+  const [lineImportSkipped, setLineImportSkipped] = useState([])
+  const [lineImporting, setLineImporting] = useState(false)
+  const [lineImportResult, setLineImportResult] = useState(null)
 
   const [quickAddOpen, setQuickAddOpen] = useState(false)
   const [quickAddForm, setQuickAddForm] = useState(EMPTY_QUICK_PRODUCT)
@@ -183,6 +207,109 @@ export default function Purchases() {
     await loadLines(selected.id)
   }
 
+  function handleDownloadLineTemplate() {
+    const headers = ['Barcode', 'Quantity', 'Unit Cost', 'Expiration Date']
+    const example = ['4800123456789', '24', '42.50', '2026-12-31']
+    const csv = [headers, example].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile('purchase-lines-template.csv', csv, 'text/csv;charset=utf-8;')
+  }
+
+  function handleLineImportClick() {
+    lineFileInputRef.current?.click()
+  }
+
+  function handleLineFileChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const rows = parseCsv(String(reader.result))
+        if (rows.length < 2) {
+          setErrorMsg('That file has no data rows.')
+          return
+        }
+        const headerRow = rows[0].map((h) => h.trim())
+        const canonicalKeys = headerRow.map((h) => LINE_HEADER_ALIASES[normalizeHeader(h)] ?? null)
+
+        const valid = []
+        const skipped = []
+
+        rows.slice(1).forEach((r, idx) => {
+          const rowNum = idx + 2
+          const obj = {}
+          canonicalKeys.forEach((key, i) => {
+            if (key) obj[key] = (r[i] ?? '').trim()
+          })
+
+          const product = obj.barcode
+            ? products.find((p) => p.barcode === obj.barcode)
+            : obj.sku
+              ? products.find((p) => p.sku === obj.sku)
+              : null
+
+          if (!product) {
+            skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+            return
+          }
+          const quantity = Number(obj.quantity)
+          const unitCost = Number(obj.unit_cost)
+          if (!quantity || quantity <= 0) {
+            skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
+            return
+          }
+          if (isNaN(unitCost) || unitCost < 0) {
+            skipped.push({ rowNum, reason: 'Missing or invalid unit cost' })
+            return
+          }
+
+          valid.push({
+            product_id: product.id,
+            product_name: product.name,
+            unit: product.unit,
+            quantity,
+            unit_cost: unitCost,
+            expiration_date: obj.expiration_date || null,
+          })
+        })
+
+        setLineImportValid(valid)
+        setLineImportSkipped(skipped)
+        setLineImportResult(null)
+        setErrorMsg('')
+        setLineImportPanelOpen(true)
+      } catch {
+        setErrorMsg('Could not read that file — make sure it is a CSV, not an .xlsx.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  async function handleConfirmLineImport() {
+    setLineImporting(true)
+    let inserted = 0
+    const failed = []
+    for (const row of lineImportValid) {
+      const { error } = await supabase.from('purchase_lines').insert({
+        purchase_id: selected.id,
+        product_id: row.product_id,
+        quantity: row.quantity,
+        unit_cost: row.unit_cost,
+        expiration_date: row.expiration_date,
+      })
+      if (error) {
+        failed.push({ name: row.product_name, reason: error.message })
+      } else {
+        inserted++
+      }
+    }
+    setLineImporting(false)
+    setLineImportResult({ inserted, failed })
+    await loadLines(selected.id)
+  }
+
   async function removeLine(lineId) {
     await supabase.from('purchase_lines').delete().eq('id', lineId)
     loadLines(selected.id)
@@ -263,12 +390,12 @@ export default function Purchases() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
-              <th className="px-4 py-3">Purchase #</th>
-              <th className="px-4 py-3">Date</th>
-              <th className="px-4 py-3">Supplier</th>
-              <th className="px-4 py-3">Invoice #</th>
-              <th className="px-4 py-3">Total</th>
-              <th className="px-4 py-3">Status</th>
+              <SortableTh label="Purchase #" sortKey="purchase_number" activeKey={purchaseSortKey} activeDir={purchaseSortDir} onSort={togglePurchaseSort} />
+              <SortableTh label="Date" sortKey="purchase_date" activeKey={purchaseSortKey} activeDir={purchaseSortDir} onSort={togglePurchaseSort} />
+              <SortableTh label="Supplier" sortKey="supplier" activeKey={purchaseSortKey} activeDir={purchaseSortDir} onSort={togglePurchaseSort} />
+              <SortableTh label="Invoice #" sortKey="invoice_number" activeKey={purchaseSortKey} activeDir={purchaseSortDir} onSort={togglePurchaseSort} />
+              <SortableTh label="Total" sortKey="total_cost" activeKey={purchaseSortKey} activeDir={purchaseSortDir} onSort={togglePurchaseSort} />
+              <SortableTh label="Status" sortKey="status" activeKey={purchaseSortKey} activeDir={purchaseSortDir} onSort={togglePurchaseSort} />
             </tr>
           </thead>
           <tbody>
@@ -280,7 +407,7 @@ export default function Purchases() {
               </tr>
             )}
 
-            {!loading && purchases.length === 0 && (
+            {!loading && sortedPurchases.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No purchases yet — create one to start receiving stock.
@@ -288,7 +415,7 @@ export default function Purchases() {
               </tr>
             )}
 
-            {purchases.map((p) => (
+            {sortedPurchases.map((p) => (
               <tr
                 key={p.id}
                 onClick={() => openExisting(p)}
@@ -420,6 +547,28 @@ export default function Purchases() {
                 </tfoot>
               </table>
             </div>
+
+            {isDraft && (
+              <div className="mb-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadLineTemplate}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+                >
+                  <FileDown size={15} />
+                  Template
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLineImportClick}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+                >
+                  <Upload size={15} />
+                  Import lines CSV
+                </button>
+                <input ref={lineFileInputRef} type="file" accept=".csv" onChange={handleLineFileChange} className="hidden" />
+              </div>
+            )}
 
             {isDraft && (
               <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
@@ -575,6 +724,90 @@ export default function Purchases() {
                 This purchase was voided — its stock movements have been reversed.
               </p>
             )}
+          </div>
+        )}
+      </SlidePanel>
+
+      <SlidePanel
+        open={lineImportPanelOpen}
+        title="Import purchase lines"
+        onClose={() => setLineImportPanelOpen(false)}
+      >
+        {!lineImportResult ? (
+          <div>
+            <div className="mb-4 grid grid-cols-2 gap-3">
+              <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+                <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{lineImportValid.length}</div>
+                <div className="text-xs text-[var(--color-ink-soft)]">ready to import</div>
+              </div>
+              <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+                <div className="font-display text-xl font-semibold text-[var(--color-rust)]">{lineImportSkipped.length}</div>
+                <div className="text-xs text-[var(--color-ink-soft)]">skipped</div>
+              </div>
+            </div>
+
+            {lineImportSkipped.length > 0 && (
+              <div className="mb-4">
+                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
+                <div className="max-h-48 space-y-1 overflow-y-auto">
+                  {lineImportSkipped.map((s, i) => (
+                    <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                      Row {s.rowNum}: {s.reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {lineImportValid.length > 0 && (
+              <div className="mb-4">
+                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Preview (first 5)</div>
+                <div className="space-y-1">
+                  {lineImportValid.slice(0, 5).map((r, i) => (
+                    <div key={i} className="rounded-md border border-[var(--color-line)] px-2.5 py-1.5 text-xs">
+                      <span className="font-medium">{r.product_name}</span> — {r.quantity} {r.unit} @ {r.unit_cost.toFixed(2)}
+                    </div>
+                  ))}
+                  {lineImportValid.length > 5 && (
+                    <div className="text-xs text-[var(--color-ink-soft)]">…and {lineImportValid.length - 5} more</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={handleConfirmLineImport}
+              disabled={lineImporting || lineImportValid.length === 0}
+              className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+            >
+              {lineImporting ? 'Importing…' : `Import ${lineImportValid.length} line${lineImportValid.length === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        ) : (
+          <div>
+            <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+              {lineImportResult.inserted} line{lineImportResult.inserted === 1 ? '' : 's'} added.
+            </div>
+            {lineImportResult.failed.length > 0 && (
+              <div className="mb-4">
+                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+                  {lineImportResult.failed.length} failed while saving
+                </div>
+                <div className="max-h-48 space-y-1 overflow-y-auto">
+                  {lineImportResult.failed.map((f, i) => (
+                    <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                      {f.name}: {f.reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button
+              onClick={() => setLineImportPanelOpen(false)}
+              className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white"
+            >
+              Done
+            </button>
           </div>
         )}
       </SlidePanel>
