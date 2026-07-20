@@ -2,6 +2,9 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import StatusChip from '../components/StatusChip'
+import SortableTh from '../components/SortableTh'
+import DisposeConfirm from '../components/DisposeConfirm'
+import { useSort, sortRows } from '../lib/sort'
 
 function stockTone(stock, reorderPoint) {
   if (stock <= 0) return 'critical'
@@ -37,6 +40,18 @@ export default function Inventory() {
   const [expanded, setExpanded] = useState(new Set())
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
+  const [disposeBatch, setDisposeBatch] = useState(null)
+
+  const { sortKey, sortDir, toggleSort } = useSort('name')
+  function sortAccessor(row, key) {
+    if (key === 'sku') return row.product?.sku
+    if (key === 'name') return row.product?.name
+    if (key === 'stock') return Number(row.current_stock ?? 0)
+    if (key === 'value') return Number(row.inventory_value ?? 0)
+    if (key === 'status') return stockLabel(row.current_stock, row.product?.reorder_point)
+    return row[key]
+  }
+  const sortedRows = sortRows(rows, sortKey, sortDir, sortAccessor)
 
   async function load() {
     setLoading(true)
@@ -62,6 +77,15 @@ export default function Inventory() {
     load()
   }, [])
 
+  async function fetchBatches(productId) {
+    const { data } = await supabase
+      .from('batch_cache')
+      .select('*, batch:batches(batch_number)')
+      .eq('product_id', productId)
+      .order('fifo_sequence')
+    setBatchesByProduct((prev) => ({ ...prev, [productId]: data ?? [] }))
+  }
+
   async function toggleExpand(productId) {
     const next = new Set(expanded)
     if (next.has(productId)) {
@@ -69,15 +93,28 @@ export default function Inventory() {
     } else {
       next.add(productId)
       if (!batchesByProduct[productId]) {
-        const { data } = await supabase
-          .from('batch_cache')
-          .select('*')
-          .eq('product_id', productId)
-          .order('fifo_sequence')
-        setBatchesByProduct((prev) => ({ ...prev, [productId]: data ?? [] }))
+        await fetchBatches(productId)
       }
     }
     setExpanded(next)
+  }
+
+  function openDispose(batch, row) {
+    setDisposeBatch({
+      batch_id: batch.batch_id,
+      product_id: row.product_id,
+      product_name: row.product?.name,
+      batch_number: batch.batch?.batch_number,
+      unit: row.product?.unit,
+      remaining_quantity: Number(batch.remaining_quantity),
+      unit_cost: Number(batch.unit_cost),
+      expiration_date: batch.expiration_date,
+    })
+  }
+
+  async function handleDisposed(productId) {
+    await fetchBatches(productId)
+    await load()
   }
 
   const totalValue = useMemo(
@@ -112,11 +149,11 @@ export default function Inventory() {
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
               <th className="w-8 px-4 py-3" />
-              <th className="px-4 py-3">SKU</th>
-              <th className="px-4 py-3">Product</th>
-              <th className="px-4 py-3">Stock</th>
-              <th className="px-4 py-3">Value</th>
-              <th className="px-4 py-3">Status</th>
+              <SortableTh label="SKU" sortKey="sku" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Product" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Stock" sortKey="stock" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Value" sortKey="value" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
             </tr>
           </thead>
           <tbody>
@@ -128,7 +165,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {!loading && rows.length === 0 && (
+            {!loading && sortedRows.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No stock movements yet — post a purchase to see inventory appear here.
@@ -136,7 +173,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {rows.map((r) => (
+            {sortedRows.map((r) => (
               <Fragment key={r.product_id}>
                 <tr
                   onClick={() => toggleExpand(r.product_id)}
@@ -182,6 +219,14 @@ export default function Inventory() {
                                 <StatusChip tone={expiryTone(b.expiration_date)}>
                                   {expiryLabel(b.expiration_date)}
                                 </StatusChip>
+                                {b.expiration_date && (
+                                  <button
+                                    onClick={() => openDispose(b, r)}
+                                    className="mt-1.5 block w-full rounded-md border border-[var(--color-rust)] px-1.5 py-1 text-center text-[10px] font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
+                                  >
+                                    Dispose
+                                  </button>
+                                )}
                               </div>
                             ))}
                         </div>
@@ -194,6 +239,13 @@ export default function Inventory() {
           </tbody>
         </table>
       </div>
+
+      <DisposeConfirm
+        open={!!disposeBatch}
+        batch={disposeBatch}
+        onClose={() => setDisposeBatch(null)}
+        onDisposed={() => disposeBatch && handleDisposed(disposeBatch.product_id)}
+      />
     </div>
   )
 }

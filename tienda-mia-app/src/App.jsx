@@ -7,6 +7,9 @@ import Inventory from './pages/Inventory'
 import Sales from './pages/Sales'
 import Kitchen from './pages/Kitchen'
 import Adjustments from './pages/Adjustments'
+import ReturnsWaste from './pages/ReturnsWaste'
+import Reports from './pages/Reports'
+import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
 
 export default function App() {
@@ -20,6 +23,9 @@ export default function App() {
         <Route path="sales" element={<Sales />} />
         <Route path="kitchen" element={<Kitchen />} />
         <Route path="adjustments" element={<Adjustments />} />
+        <Route path="returns-waste" element={<ReturnsWaste />} />
+        <Route path="reports" element={<Reports />} />
+        <Route path="analytics" element={<Analytics />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>

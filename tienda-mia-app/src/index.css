@@ -69,3 +69,26 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+  Report printing: only the marked printable area survives on a printed page
+  or "print to PDF" — sidebar, buttons, and everything else is stripped out.
+*/
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-report,
+  #printable-report * {
+    visibility: visible;
+  }
+  #printable-report {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

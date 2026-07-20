@@ -3,6 +3,8 @@ import { Plus, Trash2, AlertTriangle, Check } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
+import SortableTh from '../components/SortableTh'
+import { useSort, sortRows } from '../lib/sort'
 
 const EMPTY_RECIPE_FORM = {
   product_id: '',
@@ -34,6 +36,41 @@ export default function Kitchen() {
   const [productions, setProductions] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
+
+  // Recipe cost/margin are derived, not stored — compute them once per recipe
+  // here so sorting has a real number to sort by, instead of recomputing
+  // per-row inside the render (and having nothing to sort against).
+  const recipesWithDerived = useMemo(() => {
+    return recipes.map((r) => {
+      const ingredients = r.recipe_ingredients.map((ri) => ({
+        quantity_per_yield: ri.quantity_per_yield,
+        current_cost: Number(ri.ingredient?.current_cost || 0),
+      }))
+      const { perUnit } = recipeCost(r, ingredients)
+      const sellingPrice = Number(r.product?.selling_price || 0)
+      const margin = sellingPrice > 0 ? ((sellingPrice - perUnit) / sellingPrice) * 100 : null
+      return { ...r, perUnit, margin }
+    })
+  }, [recipes])
+
+  const { sortKey: recipeSortKey, sortDir: recipeSortDir, toggleSort: toggleRecipeSort } = useSort('name')
+  function recipeSortAccessor(row, key) {
+    if (key === 'name') return row.product?.name
+    if (key === 'yield') return Number(row.yield_quantity ?? 0)
+    if (key === 'ingredients') return row.recipe_ingredients.length
+    if (key === 'cost') return row.perUnit
+    if (key === 'margin') return row.margin ?? -Infinity
+    return row[key]
+  }
+  const sortedRecipes = sortRows(recipesWithDerived, recipeSortKey, recipeSortDir, recipeSortAccessor)
+
+  const { sortKey: prodSortKey, sortDir: prodSortDir, toggleSort: toggleProdSort } = useSort('production_date', 'desc')
+  function prodSortAccessor(row, key) {
+    if (key === 'product') return row.recipe?.product?.name
+    if (key === 'quantity_produced' || key === 'cost_per_unit' || key === 'total_cost') return Number(row[key] ?? 0)
+    return row[key]
+  }
+  const sortedProductions = sortRows(productions, prodSortKey, prodSortDir, prodSortAccessor)
 
   // Recipe builder panel
   const [recipePanelOpen, setRecipePanelOpen] = useState(false)
@@ -371,40 +408,33 @@ export default function Kitchen() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
               <tr>
-                <th className="px-4 py-3">Finished product</th>
-                <th className="px-4 py-3">Yield</th>
-                <th className="px-4 py-3">Ingredients</th>
-                <th className="px-4 py-3">Cost / unit</th>
-                <th className="px-4 py-3">Margin</th>
+                <SortableTh label="Finished product" sortKey="name" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
+                <SortableTh label="Yield" sortKey="yield" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
+                <SortableTh label="Ingredients" sortKey="ingredients" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
+                <SortableTh label="Cost / unit" sortKey="cost" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
+                <SortableTh label="Margin" sortKey="margin" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
               </tr>
             </thead>
             <tbody>
               {loading && (
                 <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading recipes…</td></tr>
               )}
-              {!loading && recipes.length === 0 && (
+              {!loading && sortedRecipes.length === 0 && (
                 <tr><td colSpan={5} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No recipes yet — create one to start producing finished goods.</td></tr>
               )}
-              {recipes.map((r) => {
-                const ingredients = r.recipe_ingredients.map((ri) => ({
-                  quantity_per_yield: ri.quantity_per_yield,
-                  current_cost: Number(ri.ingredient?.current_cost || 0),
-                }))
-                const { perUnit } = recipeCost(r, ingredients)
-                const sellingPrice = Number(r.product?.selling_price || 0)
-                const margin = sellingPrice > 0 ? ((sellingPrice - perUnit) / sellingPrice) * 100 : null
+              {sortedRecipes.map((r) => {
                 return (
                   <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="px-4 py-3 font-medium">{r.product?.name}</td>
                     <td className="px-4 py-3">{r.yield_quantity} {r.product?.unit}</td>
                     <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.recipe_ingredients.length} items</td>
-                    <td className="px-4 py-3">{perUnit.toFixed(2)}</td>
+                    <td className="px-4 py-3">{r.perUnit.toFixed(2)}</td>
                     <td className="px-4 py-3">
-                      {margin === null ? (
+                      {r.margin === null ? (
                         <StatusChip tone="neutral">no selling price set</StatusChip>
                       ) : (
-                        <StatusChip tone={margin < 0 ? 'critical' : margin < 20 ? 'attention' : 'ok'}>
-                          {margin.toFixed(0)}%
+                        <StatusChip tone={r.margin < 0 ? 'critical' : r.margin < 20 ? 'attention' : 'ok'}>
+                          {r.margin.toFixed(0)}%
                         </StatusChip>
                       )}
                     </td>
@@ -419,22 +449,22 @@ export default function Kitchen() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
               <tr>
-                <th className="px-4 py-3">Production #</th>
-                <th className="px-4 py-3">Date</th>
-                <th className="px-4 py-3">Product</th>
-                <th className="px-4 py-3">Qty produced</th>
-                <th className="px-4 py-3">Cost / unit</th>
-                <th className="px-4 py-3">Total cost</th>
+                <SortableTh label="Production #" sortKey="production_number" activeKey={prodSortKey} activeDir={prodSortDir} onSort={toggleProdSort} />
+                <SortableTh label="Date" sortKey="production_date" activeKey={prodSortKey} activeDir={prodSortDir} onSort={toggleProdSort} />
+                <SortableTh label="Product" sortKey="product" activeKey={prodSortKey} activeDir={prodSortDir} onSort={toggleProdSort} />
+                <SortableTh label="Qty produced" sortKey="quantity_produced" activeKey={prodSortKey} activeDir={prodSortDir} onSort={toggleProdSort} />
+                <SortableTh label="Cost / unit" sortKey="cost_per_unit" activeKey={prodSortKey} activeDir={prodSortDir} onSort={toggleProdSort} />
+                <SortableTh label="Total cost" sortKey="total_cost" activeKey={prodSortKey} activeDir={prodSortDir} onSort={toggleProdSort} />
               </tr>
             </thead>
             <tbody>
               {loading && (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading production runs…</td></tr>
               )}
-              {!loading && productions.length === 0 && (
+              {!loading && sortedProductions.length === 0 && (
                 <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No production runs yet.</td></tr>
               )}
-              {productions.map((p) => (
+              {sortedProductions.map((p) => (
                 <tr key={p.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.production_number}</td>
                   <td className="px-4 py-3">{p.production_date}</td>
