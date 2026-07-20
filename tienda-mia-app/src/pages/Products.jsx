@@ -1,80 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Plus, Search, Archive, RotateCcw, Pencil, Download, Upload, FileDown } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Plus, Search, Archive, RotateCcw, Pencil } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
-import SortableTh from '../components/SortableTh'
-import { useSort, sortRows } from '../lib/sort'
-
-// Maps flexible spreadsheet header names to the actual product columns, so an
-// import doesn't fail just because someone wrote "Price" instead of "Selling Price".
-const HEADER_ALIASES = {
-  barcode: 'barcode',
-  name: 'name', productname: 'name', description: 'name', item: 'name',
-  brand: 'brand',
-  category: 'category',
-  businessunit: 'business_unit', unit_business: 'business_unit',
-  producttype: 'product_type', type: 'product_type',
-  unit: 'unit', uom: 'unit',
-  sellingprice: 'selling_price', price: 'selling_price',
-  minimumstock: 'minimum_stock', minstock: 'minimum_stock',
-  reorderpoint: 'reorder_point', reorder: 'reorder_point',
-  safetystock: 'safety_stock',
-  notes: 'notes', remarks: 'notes',
-}
-
-function normalizeHeader(h) {
-  return h.toLowerCase().replace(/[^a-z0-9]/g, '')
-}
-
-// Small hand-written CSV parser — handles quoted fields containing commas
-// (product names/notes often do), which a plain split(',') would break on.
-function parseCsv(text) {
-  const rows = []
-  let row = []
-  let field = ''
-  let inQuotes = false
-  const pushField = () => { row.push(field); field = '' }
-  const pushRow = () => { pushField(); rows.push(row); row = [] }
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++ } else { inQuotes = false }
-      } else {
-        field += c
-      }
-    } else if (c === '"') {
-      inQuotes = true
-    } else if (c === ',') {
-      pushField()
-    } else if (c === '\n') {
-      pushRow()
-    } else if (c !== '\r') {
-      field += c
-    }
-  }
-  if (field !== '' || row.length > 0) pushRow()
-  return rows.filter((r) => r.some((v) => v.trim() !== ''))
-}
-
-function downloadFile(filename, content, mime) {
-  const blob = new Blob([content], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-// Name/category/brand/etc. get forced to caps for consistency across the
-// catalog — matches the convention already used in the spreadsheet this
-// replaced. Barcode and Notes are left as typed (an identifier and free text,
-// not descriptive labels).
-function upper(v) {
-  return v ? v.toUpperCase() : v
-}
 
 const EMPTY_FORM = {
   barcode: '',
@@ -101,13 +29,6 @@ export default function Products() {
   const [editingId, setEditingId] = useState(null)
   const [form, setForm] = useState(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
-
-  const fileInputRef = useRef(null)
-  const [importPanelOpen, setImportPanelOpen] = useState(false)
-  const [importValid, setImportValid] = useState([])
-  const [importSkipped, setImportSkipped] = useState([])
-  const [importing, setImporting] = useState(false)
-  const [importResult, setImportResult] = useState(null)
 
   async function loadProducts() {
     setLoading(true)
@@ -162,13 +83,6 @@ export default function Products() {
     )
   }, [products, search])
 
-  const { sortKey, sortDir, toggleSort } = useSort('name')
-  function sortAccessor(row, key) {
-    if (key === 'price') return Number(row.selling_price ?? 0)
-    return row[key]
-  }
-  const sorted = sortRows(filtered, sortKey, sortDir, sortAccessor)
-
   function openAddPanel() {
     setEditingId(null)
     setForm(EMPTY_FORM)
@@ -201,12 +115,12 @@ export default function Products() {
 
     const payload = {
       barcode: form.barcode.trim(),
-      name: upper(form.name.trim()),
-      brand: upper(form.brand.trim()) || null,
-      category: upper(form.category) || null,
-      business_unit: upper(form.business_unit) || null,
-      product_type: upper(form.product_type) || null,
-      unit: upper(form.unit) || null,
+      name: form.name.trim(),
+      brand: form.brand.trim() || null,
+      category: form.category || null,
+      business_unit: form.business_unit || null,
+      product_type: form.product_type || null,
+      unit: form.unit || null,
       selling_price: form.selling_price === '' ? 0 : Number(form.selling_price),
       minimum_stock: form.minimum_stock === '' ? 0 : Number(form.minimum_stock),
       reorder_point: form.reorder_point === '' ? 0 : Number(form.reorder_point),
@@ -243,150 +157,6 @@ export default function Products() {
     if (!error) loadProducts()
   }
 
-  function handleExportCsv() {
-    const headers = [
-      'SKU', 'Barcode', 'Name', 'Brand', 'Category', 'Business Unit', 'Product Type', 'Unit',
-      'Selling Price', 'Current Cost', 'Minimum Stock', 'Reorder Point', 'Safety Stock', 'Status', 'Notes',
-    ]
-    const dataRows = products.map((p) => [
-      p.sku, p.barcode, p.name, p.brand ?? '', p.category ?? '', p.business_unit ?? '',
-      p.product_type ?? '', p.unit ?? '', p.selling_price, p.current_cost, p.minimum_stock,
-      p.reorder_point, p.safety_stock, p.status, p.notes ?? '',
-    ])
-    const csv = [headers, ...dataRows]
-      .map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
-      .join('\n')
-    downloadFile('products-export.csv', csv, 'text/csv;charset=utf-8;')
-  }
-
-  function handleDownloadTemplate() {
-    const headers = [
-      'Barcode', 'Name', 'Brand', 'Category', 'Business Unit', 'Product Type', 'Unit',
-      'Selling Price', 'Minimum Stock', 'Reorder Point', 'Safety Stock', 'Notes',
-    ]
-    // One retail example, one kitchen example — kitchen items still need SOME
-    // barcode value (schema requires it), so an internal code works fine here.
-    const exampleRetail = ['4800123456789', 'Coke 330ML', 'Coca-Cola', 'Beverages', 'Retail', 'Retail Item', 'pcs', '45', '24', '12', '6', '']
-    const exampleKitchen = ['TMIA-TURON-001', 'T.Mia Banana Turon', '', 'Bakery', 'Kitchen', 'Finished Good', 'pcs', '25', '0', '0', '0', 'Prepared in-house, no supplier barcode']
-    const csv = [headers, exampleRetail, exampleKitchen]
-      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
-      .join('\n')
-    downloadFile('products-import-template.csv', csv, 'text/csv;charset=utf-8;')
-  }
-
-  function handleImportClick() {
-    fileInputRef.current?.click()
-  }
-
-  function handleFileChange(e) {
-    const file = e.target.files?.[0]
-    e.target.value = '' // reset so picking the same file again still fires onChange
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onload = () => {
-      try {
-        const rows = parseCsv(String(reader.result))
-        if (rows.length < 2) {
-          setErrorMsg('That file has no data rows.')
-          return
-        }
-        const headerRow = rows[0].map((h) => h.trim())
-        const canonicalKeys = headerRow.map((h) => HEADER_ALIASES[normalizeHeader(h)] ?? null)
-
-        const existingBarcodes = new Set(products.map((p) => p.barcode))
-        const seenInFile = new Set()
-        const valid = []
-        const skipped = []
-
-        rows.slice(1).forEach((r, idx) => {
-          const rowNum = idx + 2 // human-friendly: header is row 1
-          const obj = {}
-          canonicalKeys.forEach((key, i) => {
-            if (key) obj[key] = (r[i] ?? '').trim()
-          })
-          const barcode = obj.barcode || ''
-          const name = obj.name || ''
-
-          if (!barcode || !name) {
-            skipped.push({ rowNum, reason: 'Missing barcode or name' })
-            return
-          }
-          if (existingBarcodes.has(barcode)) {
-            skipped.push({ rowNum, reason: `Barcode ${barcode} already exists in Products` })
-            return
-          }
-          if (seenInFile.has(barcode)) {
-            skipped.push({ rowNum, reason: `Duplicate barcode ${barcode} within this file` })
-            return
-          }
-          seenInFile.add(barcode)
-
-          valid.push({
-            barcode,
-            name: upper(name),
-            brand: upper(obj.brand) || null,
-            category: upper(obj.category) || null,
-            business_unit: upper(obj.business_unit) || null,
-            product_type: upper(obj.product_type) || null,
-            unit: upper(obj.unit) || null,
-            selling_price: obj.selling_price ? Number(obj.selling_price) || 0 : 0,
-            minimum_stock: obj.minimum_stock ? Number(obj.minimum_stock) || 0 : 0,
-            reorder_point: obj.reorder_point ? Number(obj.reorder_point) || 0 : 0,
-            safety_stock: obj.safety_stock ? Number(obj.safety_stock) || 0 : 0,
-            notes: obj.notes || null,
-          })
-        })
-
-        setImportValid(valid)
-        setImportSkipped(skipped)
-        setImportResult(null)
-        setErrorMsg('')
-        setImportPanelOpen(true)
-      } catch {
-        setErrorMsg('Could not read that file — make sure it is a CSV export, not an .xlsx.')
-      }
-    }
-    reader.readAsText(file)
-  }
-
-  async function syncListsFromImport(rows) {
-    const buckets = { Category: new Set(), BusinessUnit: new Set(), ProductType: new Set(), Unit: new Set() }
-    for (const r of rows) {
-      if (r.category) buckets.Category.add(r.category)
-      if (r.business_unit) buckets.BusinessUnit.add(r.business_unit)
-      if (r.product_type) buckets.ProductType.add(r.product_type)
-      if (r.unit) buckets.Unit.add(r.unit)
-    }
-    const newListRows = []
-    for (const [listType, values] of Object.entries(buckets)) {
-      for (const value of values) newListRows.push({ list_type: listType, value })
-    }
-    if (newListRows.length === 0) return
-    // ignoreDuplicates: leaves any list value that already exists untouched
-    // (in case someone had deliberately deactivated it), only adds genuinely new ones.
-    await supabase.from('lists').upsert(newListRows, { onConflict: 'list_type,value', ignoreDuplicates: true })
-  }
-
-  async function handleConfirmImport() {
-    setImporting(true)
-    let inserted = 0
-    const failed = []
-    for (const row of importValid) {
-      const { error } = await supabase.from('products').insert(row)
-      if (error) {
-        failed.push({ name: row.name, reason: error.code === '23505' ? 'Barcode already exists' : error.message })
-      } else {
-        inserted++
-      }
-    }
-    await syncListsFromImport(importValid)
-    setImporting(false)
-    setImportResult({ inserted, failed })
-    loadProducts()
-    loadLists() // pick up any new Category/Business Unit/Product Type/Unit values right away
-  }
-
   return (
     <div>
       <div className="mb-5 flex items-center justify-between">
@@ -396,37 +166,13 @@ export default function Products() {
             Master data only — stock levels live in Inventory once purchases start flowing in.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleDownloadTemplate}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
-          >
-            <FileDown size={16} />
-            Template
-          </button>
-          <button
-            onClick={handleExportCsv}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
-          >
-            <Download size={16} />
-            Export CSV
-          </button>
-          <button
-            onClick={handleImportClick}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
-          >
-            <Upload size={16} />
-            Import CSV
-          </button>
-          <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileChange} className="hidden" />
-          <button
-            onClick={openAddPanel}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
-          >
-            <Plus size={16} />
-            Add product
-          </button>
-        </div>
+        <button
+          onClick={openAddPanel}
+          className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+        >
+          <Plus size={16} />
+          Add product
+        </button>
       </div>
 
       <div className="mb-4 flex items-center gap-2 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-3 py-2">
@@ -449,13 +195,13 @@ export default function Products() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
-              <SortableTh label="SKU" sortKey="sku" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Barcode" sortKey="barcode" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Name" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Category" sortKey="category" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Unit" sortKey="unit" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Price" sortKey="price" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <th className="px-4 py-3">SKU</th>
+              <th className="px-4 py-3">Barcode</th>
+              <th className="px-4 py-3">Name</th>
+              <th className="px-4 py-3">Category</th>
+              <th className="px-4 py-3">Unit</th>
+              <th className="px-4 py-3">Price</th>
+              <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3" />
             </tr>
           </thead>
@@ -468,7 +214,7 @@ export default function Products() {
               </tr>
             )}
 
-            {!loading && sorted.length === 0 && (
+            {!loading && filtered.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   {products.length === 0
@@ -478,7 +224,7 @@ export default function Products() {
               </tr>
             )}
 
-            {sorted.map((p) => (
+            {filtered.map((p) => (
               <tr key={p.id} className="border-b border-[var(--color-line)] last:border-0">
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.sku}</td>
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.barcode}</td>
@@ -641,90 +387,6 @@ export default function Products() {
             {saving ? 'Saving…' : editingId ? 'Save changes' : 'Add product'}
           </button>
         </form>
-      </SlidePanel>
-
-      <SlidePanel
-        open={importPanelOpen}
-        title="Import products"
-        onClose={() => setImportPanelOpen(false)}
-      >
-        {!importResult ? (
-          <div>
-            <div className="mb-4 grid grid-cols-2 gap-3">
-              <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
-                <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{importValid.length}</div>
-                <div className="text-xs text-[var(--color-ink-soft)]">ready to import</div>
-              </div>
-              <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
-                <div className="font-display text-xl font-semibold text-[var(--color-rust)]">{importSkipped.length}</div>
-                <div className="text-xs text-[var(--color-ink-soft)]">skipped</div>
-              </div>
-            </div>
-
-            {importSkipped.length > 0 && (
-              <div className="mb-4">
-                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
-                <div className="max-h-48 space-y-1 overflow-y-auto">
-                  {importSkipped.map((s, i) => (
-                    <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
-                      Row {s.rowNum}: {s.reason}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {importValid.length > 0 && (
-              <div className="mb-4">
-                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Preview (first 5)</div>
-                <div className="space-y-1">
-                  {importValid.slice(0, 5).map((r, i) => (
-                    <div key={i} className="rounded-md border border-[var(--color-line)] px-2.5 py-1.5 text-xs">
-                      <span className="font-medium">{r.name}</span> — {r.barcode} — {r.business_unit || 'no business unit'}
-                    </div>
-                  ))}
-                  {importValid.length > 5 && (
-                    <div className="text-xs text-[var(--color-ink-soft)]">…and {importValid.length - 5} more</div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <button
-              onClick={handleConfirmImport}
-              disabled={importing || importValid.length === 0}
-              className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
-            >
-              {importing ? 'Importing…' : `Import ${importValid.length} product${importValid.length === 1 ? '' : 's'}`}
-            </button>
-          </div>
-        ) : (
-          <div>
-            <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
-              {importResult.inserted} product{importResult.inserted === 1 ? '' : 's'} added.
-            </div>
-            {importResult.failed.length > 0 && (
-              <div className="mb-4">
-                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
-                  {importResult.failed.length} failed while saving
-                </div>
-                <div className="max-h-48 space-y-1 overflow-y-auto">
-                  {importResult.failed.map((f, i) => (
-                    <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
-                      {f.name}: {f.reason}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <button
-              onClick={() => setImportPanelOpen(false)}
-              className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white"
-            >
-              Done
-            </button>
-          </div>
-        )}
       </SlidePanel>
     </div>
   )

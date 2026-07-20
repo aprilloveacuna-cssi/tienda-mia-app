@@ -3,20 +3,9 @@ import { Plus } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
-import SortableTh from '../components/SortableTh'
-import { useSort, sortRows } from '../lib/sort'
 
 export default function Adjustments() {
   const [adjustments, setAdjustments] = useState([])
-
-  const { sortKey: adjSortKey, sortDir: adjSortDir, toggleSort: toggleAdjSort } = useSort('adjustment_date', 'desc')
-  function adjSortAccessor(row, key) {
-    if (key === 'product') return row.product?.name
-    if (key === 'batch') return row.batch?.batch_number ?? ''
-    if (key === 'change') return Number(row.adjustment_quantity ?? 0)
-    return row[key]
-  }
-  const sortedAdjustments = sortRows(adjustments, adjSortKey, adjSortDir, adjSortAccessor)
   const [products, setProducts] = useState([])
   const [adjustmentTypes, setAdjustmentTypes] = useState([])
   const [loading, setLoading] = useState(true)
@@ -197,13 +186,13 @@ export default function Adjustments() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
-              <SortableTh label="Adjustment #" sortKey="adjustment_number" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
-              <SortableTh label="Date" sortKey="adjustment_date" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
-              <SortableTh label="Product" sortKey="product" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
-              <SortableTh label="Batch" sortKey="batch" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
+              <th className="px-4 py-3">Adjustment #</th>
+              <th className="px-4 py-3">Date</th>
+              <th className="px-4 py-3">Product</th>
+              <th className="px-4 py-3">Batch</th>
               <th className="px-4 py-3">Old → New</th>
-              <SortableTh label="Change" sortKey="change" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
-              <SortableTh label="Type" sortKey="adjustment_type" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
+              <th className="px-4 py-3">Change</th>
+              <th className="px-4 py-3">Type</th>
               <th className="px-4 py-3">Reason</th>
             </tr>
           </thead>
@@ -211,10 +200,10 @@ export default function Adjustments() {
             {loading && (
               <tr><td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading adjustments…</td></tr>
             )}
-            {!loading && sortedAdjustments.length === 0 && (
+            {!loading && adjustments.length === 0 && (
               <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No adjustments yet — good sign, means nothing's needed correcting.</td></tr>
             )}
-            {sortedAdjustments.map((a) => {
+            {adjustments.map((a) => {
               const qty = Number(a.adjustment_quantity)
               return (
                 <tr key={a.id} className="border-b border-[var(--color-line)] last:border-0">

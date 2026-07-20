@@ -2,8 +2,6 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import StatusChip from '../components/StatusChip'
-import SortableTh from '../components/SortableTh'
-import { useSort, sortRows } from '../lib/sort'
 
 function stockTone(stock, reorderPoint) {
   if (stock <= 0) return 'critical'
@@ -39,17 +37,6 @@ export default function Inventory() {
   const [expanded, setExpanded] = useState(new Set())
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
-
-  const { sortKey, sortDir, toggleSort } = useSort('name')
-  function sortAccessor(row, key) {
-    if (key === 'sku') return row.product?.sku
-    if (key === 'name') return row.product?.name
-    if (key === 'stock') return Number(row.current_stock ?? 0)
-    if (key === 'value') return Number(row.inventory_value ?? 0)
-    if (key === 'status') return stockLabel(row.current_stock, row.product?.reorder_point)
-    return row[key]
-  }
-  const sortedRows = sortRows(rows, sortKey, sortDir, sortAccessor)
 
   async function load() {
     setLoading(true)
@@ -125,11 +112,11 @@ export default function Inventory() {
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
               <th className="w-8 px-4 py-3" />
-              <SortableTh label="SKU" sortKey="sku" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Product" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Stock" sortKey="stock" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Value" sortKey="value" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
-              <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <th className="px-4 py-3">SKU</th>
+              <th className="px-4 py-3">Product</th>
+              <th className="px-4 py-3">Stock</th>
+              <th className="px-4 py-3">Value</th>
+              <th className="px-4 py-3">Status</th>
             </tr>
           </thead>
           <tbody>
@@ -141,7 +128,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {!loading && sortedRows.length === 0 && (
+            {!loading && rows.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No stock movements yet — post a purchase to see inventory appear here.
@@ -149,7 +136,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {sortedRows.map((r) => (
+            {rows.map((r) => (
               <Fragment key={r.product_id}>
                 <tr
                   onClick={() => toggleExpand(r.product_id)}

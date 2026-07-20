@@ -1,20 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Plus, Trash2, Check, Ban, AlertTriangle, Upload, FileDown } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Plus, Trash2, Check, Ban, AlertTriangle } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
-import ProductPicker from '../components/ProductPicker'
-import SortableTh from '../components/SortableTh'
-import { useSort, sortRows } from '../lib/sort'
-import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
-
-const SALE_LINE_HEADER_ALIASES = {
-  barcode: 'barcode', sku: 'sku',
-  quantity: 'quantity', qty: 'quantity',
-  unitprice: 'unit_price', price: 'unit_price',
-}
 
 function statusTone(status) {
   return status === 'voided' ? 'critical' : 'ok'
@@ -22,14 +12,6 @@ function statusTone(status) {
 
 export default function Sales() {
   const [sales, setSales] = useState([])
-
-  const { sortKey: saleSortKey, sortDir: saleSortDir, toggleSort: toggleSaleSort } = useSort('sale_date', 'desc')
-  function saleSortAccessor(row, key) {
-    if (key === 'total_amount') return Number(row.total_amount ?? 0)
-    if (key === 'sale_date') return new Date(row.sale_date).getTime()
-    return row[key]
-  }
-  const sortedSales = sortRows(sales, saleSortKey, saleSortDir, saleSortAccessor)
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -40,13 +22,6 @@ export default function Sales() {
   const [viewedSale, setViewedSale] = useState(null)
   const [viewedLines, setViewedLines] = useState([])
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '' })
-
-  const importFileInputRef = useRef(null)
-  const [importPanelOpen, setImportPanelOpen] = useState(false)
-  const [importPreviewValid, setImportPreviewValid] = useState([])
-  const [importPreviewSkipped, setImportPreviewSkipped] = useState([])
-  const [importing, setImporting] = useState(false)
-  const [importParsing, setImportParsing] = useState(false)
   const [lineForm, setLineForm] = useState(EMPTY_LINE_FORM)
   const [lineWarning, setLineWarning] = useState('')
   const [saving, setSaving] = useState(false)
@@ -69,7 +44,7 @@ export default function Sales() {
   async function loadProducts() {
     const { data, error } = await supabase
       .from('products')
-      .select('id, sku, name, unit, selling_price, barcode')
+      .select('id, sku, name, unit, selling_price')
       .eq('status', 'active')
       .order('name')
     if (!error) setProducts(data ?? [])
@@ -110,7 +85,7 @@ export default function Sales() {
 
   // Walks batch_cache in FIFO order for this product, accounting for quantity
   // already claimed by lines added earlier in this same not-yet-saved sale.
-  async function computeFifoConsumption(productId, qtyNeeded, reservationSource = pendingLines) {
+  async function computeFifoConsumption(productId, qtyNeeded) {
     const { data: batches, error } = await supabase
       .from('batch_cache')
       .select('*')
@@ -121,7 +96,7 @@ export default function Sales() {
     if (error) throw error
 
     const reserved = {}
-    for (const line of reservationSource) {
+    for (const line of pendingLines) {
       for (const c of line.consumption) {
         reserved[c.batch_id] = (reserved[c.batch_id] ?? 0) + c.qty
       }
@@ -147,115 +122,6 @@ export default function Sales() {
     }, 0)
 
     return { consumption, satisfied: remaining <= 0, totalAvailable }
-  }
-
-  function handleDownloadSalesLineTemplate() {
-    const headers = ['Barcode', 'Quantity', 'Unit Price']
-    const example = ['4800123456789', '3', '45']
-    const csv = [headers, example].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
-    downloadFile('sale-lines-template.csv', csv, 'text/csv;charset=utf-8;')
-  }
-
-  function handleImportClick() {
-    importFileInputRef.current?.click()
-  }
-
-  function handleImportFileChange(e) {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onload = async () => {
-      setImportParsing(true)
-      setErrorMsg('')
-      try {
-        const rows = parseCsv(String(reader.result))
-        if (rows.length < 2) {
-          setErrorMsg('That file has no data rows.')
-          setImportParsing(false)
-          return
-        }
-        const headerRow = rows[0].map((h) => h.trim())
-        const canonicalKeys = headerRow.map((h) => SALE_LINE_HEADER_ALIASES[normalizeHeader(h)] ?? null)
-
-        const valid = []
-        const skipped = []
-        // Accumulates alongside `pendingLines` so each row in this same file
-        // correctly sees stock already claimed by earlier rows in the file —
-        // React state wouldn't update fast enough inside this loop to rely on.
-        const accumulator = [...pendingLines]
-
-        for (const [idx, r] of rows.slice(1).entries()) {
-          const rowNum = idx + 2
-          const obj = {}
-          canonicalKeys.forEach((key, i) => {
-            if (key) obj[key] = (r[i] ?? '').trim()
-          })
-
-          const product = obj.barcode
-            ? products.find((p) => p.barcode === obj.barcode)
-            : obj.sku
-              ? products.find((p) => p.sku === obj.sku)
-              : null
-
-          if (!product) {
-            skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
-            continue
-          }
-          const qty = Number(obj.quantity)
-          if (!qty || qty <= 0) {
-            skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
-            continue
-          }
-          const unitPrice = obj.unit_price ? Number(obj.unit_price) : Number(product.selling_price ?? 0)
-
-          try {
-            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(product.id, qty, accumulator)
-            if (!satisfied) {
-              skipped.push({ rowNum, reason: `${product.name}: only ${totalAvailable} ${product.unit} available` })
-              continue
-            }
-            const lineTotal = qty * unitPrice
-            const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
-            const newLine = {
-              tempId: crypto.randomUUID(),
-              product_id: product.id,
-              product_name: product.name,
-              unit: product.unit,
-              quantity: qty,
-              unit_price: unitPrice,
-              line_total: lineTotal,
-              fifo_cost: fifoCost,
-              gross_profit: lineTotal - fifoCost,
-              consumption,
-            }
-            accumulator.push(newLine)
-            valid.push(newLine)
-          } catch {
-            skipped.push({ rowNum, reason: 'Could not check stock for this row' })
-          }
-        }
-
-        setImportPreviewValid(valid)
-        setImportPreviewSkipped(skipped)
-        setImportParsing(false)
-        setImportPanelOpen(true)
-      } catch {
-        setImportParsing(false)
-        setErrorMsg('Could not read that file — make sure it is a CSV, not an .xlsx.')
-      }
-    }
-    reader.readAsText(file)
-  }
-
-  function handleConfirmImportLines() {
-    setImporting(true)
-    setPendingLines([...pendingLines, ...importPreviewValid])
-    setImporting(false)
-    setImportPanelOpen(false)
-    setImportPreviewValid([])
-    setImportPreviewSkipped([])
   }
 
   async function handleAddLine(e) {
@@ -470,12 +336,12 @@ export default function Sales() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
-              <SortableTh label="Sale #" sortKey="sale_number" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
-              <SortableTh label="Date" sortKey="sale_date" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
-              <SortableTh label="Terminal" sortKey="pos_terminal" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
-              <SortableTh label="Cashier" sortKey="cashier" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
-              <SortableTh label="Total" sortKey="total_amount" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
-              <SortableTh label="Status" sortKey="status" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
+              <th className="px-4 py-3">Sale #</th>
+              <th className="px-4 py-3">Date</th>
+              <th className="px-4 py-3">Terminal</th>
+              <th className="px-4 py-3">Cashier</th>
+              <th className="px-4 py-3">Total</th>
+              <th className="px-4 py-3">Status</th>
             </tr>
           </thead>
           <tbody>
@@ -486,14 +352,14 @@ export default function Sales() {
                 </td>
               </tr>
             )}
-            {!loading && sortedSales.length === 0 && (
+            {!loading && sales.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No sales yet — record one to see it deduct from Inventory.
                 </td>
               </tr>
             )}
-            {sortedSales.map((s) => (
+            {sales.map((s) => (
               <tr
                 key={s.id}
                 onClick={() => openView(s)}
@@ -597,34 +463,19 @@ export default function Sales() {
               </table>
             </div>
 
-            <div className="mb-3 flex gap-2">
-              <button
-                type="button"
-                onClick={handleDownloadSalesLineTemplate}
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
-              >
-                <FileDown size={15} />
-                Template
-              </button>
-              <button
-                type="button"
-                onClick={handleImportClick}
-                disabled={importParsing}
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-60"
-              >
-                <Upload size={15} />
-                {importParsing ? 'Checking stock…' : 'Import a day\'s sales CSV'}
-              </button>
-              <input ref={importFileInputRef} type="file" accept=".csv" onChange={handleImportFileChange} className="hidden" />
-            </div>
-
             <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
               <Field label="Product" required>
-                <ProductPicker
-                  products={products}
+                <select
+                  required
                   value={lineForm.product_id}
-                  onChange={onProductPick}
-                />
+                  onChange={(e) => onProductPick(e.target.value)}
+                  className="input"
+                >
+                  <option value="">Select a product…</option>
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id}>{p.sku} — {p.name}</option>
+                  ))}
+                </select>
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Quantity" required>
@@ -729,65 +580,6 @@ export default function Sales() {
             )}
           </div>
         )}
-      </SlidePanel>
-
-      <SlidePanel
-        open={importPanelOpen}
-        title="Import sale lines"
-        onClose={() => setImportPanelOpen(false)}
-      >
-        <div className="mb-4 grid grid-cols-2 gap-3">
-          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
-            <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{importPreviewValid.length}</div>
-            <div className="text-xs text-[var(--color-ink-soft)]">ready to add</div>
-          </div>
-          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
-            <div className="font-display text-xl font-semibold text-[var(--color-rust)]">{importPreviewSkipped.length}</div>
-            <div className="text-xs text-[var(--color-ink-soft)]">skipped</div>
-          </div>
-        </div>
-
-        {importPreviewSkipped.length > 0 && (
-          <div className="mb-4">
-            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
-            <div className="max-h-48 space-y-1 overflow-y-auto">
-              {importPreviewSkipped.map((s, i) => (
-                <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
-                  Row {s.rowNum}: {s.reason}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {importPreviewValid.length > 0 && (
-          <div className="mb-4">
-            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Preview (first 5)</div>
-            <div className="space-y-1">
-              {importPreviewValid.slice(0, 5).map((l) => (
-                <div key={l.tempId} className="rounded-md border border-[var(--color-line)] px-2.5 py-1.5 text-xs">
-                  <span className="font-medium">{l.product_name}</span> — {l.quantity} {l.unit} @ {l.unit_price.toFixed(2)}
-                </div>
-              ))}
-              {importPreviewValid.length > 5 && (
-                <div className="text-xs text-[var(--color-ink-soft)]">…and {importPreviewValid.length - 5} more</div>
-              )}
-            </div>
-          </div>
-        )}
-
-        <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
-          This only adds lines to the sale you're building — nothing is saved to Inventory until you click
-          "Complete sale" on the main panel.
-        </p>
-
-        <button
-          onClick={handleConfirmImportLines}
-          disabled={importing || importPreviewValid.length === 0}
-          className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
-        >
-          Add {importPreviewValid.length} line{importPreviewValid.length === 1 ? '' : 's'} to this sale
-        </button>
       </SlidePanel>
     </div>
   )
