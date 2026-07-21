@@ -31,6 +31,7 @@ export default function Sales() {
   }
   const sortedSales = sortRows(sales, saleSortKey, saleSortDir, saleSortAccessor)
   const [products, setProducts] = useState([])
+  const activeProducts = products.filter((p) => p.status === 'active')
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -69,8 +70,7 @@ export default function Sales() {
   async function loadProducts() {
     const { data, error } = await supabase
       .from('products')
-      .select('id, sku, name, unit, selling_price, barcode')
-      .eq('status', 'active')
+      .select('id, sku, name, unit, selling_price, barcode, status')
       .order('name')
     if (!error) setProducts(data ?? [])
   }
@@ -88,6 +88,7 @@ export default function Sales() {
     setLineWarning('')
     setErrorMsg('')
     setPanelOpen(true)
+    loadProducts()
   }
 
   async function openView(sale) {
@@ -186,21 +187,43 @@ export default function Sales() {
         // React state wouldn't update fast enough inside this loop to rely on.
         const accumulator = [...pendingLines]
 
+        // Strips stray whitespace (including non-breaking spaces Excel/Sheets
+        // sometimes paste in) and ignores case, so a barcode that LOOKS
+        // identical doesn't get skipped over an invisible formatting difference.
+        const cleanCode = (v) => (v ?? '').replace(/\s+/g, '').toUpperCase()
+
         for (const [idx, r] of rows.slice(1).entries()) {
           const rowNum = idx + 2
+
+          // A row with the wrong number of columns almost always means a stray
+          // quote or unescaped comma earlier in the file threw off parsing from
+          // that point on — flag it clearly rather than let it silently
+          // produce a garbled value that just fails to match anything.
+          if (r.length !== headerRow.length) {
+            skipped.push({
+              rowNum,
+              reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma in this row or an earlier one threw off parsing from here on`,
+            })
+            continue
+          }
+
           const obj = {}
           canonicalKeys.forEach((key, i) => {
             if (key) obj[key] = (r[i] ?? '').trim()
           })
 
           const product = obj.barcode
-            ? products.find((p) => p.barcode === obj.barcode)
+            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode))
             : obj.sku
-              ? products.find((p) => p.sku === obj.sku)
+              ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
               : null
 
           if (!product) {
             skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+            continue
+          }
+          if (product.status !== 'active') {
+            skipped.push({ rowNum, reason: `${product.name} (${product.barcode}) exists but is archived — restore it in Products first` })
             continue
           }
           const qty = Number(obj.quantity)
@@ -638,7 +661,7 @@ export default function Sales() {
             <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
               <Field label="Product" required>
                 <ProductPicker
-                  products={products}
+                  products={activeProducts}
                   value={lineForm.product_id}
                   onChange={onProductPick}
                 />

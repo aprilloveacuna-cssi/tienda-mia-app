@@ -301,6 +301,15 @@ export default function Products() {
 
         rows.slice(1).forEach((r, idx) => {
           const rowNum = idx + 2 // human-friendly: header is row 1
+
+          if (r.length !== headerRow.length) {
+            skipped.push({
+              rowNum,
+              reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma in this row or an earlier one threw off parsing from here on`,
+            })
+            return
+          }
+
           const obj = {}
           canonicalKeys.forEach((key, i) => {
             if (key) obj[key] = (r[i] ?? '').trim()

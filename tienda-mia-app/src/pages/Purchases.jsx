@@ -152,6 +152,7 @@ export default function Purchases() {
     setEditingLineId(null)
     setErrorMsg('')
     setPanelOpen(true)
+    loadProducts()
   }
 
   async function openExisting(purchase) {
@@ -161,6 +162,7 @@ export default function Purchases() {
     setErrorMsg('')
     await loadLines(purchase.id)
     setPanelOpen(true)
+    loadProducts()
   }
 
   async function handleCreateHeader(e) {
@@ -271,6 +273,20 @@ export default function Purchases() {
 
         rows.slice(1).forEach((r, idx) => {
           const rowNum = idx + 2
+
+          // A row with the wrong number of columns almost always means a stray
+          // quote or unescaped comma earlier in the file threw off parsing from
+          // that point on — every row after it looks "wrong" as a result. Catch
+          // it here with a clear reason instead of letting it silently produce
+          // a garbled barcode that then just fails to match anything.
+          if (r.length !== headerRow.length) {
+            skipped.push({
+              rowNum,
+              reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma in this row or an earlier one threw off parsing from here on`,
+            })
+            return
+          }
+
           const obj = {}
           canonicalKeys.forEach((key, i) => {
             if (key) obj[key] = (r[i] ?? '').trim()
