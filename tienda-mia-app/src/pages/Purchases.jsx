@@ -39,6 +39,7 @@ export default function Purchases() {
   }
   const sortedPurchases = sortRows(purchases, purchaseSortKey, purchaseSortDir, purchaseSortAccessor)
   const [products, setProducts] = useState([])
+  const activeProducts = products.filter((p) => p.status === 'active')
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -81,8 +82,7 @@ export default function Purchases() {
   async function loadProducts() {
     const { data, error } = await supabase
       .from('products')
-      .select('id, sku, name, unit, barcode')
-      .eq('status', 'active')
+      .select('id, sku, name, unit, barcode, status')
       .order('name')
     if (!error) setProducts(data ?? [])
   }
@@ -261,6 +261,11 @@ export default function Purchases() {
         const headerRow = rows[0].map((h) => h.trim())
         const canonicalKeys = headerRow.map((h) => LINE_HEADER_ALIASES[normalizeHeader(h)] ?? null)
 
+        // Strips stray whitespace (including the non-breaking spaces Excel/Sheets
+        // sometimes paste in) and ignores case, so a barcode that LOOKS identical
+        // doesn't get skipped over an invisible formatting difference.
+        const cleanCode = (v) => (v ?? '').replace(/\s+/g, '').toUpperCase()
+
         const valid = []
         const skipped = []
 
@@ -272,13 +277,17 @@ export default function Purchases() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => p.barcode === obj.barcode)
+            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode))
             : obj.sku
-              ? products.find((p) => p.sku === obj.sku)
+              ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
               : null
 
           if (!product) {
             skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+            return
+          }
+          if (product.status !== 'active') {
+            skipped.push({ rowNum, reason: `${product.name} (${product.barcode}) exists but is archived — restore it in Products first` })
             return
           }
           const quantity = Number(obj.quantity)
@@ -639,7 +648,7 @@ export default function Purchases() {
                   <div className="flex gap-2">
                     <div className="flex-1">
                       <ProductPicker
-                        products={products}
+                        products={activeProducts}
                         value={lineForm.product_id}
                         onChange={(id) => setLineForm({ ...lineForm, product_id: id })}
                       />
