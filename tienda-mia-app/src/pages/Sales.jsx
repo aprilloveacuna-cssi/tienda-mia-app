@@ -190,7 +190,12 @@ export default function Sales() {
         // Strips stray whitespace (including non-breaking spaces Excel/Sheets
         // sometimes paste in) and ignores case, so a barcode that LOOKS
         // identical doesn't get skipped over an invisible formatting difference.
-        const cleanCode = (v) => (v ?? '').replace(/\s+/g, '').toUpperCase()
+        const cleanCode = (v) =>
+          (v ?? '')
+            .normalize('NFKC')
+            // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+            .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+            .toUpperCase()
 
         for (const [idx, r] of rows.slice(1).entries()) {
           const rowNum = idx + 2

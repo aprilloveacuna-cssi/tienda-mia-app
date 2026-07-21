@@ -266,7 +266,16 @@ export default function Purchases() {
         // Strips stray whitespace (including the non-breaking spaces Excel/Sheets
         // sometimes paste in) and ignores case, so a barcode that LOOKS identical
         // doesn't get skipped over an invisible formatting difference.
-        const cleanCode = (v) => (v ?? '').replace(/\s+/g, '').toUpperCase()
+        // Strips regular whitespace PLUS invisible characters that don't count
+        // as whitespace to a regex (zero-width spaces, BOM, soft hyphen) —
+        // these can end up baked into a stored value from an earlier copy-paste
+        // or import, and look completely identical to the naked eye.
+        const cleanCode = (v) =>
+          (v ?? '')
+            .normalize('NFKC')
+            // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+            .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+            .toUpperCase()
 
         const valid = []
         const skipped = []
