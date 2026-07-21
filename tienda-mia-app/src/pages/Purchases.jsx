@@ -387,6 +387,31 @@ export default function Purchases() {
     loadPurchases()
   }
 
+  async function deleteDraft() {
+    if (!confirm(`Delete draft ${selected.purchase_number}? This permanently removes it and its ${lines.length} line${lines.length === 1 ? '' : 's'} — there's nothing to undo, since it's never touched inventory.`)) {
+      return
+    }
+    setSaving(true)
+    setErrorMsg('')
+
+    // Delete lines first — purchase_lines.purchase_id is ON DELETE RESTRICT,
+    // so the purchase row can't go until its lines are gone.
+    const { error: linesErr } = await supabase.from('purchase_lines').delete().eq('purchase_id', selected.id)
+    if (linesErr) {
+      setSaving(false)
+      setErrorMsg(linesErr.message)
+      return
+    }
+    const { error } = await supabase.from('purchases').delete().eq('id', selected.id)
+    setSaving(false)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    setPanelOpen(false)
+    loadPurchases()
+  }
+
   const isDraft = selected?.status === 'draft'
 
   return (
@@ -755,6 +780,17 @@ export default function Purchases() {
               >
                 <Send size={15} />
                 Post purchase
+              </button>
+            )}
+
+            {isDraft && (
+              <button
+                onClick={deleteDraft}
+                disabled={saving}
+                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-rust)] py-2.5 text-sm font-medium text-[var(--color-rust)] disabled:opacity-60"
+              >
+                <Trash2 size={15} />
+                Delete draft
               </button>
             )}
 
