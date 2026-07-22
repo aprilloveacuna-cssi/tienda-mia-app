@@ -1225,9 +1225,9 @@ export default function Kitchen() {
               />
             </Field>
 
-            <div className="mb-3 overflow-hidden rounded-md border border-[var(--color-line)]">
+            <div className="mb-3 max-h-64 overflow-auto rounded-md border border-[var(--color-line)]">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-[var(--color-line)] text-xs text-[var(--color-ink-soft)]">
+                <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Meal</th>
                     <th className="px-3 py-2">Qty</th>
@@ -1455,9 +1455,9 @@ export default function Kitchen() {
 
           <div className="text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Ingredients</div>
 
-          <div className="overflow-hidden rounded-md border border-[var(--color-line)]">
+          <div className="max-h-64 overflow-auto rounded-md border border-[var(--color-line)]">
             <table className="w-full text-left text-sm">
-              <thead className="border-b border-[var(--color-line)] text-xs text-[var(--color-ink-soft)]">
+              <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                 <tr>
                   <th className="px-3 py-2">Ingredient</th>
                   <th className="px-3 py-2">Qty / yield</th>
