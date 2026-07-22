@@ -148,6 +148,7 @@ export default function Kitchen() {
 
   // Recipe builder panel
   const [recipePanelOpen, setRecipePanelOpen] = useState(false)
+  const [editingRecipeId, setEditingRecipeId] = useState(null)
   const [recipeForm, setRecipeForm] = useState(EMPTY_RECIPE_FORM)
   const [recipeIngredients, setRecipeIngredients] = useState([])
   const [ingredientForm, setIngredientForm] = useState(EMPTY_INGREDIENT_FORM)
@@ -189,11 +190,61 @@ export default function Kitchen() {
 
   // ---------- Recipe builder ----------
   function openNewRecipe() {
+    setEditingRecipeId(null)
     setRecipeForm(EMPTY_RECIPE_FORM)
     setRecipeIngredients([])
     setIngredientForm(EMPTY_INGREDIENT_FORM)
     setErrorMsg('')
     setRecipePanelOpen(true)
+  }
+
+  function openEditRecipe(recipe) {
+    setEditingRecipeId(recipe.id)
+    setRecipeForm({
+      product_id: recipe.product_id,
+      yield_quantity: String(recipe.yield_quantity),
+      prep_loss_pct: String(recipe.prep_loss_pct),
+      packaging_cost: String(recipe.packaging_cost),
+      labor_cost: String(recipe.labor_cost),
+      overhead_cost: String(recipe.overhead_cost),
+    })
+    setRecipeIngredients(
+      recipe.recipe_ingredients.map((ri) => ({
+        tempId: crypto.randomUUID(),
+        ingredient_product_id: ri.ingredient_product_id,
+        name: ri.ingredient?.name,
+        current_cost: Number(ri.ingredient?.current_cost || 0),
+        quantity_per_yield: Number(ri.quantity_per_yield),
+        unit: ri.unit,
+        product_unit: ri.ingredient?.unit,
+      }))
+    )
+    setIngredientForm(EMPTY_INGREDIENT_FORM)
+    setErrorMsg('')
+    setRecipePanelOpen(true)
+  }
+
+  async function deleteRecipe(recipe) {
+    if (!confirm(`Delete the recipe for ${recipe.product?.name}? This can't be undone.`)) return
+    setErrorMsg('')
+
+    const { error: ingErr } = await supabase.from('recipe_ingredients').delete().eq('recipe_id', recipe.id)
+    if (ingErr) {
+      setErrorMsg(ingErr.message)
+      return
+    }
+    const { error } = await supabase.from('recipes').delete().eq('id', recipe.id)
+    if (error) {
+      // Most likely a production run in the (now-retired) Production flow still
+      // references this recipe — archiving is always safe, so offer that instead
+      // of leaving the user stuck on a raw database error.
+      if (confirm(`Couldn't delete — it's likely still referenced by an old production record.\n\nArchive it instead? It'll stop showing up here and won't be usable in Daily Meals' cost auto-fill.`)) {
+        await supabase.from('recipes').update({ status: 'archived' }).eq('id', recipe.id)
+      } else {
+        return
+      }
+    }
+    loadAll()
   }
 
   function addIngredientToRecipe(e) {
@@ -330,27 +381,43 @@ export default function Kitchen() {
     setSavingRecipe(true)
     setErrorMsg('')
 
-    const { data: recipe, error: recipeErr } = await supabase
-      .from('recipes')
-      .insert({
-        product_id: recipeForm.product_id,
-        yield_quantity: Number(recipeForm.yield_quantity),
-        prep_loss_pct: Number(recipeForm.prep_loss_pct),
-        packaging_cost: Number(recipeForm.packaging_cost),
-        labor_cost: Number(recipeForm.labor_cost),
-        overhead_cost: Number(recipeForm.overhead_cost),
-      })
-      .select()
-      .single()
+    const recipePayload = {
+      product_id: recipeForm.product_id,
+      yield_quantity: Number(recipeForm.yield_quantity),
+      prep_loss_pct: Number(recipeForm.prep_loss_pct),
+      packaging_cost: Number(recipeForm.packaging_cost),
+      labor_cost: Number(recipeForm.labor_cost),
+      overhead_cost: Number(recipeForm.overhead_cost),
+    }
 
-    if (recipeErr) {
-      setErrorMsg(recipeErr.message)
-      setSavingRecipe(false)
-      return
+    let recipeId = editingRecipeId
+    if (editingRecipeId) {
+      const { error } = await supabase.from('recipes').update(recipePayload).eq('id', editingRecipeId)
+      if (error) {
+        setErrorMsg(error.message)
+        setSavingRecipe(false)
+        return
+      }
+      // Simplest correct way to handle arbitrary add/remove/edit of ingredients —
+      // replace the whole set rather than trying to diff old vs new.
+      const { error: delErr } = await supabase.from('recipe_ingredients').delete().eq('recipe_id', editingRecipeId)
+      if (delErr) {
+        setErrorMsg(`Recipe updated but ingredients failed to refresh: ${delErr.message}`)
+        setSavingRecipe(false)
+        return
+      }
+    } else {
+      const { data: recipe, error: recipeErr } = await supabase.from('recipes').insert(recipePayload).select().single()
+      if (recipeErr) {
+        setErrorMsg(recipeErr.message)
+        setSavingRecipe(false)
+        return
+      }
+      recipeId = recipe.id
     }
 
     const ingredientRows = recipeIngredients.map((i) => ({
-      recipe_id: recipe.id,
+      recipe_id: recipeId,
       ingredient_product_id: i.ingredient_product_id,
       quantity_per_yield: i.quantity_per_yield,
       unit: i.unit,
@@ -763,14 +830,15 @@ export default function Kitchen() {
                 <SortableTh label="Ingredients" sortKey="ingredients" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
                 <SortableTh label="Cost / unit" sortKey="cost" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
                 <SortableTh label="Margin" sortKey="margin" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
+                <th className="px-4 py-3" />
               </tr>
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading recipes…</td></tr>
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading recipes…</td></tr>
               )}
               {!loading && sortedRecipes.length === 0 && (
-                <tr><td colSpan={5} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No recipes yet — create one to start producing finished goods.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No recipes yet — create one to start producing finished goods.</td></tr>
               )}
               {sortedRecipes.map((r) => {
                 return (
@@ -787,6 +855,24 @@ export default function Kitchen() {
                           {r.margin.toFixed(0)}%
                         </StatusChip>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => openEditRecipe(r)}
+                          aria-label="Edit recipe"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          onClick={() => deleteRecipe(r)}
+                          aria-label="Delete recipe"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -1047,7 +1133,7 @@ export default function Kitchen() {
       )}
 
       {/* Recipe builder panel */}
-      <SlidePanel open={recipePanelOpen} title="New recipe" onClose={() => setRecipePanelOpen(false)}>
+      <SlidePanel open={recipePanelOpen} title={editingRecipeId ? 'Edit recipe' : 'New recipe'} onClose={() => setRecipePanelOpen(false)}>
         {errorMsg && (
           <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
             {errorMsg}
@@ -1218,7 +1304,7 @@ export default function Kitchen() {
 
           <button type="submit" disabled={savingRecipe}
             className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60">
-            {savingRecipe ? 'Saving…' : 'Save recipe'}
+            {savingRecipe ? 'Saving…' : editingRecipeId ? 'Save changes' : 'Save recipe'}
           </button>
         </form>
       </SlidePanel>
