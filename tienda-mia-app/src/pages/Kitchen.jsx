@@ -67,6 +67,11 @@ export default function Kitchen() {
   // Ingredients (raw materials) — separate management list, kept out of the
   // main Products page since these aren't sold on their own.
   const [ingredientProducts, setIngredientProducts] = useState([])
+  const ingredientProductFileInputRef = useRef(null)
+  const [ingredientProductImportOpen, setIngredientProductImportOpen] = useState(false)
+  const [ingredientProductImportValid, setIngredientProductImportValid] = useState([])
+  const [ingredientProductImportSkipped, setIngredientProductImportSkipped] = useState([])
+  const [ingredientProductImporting, setIngredientProductImporting] = useState(false)
   const [ingredientProductPanelOpen, setIngredientProductPanelOpen] = useState(false)
   const [editingIngredientId, setEditingIngredientId] = useState(null)
   const [ingredientProductForm, setIngredientProductForm] = useState({ barcode: '', name: '', unit: '', current_cost: '' })
@@ -385,6 +390,124 @@ export default function Kitchen() {
     loadAll()
   }
 
+  function handleDownloadIngredientProductTemplate() {
+    const headers = ['Name', 'Unit', 'Cost per unit']
+    const example1 = ['PORK', 'g', '0.33']
+    const example2 = ['ONION', 'g', '0.10']
+    const csv = [headers, example1, example2]
+      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n')
+    downloadFile('ingredients-template.csv', csv, 'text/csv;charset=utf-8;')
+  }
+
+  function handleIngredientProductImportClick() {
+    ingredientProductFileInputRef.current?.click()
+  }
+
+  function handleIngredientProductFileChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const rows = parseCsv(String(reader.result))
+        if (rows.length < 2) {
+          setErrorMsg('That file has no data rows.')
+          return
+        }
+        const headerRow = rows[0].map((h) => h.trim())
+        const aliases = { name: 'name', ingredient: 'name', unit: 'unit', cost: 'cost', costperunit: 'cost', unitcost: 'cost' }
+        const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
+
+        const existingNames = new Set(ingredientProducts.map((p) => p.name.toUpperCase()))
+        const seenInFile = new Set()
+        const valid = []
+        const skipped = []
+
+        rows.slice(1).forEach((r, idx) => {
+          const rowNum = idx + 2
+          if (r.length !== headerRow.length) {
+            skipped.push({
+              rowNum,
+              reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma threw off parsing`,
+            })
+            return
+          }
+          const obj = {}
+          canonicalKeys.forEach((key, i) => {
+            if (key) obj[key] = (r[i] ?? '').trim()
+          })
+
+          const name = (obj.name || '').toUpperCase()
+          if (!name) {
+            skipped.push({ rowNum, reason: 'Missing name' })
+            return
+          }
+          if (existingNames.has(name)) {
+            skipped.push({ rowNum, reason: `${obj.name} already exists as an ingredient` })
+            return
+          }
+          if (seenInFile.has(name)) {
+            skipped.push({ rowNum, reason: `Duplicate "${obj.name}" within this file` })
+            return
+          }
+          const cost = Number(obj.cost)
+          if (obj.cost === undefined || obj.cost === '' || isNaN(cost) || cost < 0) {
+            skipped.push({ rowNum, reason: 'Missing or invalid cost' })
+            return
+          }
+          seenInFile.add(name)
+
+          valid.push({
+            tempId: crypto.randomUUID(),
+            name,
+            unit: upper(obj.unit) || null,
+            current_cost: cost,
+          })
+        })
+
+        setIngredientProductImportValid(valid)
+        setIngredientProductImportSkipped(skipped)
+        setErrorMsg('')
+        setIngredientProductImportOpen(true)
+      } catch {
+        setErrorMsg('Could not read that file — make sure it is a CSV, not an .xlsx.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  async function handleConfirmIngredientProductImport() {
+    setIngredientProductImporting(true)
+    let inserted = 0
+    const failed = []
+    for (const row of ingredientProductImportValid) {
+      const barcode = `ING-${row.name.replace(/[^A-Z0-9]+/g, '-')}-${Math.floor(1000 + Math.random() * 9000)}`
+      const { error } = await supabase.from('products').insert({
+        barcode,
+        name: row.name,
+        unit: row.unit,
+        current_cost: row.current_cost,
+        product_type: 'RAW MATERIAL',
+      })
+      if (error) {
+        failed.push({ name: row.name, reason: error.message })
+      } else {
+        inserted++
+      }
+    }
+    setIngredientProductImporting(false)
+    setIngredientProductImportOpen(false)
+    setIngredientProductImportValid([])
+    setIngredientProductImportSkipped([])
+    if (failed.length > 0) {
+      setErrorMsg(`${inserted} added, ${failed.length} failed: ${failed.map((f) => f.name).join(', ')}`)
+    }
+    loadAll()
+  }
+
   // If this product has a Recipe defined, auto-fill the day's cost from that
   // recipe's ingredient math — still editable, since actual cost can vary day
   // to day, but saves re-typing it every time for dishes you've already priced.
@@ -530,13 +653,35 @@ export default function Kitchen() {
           </button>
         )}
         {tab === 'ingredients' && (
-          <button
-            onClick={openNewIngredientProduct}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
-          >
-            <Plus size={16} />
-            New ingredient
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleDownloadIngredientProductTemplate}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <FileDown size={16} />
+              Template
+            </button>
+            <button
+              onClick={handleIngredientProductImportClick}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <Upload size={16} />
+              Import CSV
+            </button>
+            <input
+              ref={ingredientProductFileInputRef}
+              type="file" accept=".csv"
+              onChange={handleIngredientProductFileChange}
+              className="hidden"
+            />
+            <button
+              onClick={openNewIngredientProduct}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              <Plus size={16} />
+              New ingredient
+            </button>
+          </div>
         )}
       </div>
 
@@ -1136,6 +1281,60 @@ export default function Kitchen() {
             {savingIngredientProduct ? 'Saving…' : editingIngredientId ? 'Save changes' : 'Add ingredient'}
           </button>
         </form>
+      </SlidePanel>
+
+      <SlidePanel
+        open={ingredientProductImportOpen}
+        title="Import ingredients"
+        onClose={() => setIngredientProductImportOpen(false)}
+      >
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+            <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{ingredientProductImportValid.length}</div>
+            <div className="text-xs text-[var(--color-ink-soft)]">ready to import</div>
+          </div>
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+            <div className="font-display text-xl font-semibold text-[var(--color-rust)]">{ingredientProductImportSkipped.length}</div>
+            <div className="text-xs text-[var(--color-ink-soft)]">skipped</div>
+          </div>
+        </div>
+
+        {ingredientProductImportSkipped.length > 0 && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
+            <div className="max-h-48 space-y-1 overflow-y-auto">
+              {ingredientProductImportSkipped.map((s, i) => (
+                <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                  Row {s.rowNum}: {s.reason}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {ingredientProductImportValid.length > 0 && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Preview (first 5)</div>
+            <div className="space-y-1">
+              {ingredientProductImportValid.slice(0, 5).map((r) => (
+                <div key={r.tempId} className="rounded-md border border-[var(--color-line)] px-2.5 py-1.5 text-xs">
+                  <span className="font-medium">{r.name}</span> — {r.current_cost.toFixed(2)} / {r.unit || 'unit'}
+                </div>
+              ))}
+              {ingredientProductImportValid.length > 5 && (
+                <div className="text-xs text-[var(--color-ink-soft)]">…and {ingredientProductImportValid.length - 5} more</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={handleConfirmIngredientProductImport}
+          disabled={ingredientProductImporting || ingredientProductImportValid.length === 0}
+          className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+        >
+          {ingredientProductImporting ? 'Importing…' : `Import ${ingredientProductImportValid.length} ingredient${ingredientProductImportValid.length === 1 ? '' : 's'}`}
+        </button>
       </SlidePanel>
     </div>
   )
