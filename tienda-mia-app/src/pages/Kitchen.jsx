@@ -24,7 +24,7 @@ const EMPTY_RECIPE_FORM = {
   labor_cost: '0',
   overhead_cost: '0',
 }
-const EMPTY_INGREDIENT_FORM = { ingredient_product_id: '', quantity_per_yield: '', unit: '' }
+const EMPTY_INGREDIENT_FORM = { ingredient_product_id: '', quantity_per_yield: '', unit: '', cost: '' }
 
 // A recipe's measurement (2 tsp of vanilla) is often different from how that
 // ingredient is stocked (a 1L bottle) — this covers common cooking units on
@@ -149,9 +149,16 @@ export default function Kitchen() {
   // Recipe builder panel
   const [recipePanelOpen, setRecipePanelOpen] = useState(false)
   const [editingRecipeId, setEditingRecipeId] = useState(null)
+
+  const recipeFileInputRef = useRef(null)
+  const [recipeImportOpen, setRecipeImportOpen] = useState(false)
+  const [recipeImportValid, setRecipeImportValid] = useState([])
+  const [recipeImportSkipped, setRecipeImportSkipped] = useState([])
+  const [recipeImporting, setRecipeImporting] = useState(false)
   const [recipeForm, setRecipeForm] = useState(EMPTY_RECIPE_FORM)
   const [recipeIngredients, setRecipeIngredients] = useState([])
   const [ingredientForm, setIngredientForm] = useState(EMPTY_INGREDIENT_FORM)
+  const [ingredientEntryMode, setIngredientEntryMode] = useState('quantity') // 'quantity' | 'cost'
   const ingredientFileInputRef = useRef(null)
   const [ingredientImportPanelOpen, setIngredientImportPanelOpen] = useState(false)
   const [ingredientImportValid, setIngredientImportValid] = useState([])
@@ -194,6 +201,7 @@ export default function Kitchen() {
     setRecipeForm(EMPTY_RECIPE_FORM)
     setRecipeIngredients([])
     setIngredientForm(EMPTY_INGREDIENT_FORM)
+    setIngredientEntryMode('quantity')
     setErrorMsg('')
     setRecipePanelOpen(true)
   }
@@ -220,6 +228,7 @@ export default function Kitchen() {
       }))
     )
     setIngredientForm(EMPTY_INGREDIENT_FORM)
+    setIngredientEntryMode('quantity')
     setErrorMsg('')
     setRecipePanelOpen(true)
   }
@@ -247,10 +256,238 @@ export default function Kitchen() {
     loadAll()
   }
 
+  function handleDownloadRecipeTemplate() {
+    const headers = ['Recipe', 'Yield Qty', 'Prep Loss %', 'Packaging Cost', 'Labor Cost', 'Overhead Cost', 'Ingredient', 'Qty per Yield', 'Unit']
+    // Recipe-level fields (Yield/Prep Loss/costs) only need filling on a
+    // recipe's FIRST row — repeat the Recipe name on every ingredient line,
+    // one line per ingredient, same as the recipe actually reads.
+    const rows = [
+      headers,
+      ['CHICKEN ARROZ CALDO', '20', '0', '0', '0', '0', 'MALAGKIT RICE', '1500', 'g'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'CHICKEN', '0.5', 'kg'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'SALT', '0.125', 'cup'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'SPRING ONION', '50', 'g'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'GARLIC', '20', 'g'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'EGG', '14', 'pcs'],
+      ['PORK ADOBO', '10', '0', '0', '0', '0', 'PORK', '2', 'kg'],
+      ['PORK ADOBO', '', '', '', '', '', 'SOY SAUCE', '1', 'cup'],
+      ['PORK ADOBO', '', '', '', '', '', 'VINEGAR', '1', 'cup'],
+    ]
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile('recipes-template.csv', csv, 'text/csv;charset=utf-8;')
+  }
+
+  function handleRecipeImportClick() {
+    recipeFileInputRef.current?.click()
+  }
+
+  function handleRecipeFileChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const rows = parseCsv(String(reader.result))
+        if (rows.length < 2) {
+          setErrorMsg('That file has no data rows.')
+          return
+        }
+        const headerRow = rows[0].map((h) => h.trim())
+        const aliases = {
+          recipe: 'recipe_name', dish: 'recipe_name', product: 'recipe_name', finishedproduct: 'recipe_name',
+          yieldqty: 'yield_quantity', yield: 'yield_quantity', yieldquantity: 'yield_quantity',
+          preplosspct: 'prep_loss_pct', preploss: 'prep_loss_pct',
+          packagingcost: 'packaging_cost', packaging: 'packaging_cost',
+          laborcost: 'labor_cost', labor: 'labor_cost',
+          overheadcost: 'overhead_cost', overhead: 'overhead_cost',
+          ingredient: 'ingredient_name', ingredientname: 'ingredient_name',
+          qtyperyield: 'quantity_per_yield', quantityperyield: 'quantity_per_yield', qty: 'quantity_per_yield', quantity: 'quantity_per_yield',
+          unit: 'unit',
+        }
+        const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
+        const cleanName = (v) =>
+          (v ?? '')
+            .normalize('NFKC')
+            // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+            .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+            .toUpperCase()
+
+        // One group per distinct recipe name — rows for the same recipe don't
+        // need to be adjacent in the file, just share the same name.
+        const recipeGroups = new Map()
+        const skipped = []
+
+        rows.slice(1).forEach((r, idx) => {
+          const rowNum = idx + 2
+          if (r.length !== headerRow.length) {
+            skipped.push({
+              rowNum,
+              reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma`,
+            })
+            return
+          }
+          const obj = {}
+          canonicalKeys.forEach((key, i) => {
+            if (key) obj[key] = (r[i] ?? '').trim()
+          })
+
+          const recipeNameRaw = obj.recipe_name || ''
+          if (!recipeNameRaw) {
+            skipped.push({ rowNum, reason: 'Missing recipe name' })
+            return
+          }
+          const key = cleanName(recipeNameRaw)
+
+          if (!recipeGroups.has(key)) {
+            const product = kitchenProducts.find((p) => cleanName(p.name) === key)
+            recipeGroups.set(key, {
+              recipeName: recipeNameRaw,
+              product,
+              yield_quantity: null,
+              prep_loss_pct: null,
+              packaging_cost: null,
+              labor_cost: null,
+              overhead_cost: null,
+              ingredients: [],
+              firstRowNum: rowNum,
+            })
+          }
+          const group = recipeGroups.get(key)
+
+          // Carry forward recipe-level fields from whichever row first specifies
+          // them — usually the first row, but works even if scattered.
+          if (group.yield_quantity === null && obj.yield_quantity) group.yield_quantity = Number(obj.yield_quantity)
+          if (group.prep_loss_pct === null && obj.prep_loss_pct !== '') group.prep_loss_pct = Number(obj.prep_loss_pct)
+          if (group.packaging_cost === null && obj.packaging_cost !== '') group.packaging_cost = Number(obj.packaging_cost)
+          if (group.labor_cost === null && obj.labor_cost !== '') group.labor_cost = Number(obj.labor_cost)
+          if (group.overhead_cost === null && obj.overhead_cost !== '') group.overhead_cost = Number(obj.overhead_cost)
+
+          const ingredientNameRaw = obj.ingredient_name || ''
+          if (!ingredientNameRaw) {
+            skipped.push({ rowNum, reason: `${recipeNameRaw}: missing ingredient name` })
+            return
+          }
+          const ingredientProduct = products.find((p) => cleanName(p.name) === cleanName(ingredientNameRaw))
+          if (!ingredientProduct) {
+            skipped.push({ rowNum, reason: `${recipeNameRaw}: no product matches ingredient "${ingredientNameRaw}"` })
+            return
+          }
+          const qty = Number(obj.quantity_per_yield)
+          if (!qty || qty <= 0) {
+            skipped.push({ rowNum, reason: `${recipeNameRaw}: missing or invalid quantity for "${ingredientNameRaw}"` })
+            return
+          }
+
+          group.ingredients.push({
+            ingredient_product_id: ingredientProduct.id,
+            name: ingredientProduct.name,
+            quantity_per_yield: qty,
+            unit: upper(obj.unit) || ingredientProduct.unit,
+          })
+        })
+
+        const valid = []
+        for (const group of recipeGroups.values()) {
+          if (!group.product) {
+            skipped.push({ rowNum: group.firstRowNum, reason: `No kitchen product matches recipe name "${group.recipeName}" — add it as a product first` })
+            continue
+          }
+          if (group.ingredients.length === 0) {
+            skipped.push({ rowNum: group.firstRowNum, reason: `${group.recipeName}: no valid ingredient rows` })
+            continue
+          }
+          valid.push({
+            tempId: crypto.randomUUID(),
+            recipeName: group.recipeName,
+            product_id: group.product.id,
+            yield_quantity: group.yield_quantity ?? 1,
+            prep_loss_pct: group.prep_loss_pct ?? 0,
+            packaging_cost: group.packaging_cost ?? 0,
+            labor_cost: group.labor_cost ?? 0,
+            overhead_cost: group.overhead_cost ?? 0,
+            ingredients: group.ingredients,
+          })
+        }
+
+        setRecipeImportValid(valid)
+        setRecipeImportSkipped(skipped)
+        setErrorMsg('')
+        setRecipeImportOpen(true)
+      } catch {
+        setErrorMsg('Could not read that file — make sure it is a CSV, not an .xlsx.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  async function handleConfirmRecipeImport() {
+    setRecipeImporting(true)
+    let insertedRecipes = 0
+    const failed = []
+
+    for (const r of recipeImportValid) {
+      const { data: recipe, error: recipeErr } = await supabase
+        .from('recipes')
+        .insert({
+          product_id: r.product_id,
+          yield_quantity: r.yield_quantity,
+          prep_loss_pct: r.prep_loss_pct,
+          packaging_cost: r.packaging_cost,
+          labor_cost: r.labor_cost,
+          overhead_cost: r.overhead_cost,
+        })
+        .select()
+        .single()
+
+      if (recipeErr) {
+        failed.push({ name: r.recipeName, reason: recipeErr.message })
+        continue
+      }
+
+      const ingredientRows = r.ingredients.map((i) => ({
+        recipe_id: recipe.id,
+        ingredient_product_id: i.ingredient_product_id,
+        quantity_per_yield: i.quantity_per_yield,
+        unit: i.unit,
+      }))
+      const { error: ingErr } = await supabase.from('recipe_ingredients').insert(ingredientRows)
+      if (ingErr) {
+        failed.push({ name: r.recipeName, reason: `Recipe created but ingredients failed: ${ingErr.message}` })
+        continue
+      }
+      insertedRecipes++
+    }
+
+    setRecipeImporting(false)
+    setRecipeImportOpen(false)
+    setRecipeImportValid([])
+    setRecipeImportSkipped([])
+    if (failed.length > 0) {
+      setErrorMsg(`${insertedRecipes} recipe${insertedRecipes === 1 ? '' : 's'} added, ${failed.length} failed: ${failed.map((f) => f.name).join(', ')}`)
+    }
+    loadAll()
+  }
+
   function addIngredientToRecipe(e) {
     e.preventDefault()
-    if (!ingredientForm.ingredient_product_id || !ingredientForm.quantity_per_yield) return
     const p = products.find((x) => x.id === ingredientForm.ingredient_product_id)
+    if (!p) return
+
+    let quantity, unit
+    if (ingredientEntryMode === 'cost') {
+      if (!ingredientForm.cost || !p.current_cost) return
+      // Working backwards from cost to quantity only makes sense in the
+      // ingredient's own costed unit — that's the unit the division resolves to.
+      quantity = Number(ingredientForm.cost) / Number(p.current_cost)
+      unit = p.unit
+    } else {
+      if (!ingredientForm.quantity_per_yield) return
+      quantity = Number(ingredientForm.quantity_per_yield)
+      unit = ingredientForm.unit || p.unit
+    }
+
     setRecipeIngredients([
       ...recipeIngredients,
       {
@@ -258,8 +495,8 @@ export default function Kitchen() {
         ingredient_product_id: p.id,
         name: p.name,
         current_cost: Number(p.current_cost || 0),
-        quantity_per_yield: Number(ingredientForm.quantity_per_yield),
-        unit: ingredientForm.unit || p.unit,
+        quantity_per_yield: Math.round(quantity * 10000) / 10000,
+        unit,
         product_unit: p.unit,
       },
     ])
@@ -752,13 +989,30 @@ export default function Kitchen() {
           </p>
         </div>
         {tab === 'recipes' && (
-          <button
-            onClick={openNewRecipe}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
-          >
-            <Plus size={16} />
-            New recipe
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleDownloadRecipeTemplate}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <FileDown size={16} />
+              Template
+            </button>
+            <button
+              onClick={handleRecipeImportClick}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <Upload size={16} />
+              Import CSV
+            </button>
+            <input ref={recipeFileInputRef} type="file" accept=".csv" onChange={handleRecipeFileChange} className="hidden" />
+            <button
+              onClick={openNewRecipe}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              <Plus size={16} />
+              New recipe
+            </button>
+          </div>
         )}
         {tab === 'ingredients' && (
           <div className="flex gap-2">
@@ -1277,30 +1531,82 @@ export default function Kitchen() {
                 }
               />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Quantity per yield">
-                <input
-                  type="number" step="0.001" min="0"
-                  value={ingredientForm.quantity_per_yield}
-                  onChange={(e) => setIngredientForm({ ...ingredientForm, quantity_per_yield: e.target.value })}
-                  className="input"
-                />
-              </Field>
-              <Field label="Unit">
-                <select
-                  value={ingredientForm.unit}
-                  onChange={(e) => setIngredientForm({ ...ingredientForm, unit: e.target.value })}
-                  className="input"
-                >
-                  {ingredientForm.unit && !RECIPE_UNITS.includes(ingredientForm.unit) && (
-                    <option value={ingredientForm.unit}>{ingredientForm.unit} (product's unit)</option>
-                  )}
-                  {RECIPE_UNITS.map((u) => (
-                    <option key={u} value={u}>{u}</option>
-                  ))}
-                </select>
-              </Field>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setIngredientEntryMode('quantity')}
+                className={`flex-1 rounded-md border py-1.5 text-xs font-medium ${ingredientEntryMode === 'quantity' ? 'border-[var(--color-ink)] bg-[var(--color-ink)] text-white' : 'border-[var(--color-line)]'}`}
+              >
+                By quantity
+              </button>
+              <button
+                type="button"
+                onClick={() => setIngredientEntryMode('cost')}
+                className={`flex-1 rounded-md border py-1.5 text-xs font-medium ${ingredientEntryMode === 'cost' ? 'border-[var(--color-ink)] bg-[var(--color-ink)] text-white' : 'border-[var(--color-line)]'}`}
+              >
+                By cost
+              </button>
             </div>
+
+            {ingredientEntryMode === 'quantity' ? (
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Quantity per yield">
+                  <input
+                    type="number" step="0.001" min="0"
+                    value={ingredientForm.quantity_per_yield}
+                    onChange={(e) => setIngredientForm({ ...ingredientForm, quantity_per_yield: e.target.value })}
+                    className="input"
+                  />
+                </Field>
+                <Field label="Unit">
+                  <select
+                    value={ingredientForm.unit}
+                    onChange={(e) => setIngredientForm({ ...ingredientForm, unit: e.target.value })}
+                    className="input"
+                  >
+                    {ingredientForm.unit && !RECIPE_UNITS.includes(ingredientForm.unit) && (
+                      <option value={ingredientForm.unit}>{ingredientForm.unit} (product's unit)</option>
+                    )}
+                    {RECIPE_UNITS.map((u) => (
+                      <option key={u} value={u}>{u}</option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+            ) : (
+              (() => {
+                const p = products.find((x) => x.id === ingredientForm.ingredient_product_id)
+                const noCost = p && !p.current_cost
+                const computedQty = p && p.current_cost && ingredientForm.cost
+                  ? Number(ingredientForm.cost) / Number(p.current_cost)
+                  : null
+                return (
+                  <>
+                    <Field label="Cost (₱)">
+                      <input
+                        type="number" step="0.01" min="0"
+                        value={ingredientForm.cost}
+                        onChange={(e) => setIngredientForm({ ...ingredientForm, cost: e.target.value })}
+                        className="input"
+                        placeholder="e.g. 5"
+                      />
+                    </Field>
+                    {noCost && (
+                      <div className="mt-1.5 text-xs text-[var(--color-rust)]">
+                        This ingredient has no cost set yet — add one in Kitchen → Ingredients first.
+                      </div>
+                    )}
+                    {computedQty !== null && (
+                      <div className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
+                        ≈ {computedQty.toFixed(4)} {p?.unit}
+                      </div>
+                    )}
+                  </>
+                )
+              })()
+            )}
+
             <button onClick={addIngredientToRecipe}
               className="flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-ink)] py-2 text-sm font-medium">
               <Plus size={15} /> Add ingredient
@@ -1487,7 +1793,59 @@ export default function Kitchen() {
           {ingredientProductImporting ? 'Importing…' : `Import ${ingredientProductImportValid.length} ingredient${ingredientProductImportValid.length === 1 ? '' : 's'}`}
         </button>
       </SlidePanel>
+
+      <SlidePanel
+        open={recipeImportOpen}
+        title="Import recipes"
+        onClose={() => setRecipeImportOpen(false)}
+      >
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+            <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{recipeImportValid.length}</div>
+            <div className="text-xs text-[var(--color-ink-soft)]">recipes ready</div>
+          </div>
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+            <div className="font-display text-xl font-semibold text-[var(--color-rust)]">{recipeImportSkipped.length}</div>
+            <div className="text-xs text-[var(--color-ink-soft)]">rows skipped</div>
+          </div>
+        </div>
+
+        {recipeImportSkipped.length > 0 && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
+            <div className="max-h-48 space-y-1 overflow-y-auto">
+              {recipeImportSkipped.map((s, i) => (
+                <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                  Row {s.rowNum}: {s.reason}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {recipeImportValid.length > 0 && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Recipes found</div>
+            <div className="max-h-64 space-y-1.5 overflow-y-auto">
+              {recipeImportValid.map((r) => (
+                <div key={r.tempId} className="rounded-md border border-[var(--color-line)] px-2.5 py-1.5 text-xs">
+                  <span className="font-medium">{r.recipeName}</span> — {r.ingredients.length} ingredient{r.ingredients.length === 1 ? '' : 's'}, yield {r.yield_quantity}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={handleConfirmRecipeImport}
+          disabled={recipeImporting || recipeImportValid.length === 0}
+          className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+        >
+          {recipeImporting ? 'Importing…' : `Import ${recipeImportValid.length} recipe${recipeImportValid.length === 1 ? '' : 's'}`}
+        </button>
+      </SlidePanel>
     </div>
+
   )
 }
 
