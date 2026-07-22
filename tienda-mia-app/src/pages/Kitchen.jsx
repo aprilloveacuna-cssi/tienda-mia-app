@@ -17,6 +17,10 @@ const EMPTY_RECIPE_FORM = {
 }
 const EMPTY_INGREDIENT_FORM = { ingredient_product_id: '', quantity_per_yield: '', unit: '' }
 
+function today() {
+  return new Date().toISOString().slice(0, 10)
+}
+
 function recipeCost(recipe, ingredients) {
   const rawCost = ingredients.reduce((sum, i) => sum + i.quantity_per_yield * i.current_cost, 0)
   const lossFactor = 1 - Number(recipe.prep_loss_pct || 0) / 100
@@ -35,6 +39,15 @@ export default function Kitchen() {
   const [products, setProducts] = useState([])
   const [recipes, setRecipes] = useState([])
   const [productions, setProductions] = useState([])
+  const [leftovers, setLeftovers] = useState([])
+  const [dailyMealsDate, setDailyMealsDate] = useState(today())
+  const [dailyMealLines, setDailyMealLines] = useState([])
+  const [dailyMealForm, setDailyMealForm] = useState({ product_id: '', quantity: '', unit_cost: '', expiration_date: '' })
+  const [dailyMealsSaving, setDailyMealsSaving] = useState(false)
+  const [dailyMealsError, setDailyMealsError] = useState('')
+  const [leftoverForm, setLeftoverForm] = useState({ product_id: '', quantity: '', leftover_date: today(), notes: '' })
+  const [leftoverSaving, setLeftoverSaving] = useState(false)
+  const [leftoverError, setLeftoverError] = useState('')
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -90,17 +103,18 @@ export default function Kitchen() {
   async function loadAll() {
     setLoading(true)
     setErrorMsg('')
-    const [productsRes, recipesRes, productionsRes] = await Promise.all([
-      fetchAllRows('products', 'id, sku, name, unit, current_cost, selling_price, status', 'name'),
+    const [productsRes, recipesRes, productionsRes, leftoversRes] = await Promise.all([
+      fetchAllRows('products', 'id, sku, name, unit, current_cost, selling_price, status, business_unit', 'name'),
       supabase
         .from('recipes')
         .select('*, product:products(name, sku, unit, selling_price), recipe_ingredients(*, ingredient:products(name, sku, unit, current_cost))')
         .eq('status', 'active')
         .order('created_at', { ascending: false }),
       fetchAllRows('kitchen_production', '*, recipe:recipes(product:products(name, sku, unit))', 'created_at', { ascending: false }),
+      fetchAllRows('waste', '*, product:products(name, sku, unit)', 'waste_date', { ascending: false }),
     ])
 
-    if (productsRes.error || recipesRes.error || productionsRes.error) {
+    if (productsRes.error || recipesRes.error || productionsRes.error || leftoversRes.error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
       setLoading(false)
       return
@@ -108,6 +122,7 @@ export default function Kitchen() {
     setProducts((productsRes.data ?? []).filter((p) => p.status === 'active'))
     setRecipes(recipesRes.data ?? [])
     setProductions(productionsRes.data ?? [])
+    setLeftovers((leftoversRes.data ?? []).filter((w) => w.reason === 'Daily Leftover'))
     setLoading(false)
   }
 
@@ -361,6 +376,118 @@ export default function Kitchen() {
     loadAll()
   }
 
+  // ---------- Daily Available Meals (quick entry, no ingredient deduction) ----------
+  const kitchenProducts = products.filter((p) => p.business_unit === 'KITCHEN')
+
+  function addDailyMealLine(e) {
+    e.preventDefault()
+    if (!dailyMealForm.product_id || !dailyMealForm.quantity || !dailyMealForm.unit_cost) return
+    const p = kitchenProducts.find((x) => x.id === dailyMealForm.product_id)
+    setDailyMealLines([
+      ...dailyMealLines,
+      {
+        tempId: crypto.randomUUID(),
+        product_id: p.id,
+        product_name: p.name,
+        unit: p.unit,
+        quantity: Number(dailyMealForm.quantity),
+        unit_cost: Number(dailyMealForm.unit_cost),
+        expiration_date: dailyMealForm.expiration_date || null,
+      },
+    ])
+    setDailyMealForm({ product_id: '', quantity: '', unit_cost: '', expiration_date: '' })
+  }
+
+  function removeDailyMealLine(tempId) {
+    setDailyMealLines(dailyMealLines.filter((l) => l.tempId !== tempId))
+  }
+
+  async function handleSaveDailyMeals() {
+    if (dailyMealLines.length === 0) return
+    setDailyMealsSaving(true)
+    setDailyMealsError('')
+
+    for (const line of dailyMealLines) {
+      // Same batch + ledger mechanics as a full Production run, just skipping
+      // ingredient deduction — this is for items entered straight off the daily
+      // kitchen report (quantity + cost only), not a formal recipe run.
+      const { data: batch, error: batchErr } = await supabase
+        .from('batches')
+        .insert({
+          product_id: line.product_id,
+          source_type: 'KitchenProduction',
+          received_quantity: line.quantity,
+          unit_cost: line.unit_cost,
+          expiration_date: line.expiration_date,
+          received_date: dailyMealsDate,
+        })
+        .select()
+        .single()
+
+      if (batchErr) {
+        setDailyMealsError(`${line.product_name}: ${batchErr.message}`)
+        setDailyMealsSaving(false)
+        loadAll()
+        return
+      }
+
+      const { error: ledgerErr } = await supabase.from('inventory_ledger').insert({
+        product_id: line.product_id,
+        batch_id: batch.id,
+        transaction_type: 'KitchenProduction',
+        quantity_change: line.quantity,
+        unit_cost_at_transaction: line.unit_cost,
+        source_module: 'Kitchen',
+        source_reference_id: batch.id,
+      })
+
+      if (ledgerErr) {
+        setDailyMealsError(`${line.product_name}: inventory wasn't updated — ${ledgerErr.message}`)
+        setDailyMealsSaving(false)
+        loadAll()
+        return
+      }
+
+      await supabase.from('products').update({ current_cost: line.unit_cost }).eq('id', line.product_id)
+    }
+
+    setDailyMealsSaving(false)
+    setDailyMealLines([])
+    setDailyMealsDate(today())
+    loadAll()
+  }
+
+  // ---------- Kitchen Leftovers ----------
+  async function handleSaveLeftover(e) {
+    e.preventDefault()
+    if (!leftoverForm.product_id || !leftoverForm.quantity) return
+    setLeftoverSaving(true)
+    setLeftoverError('')
+
+    // Informational only — no batch_id, no inventory_ledger entry. This logs
+    // the pattern over time (how much of an item consistently goes unsold)
+    // for planning purposes. The REAL leftover — what's actually still in a
+    // day's batch — is already visible directly in Inventory, since Daily
+    // Available Meals now creates a real batch FIFO can track. Whatever's not
+    // consumed there just carries over to tomorrow automatically, or can be
+    // disposed via the usual Dispose flow if it won't keep.
+    const { error } = await supabase.from('waste').insert({
+      product_id: leftoverForm.product_id,
+      waste_date: leftoverForm.leftover_date,
+      quantity: Number(leftoverForm.quantity),
+      reason: 'Daily Leftover',
+      remarks: leftoverForm.notes.trim() || null,
+    })
+
+    setLeftoverSaving(false)
+    if (error) {
+      setLeftoverError(error.message)
+      return
+    }
+    setLeftoverForm({ product_id: '', quantity: '', leftover_date: today(), notes: '' })
+    loadAll()
+  }
+
   return (
     <div>
       <div className="mb-5 flex items-center justify-between">
@@ -370,27 +497,34 @@ export default function Kitchen() {
             Recipes define the cost formula. Production runs actually consume ingredients and create finished-good stock.
           </p>
         </div>
-        <button
-          onClick={tab === 'recipes' ? openNewRecipe : openNewProduction}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
-        >
-          <Plus size={16} />
-          {tab === 'recipes' ? 'New recipe' : 'New production'}
-        </button>
+        {tab !== 'leftovers' && tab !== 'dailyMeals' && (
+          <button
+            onClick={tab === 'recipes' ? openNewRecipe : openNewProduction}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+          >
+            <Plus size={16} />
+            {tab === 'recipes' ? 'New recipe' : 'New production'}
+          </button>
+        )}
       </div>
 
       <div className="mb-4 flex gap-1 border-b border-[var(--color-line)]">
-        {['recipes', 'production'].map((t) => (
+        {[
+          ['recipes', 'Recipes'],
+          ['production', 'Production'],
+          ['dailyMeals', 'Daily Meals'],
+          ['leftovers', 'Leftovers'],
+        ].map(([t, label]) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-3 py-2 text-sm font-medium capitalize ${
+            className={`px-3 py-2 text-sm font-medium ${
               tab === t
                 ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]'
                 : 'text-[var(--color-ink-soft)]'
             }`}
           >
-            {t}
+            {label}
           </button>
         ))}
       </div>
@@ -442,7 +576,7 @@ export default function Kitchen() {
             </tbody>
           </table>
         </div>
-      ) : (
+      ) : tab === 'production' ? (
         <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
           <table className="w-full text-left text-sm">
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
@@ -474,6 +608,213 @@ export default function Kitchen() {
               ))}
             </tbody>
           </table>
+        </div>
+      ) : tab === 'dailyMeals' ? (
+        <div>
+          <div className="mb-4 rounded-md border border-dashed border-[var(--color-line)] p-4">
+            <div className="mb-3 text-xs text-[var(--color-ink-soft)]">
+              Quick entry straight off the daily kitchen report — quantity and cost only, no ingredient deduction.
+              Creates a real batch, so FIFO and stock checks in Sales work against it like anything else.
+            </div>
+            {dailyMealsError && (
+              <div className="mb-3 rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                {dailyMealsError}
+              </div>
+            )}
+
+            <Field label="Date" required>
+              <input
+                type="date" required max={today()}
+                value={dailyMealsDate}
+                onChange={(e) => setDailyMealsDate(e.target.value)}
+                className="input mb-3 max-w-[200px]"
+              />
+            </Field>
+
+            <div className="mb-3 overflow-hidden rounded-md border border-[var(--color-line)]">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-[var(--color-line)] text-xs text-[var(--color-ink-soft)]">
+                  <tr>
+                    <th className="px-3 py-2">Meal</th>
+                    <th className="px-3 py-2">Qty</th>
+                    <th className="px-3 py-2">Cost</th>
+                    <th className="px-3 py-2">Expiry</th>
+                    <th className="px-3 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyMealLines.length === 0 && (
+                    <tr><td colSpan={5} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No meals added yet.</td></tr>
+                  )}
+                  {dailyMealLines.map((l) => (
+                    <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
+                      <td className="px-3 py-2">{l.product_name}</td>
+                      <td className="px-3 py-2">{l.quantity} {l.unit}</td>
+                      <td className="px-3 py-2">{l.unit_cost.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.expiration_date || '—'}</td>
+                      <td className="px-3 py-2">
+                        <button
+                          onClick={() => removeDailyMealLine(l.tempId)}
+                          aria-label="Remove"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <form onSubmit={addDailyMealLine} className="grid grid-cols-4 gap-3">
+              <Field label="Meal" required>
+                <select
+                  required
+                  value={dailyMealForm.product_id}
+                  onChange={(e) => setDailyMealForm({ ...dailyMealForm, product_id: e.target.value })}
+                  className="input"
+                >
+                  <option value="">Select…</option>
+                  {kitchenProducts.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Quantity" required>
+                <input
+                  type="number" step="0.001" min="0" required
+                  value={dailyMealForm.quantity}
+                  onChange={(e) => setDailyMealForm({ ...dailyMealForm, quantity: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Cost per unit" required>
+                <input
+                  type="number" step="0.01" min="0" required
+                  value={dailyMealForm.unit_cost}
+                  onChange={(e) => setDailyMealForm({ ...dailyMealForm, unit_cost: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Expiry (optional)">
+                <input
+                  type="date"
+                  value={dailyMealForm.expiration_date}
+                  onChange={(e) => setDailyMealForm({ ...dailyMealForm, expiration_date: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <button
+                type="submit"
+                className="col-span-4 flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-ink)] py-2 text-sm font-medium"
+              >
+                <Plus size={15} />
+                Add meal
+              </button>
+            </form>
+          </div>
+
+          <button
+            onClick={handleSaveDailyMeals}
+            disabled={dailyMealsSaving || dailyMealLines.length === 0}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--color-herb)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+          >
+            <Check size={15} />
+            {dailyMealsSaving ? 'Saving…' : `Save ${dailyMealLines.length} meal${dailyMealLines.length === 1 ? '' : 's'} for ${dailyMealsDate}`}
+          </button>
+        </div>
+      ) : (
+        <div>
+          <form
+            onSubmit={handleSaveLeftover}
+            className="mb-5 rounded-md border border-dashed border-[var(--color-line)] p-4"
+          >
+            <div className="mb-3 text-xs text-[var(--color-ink-soft)]">
+              Tracks how much of a kitchen item goes unsold each day — helps spot whether the daily serving count
+              needs adjusting. This is informational only; it doesn't move inventory.
+            </div>
+            {leftoverError && (
+              <div className="mb-3 rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                {leftoverError}
+              </div>
+            )}
+            <div className="grid grid-cols-4 gap-3">
+              <Field label="Date" required>
+                <input
+                  type="date" required max={today()}
+                  value={leftoverForm.leftover_date}
+                  onChange={(e) => setLeftoverForm({ ...leftoverForm, leftover_date: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Kitchen product" required>
+                <select
+                  required
+                  value={leftoverForm.product_id}
+                  onChange={(e) => setLeftoverForm({ ...leftoverForm, product_id: e.target.value })}
+                  className="input"
+                >
+                  <option value="">Select…</option>
+                  {kitchenProducts.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Leftover qty" required>
+                <input
+                  type="number" step="0.001" min="0" required
+                  value={leftoverForm.quantity}
+                  onChange={(e) => setLeftoverForm({ ...leftoverForm, quantity: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Notes">
+                <input
+                  value={leftoverForm.notes}
+                  onChange={(e) => setLeftoverForm({ ...leftoverForm, notes: e.target.value })}
+                  className="input"
+                />
+              </Field>
+            </div>
+            <button
+              type="submit"
+              disabled={leftoverSaving}
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-60"
+            >
+              <Plus size={15} />
+              {leftoverSaving ? 'Saving…' : 'Record leftover'}
+            </button>
+          </form>
+
+          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <th className="px-4 py-3">Date</th>
+                  <th className="px-4 py-3">Product</th>
+                  <th className="px-4 py-3">Leftover qty</th>
+                  <th className="px-4 py-3">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && (
+                  <tr><td colSpan={4} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
+                )}
+                {!loading && leftovers.length === 0 && (
+                  <tr><td colSpan={4} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No leftovers recorded yet.</td></tr>
+                )}
+                {leftovers.map((w) => (
+                  <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
+                    <td className="px-4 py-3">{w.waste_date}</td>
+                    <td className="px-4 py-3 font-medium">{w.product?.name}</td>
+                    <td className="px-4 py-3">{w.quantity} {w.product?.unit}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{w.remarks || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

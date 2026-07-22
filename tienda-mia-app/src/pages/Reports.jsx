@@ -351,6 +351,23 @@ const REPORTS = {
       { key: 'total_cost', label: 'Total cost', value: (r) => Number(r.total_cost).toFixed(2) },
     ],
   },
+
+  kitchenLeftovers: {
+    label: 'Kitchen Leftovers',
+    description: 'Daily leftover servings recorded per kitchen item — informational, doesn\'t affect stock.',
+    dateField: (r) => r.waste_date,
+    async fetch() {
+      const { data, error } = await fetchAllRows('waste', '*, product:products(name, sku, unit)', 'waste_date', { ascending: false })
+      if (error) throw error
+      return (data ?? []).filter((w) => w.reason === 'Daily Leftover')
+    },
+    columns: [
+      { key: 'waste_date', label: 'Date' },
+      { key: 'product', label: 'Product', value: (r) => r.product?.name },
+      { key: 'quantity', label: 'Leftover qty', value: (r) => `${r.quantity} ${r.product?.unit ?? ''}` },
+      { key: 'remarks', label: 'Notes', value: (r) => r.remarks ?? '—' },
+    ],
+  },
 }
 
 export default function Reports() {

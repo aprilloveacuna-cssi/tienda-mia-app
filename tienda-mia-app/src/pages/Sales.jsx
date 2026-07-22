@@ -55,6 +55,11 @@ export default function Sales() {
   const [importParsing, setImportParsing] = useState(false)
   const [lineForm, setLineForm] = useState(EMPTY_LINE_FORM)
   const [lineWarning, setLineWarning] = useState('')
+
+  const [quickReceiveOpen, setQuickReceiveOpen] = useState(false)
+  const [quickReceiveForm, setQuickReceiveForm] = useState({ quantity: '', unit_cost: '', expiration_date: '' })
+  const [quickReceiveSaving, setQuickReceiveSaving] = useState(false)
+  const [quickReceiveError, setQuickReceiveError] = useState('')
   const [saving, setSaving] = useState(false)
 
   async function loadSales() {
@@ -73,7 +78,11 @@ export default function Sales() {
   }
 
   async function loadProducts() {
-    const { data, error } = await fetchAllRows('products', 'id, sku, name, unit, selling_price, barcode, status', 'name')
+    const { data, error } = await fetchAllRows(
+      'products',
+      'id, sku, name, unit, selling_price, current_cost, barcode, status, business_unit',
+      'name'
+    )
     if (!error) setProducts(data ?? [])
   }
 
@@ -344,6 +353,60 @@ export default function Sales() {
     // the form below recomputes FIFO fresh, correctly seeing that stock again.
     setPendingLines(pendingLines.filter((l) => l.tempId !== line.tempId))
     setLineForm({ product_id: line.product_id, quantity: String(line.quantity), unit_price: String(line.unit_price) })
+    setLineWarning('')
+  }
+
+  function openQuickReceive() {
+    setQuickReceiveForm({ quantity: lineForm.quantity || '', unit_cost: '', expiration_date: '' })
+    setQuickReceiveError('')
+    setQuickReceiveOpen(true)
+  }
+
+  async function handleQuickReceive(e) {
+    e.preventDefault()
+    if (!quickReceiveForm.quantity || !quickReceiveForm.unit_cost) return
+    setQuickReceiveSaving(true)
+    setQuickReceiveError('')
+
+    // Same draft-then-post flow as a normal purchase, just condensed into one
+    // step — this keeps a real batch and a real purchase record behind the
+    // stock (fully traceable, viewable later in Purchases), rather than a bare
+    // stock bump with no cost or paper trail.
+    const { data: purchase, error: purchaseErr } = await supabase
+      .from('purchases')
+      .insert({ purchase_date: today(), supplier: 'Quick receive (from Sales)' })
+      .select()
+      .single()
+
+    if (purchaseErr) {
+      setQuickReceiveError(purchaseErr.message)
+      setQuickReceiveSaving(false)
+      return
+    }
+
+    const { error: lineErr } = await supabase.from('purchase_lines').insert({
+      purchase_id: purchase.id,
+      product_id: lineForm.product_id,
+      quantity: Number(quickReceiveForm.quantity),
+      unit_cost: Number(quickReceiveForm.unit_cost),
+      expiration_date: quickReceiveForm.expiration_date || null,
+    })
+
+    if (lineErr) {
+      setQuickReceiveError(lineErr.message)
+      setQuickReceiveSaving(false)
+      return
+    }
+
+    const { error: postErr } = await supabase.from('purchases').update({ status: 'posted' }).eq('id', purchase.id)
+
+    setQuickReceiveSaving(false)
+    if (postErr) {
+      setQuickReceiveError(postErr.message)
+      return
+    }
+
+    setQuickReceiveOpen(false)
     setLineWarning('')
   }
 
@@ -716,9 +779,76 @@ export default function Sales() {
                 </Field>
               </div>
               {lineWarning && (
-                <div className="flex items-start gap-1.5 rounded-md bg-[var(--color-amber-soft)] px-3 py-2 text-xs text-[var(--color-amber)]">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                  {lineWarning}
+                <div className="rounded-md bg-[var(--color-amber-soft)] px-3 py-2 text-xs text-[var(--color-amber)]">
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    {lineWarning}
+                  </div>
+                  {!quickReceiveOpen && (
+                    <button
+                      type="button"
+                      onClick={openQuickReceive}
+                      className="mt-1.5 font-medium underline underline-offset-2"
+                    >
+                      Receive stock now
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {quickReceiveOpen && (
+                <div className="space-y-3 rounded-md bg-[var(--color-paper)] p-3">
+                  <div className="text-xs font-medium text-[var(--color-ink-soft)]">
+                    Receive stock — creates a real purchase + batch, same as posting one in Purchases.
+                  </div>
+                  {quickReceiveError && (
+                    <div className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                      {quickReceiveError}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Quantity received" required>
+                      <input
+                        type="number" step="0.001" min="0" required
+                        value={quickReceiveForm.quantity}
+                        onChange={(e) => setQuickReceiveForm({ ...quickReceiveForm, quantity: e.target.value })}
+                        className="input"
+                      />
+                    </Field>
+                    <Field label="Unit cost" required>
+                      <input
+                        type="number" step="0.01" min="0" required
+                        value={quickReceiveForm.unit_cost}
+                        onChange={(e) => setQuickReceiveForm({ ...quickReceiveForm, unit_cost: e.target.value })}
+                        className="input"
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Expiration date (optional)">
+                    <input
+                      type="date"
+                      value={quickReceiveForm.expiration_date}
+                      onChange={(e) => setQuickReceiveForm({ ...quickReceiveForm, expiration_date: e.target.value })}
+                      className="input"
+                    />
+                  </Field>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleQuickReceive}
+                      disabled={quickReceiveSaving}
+                      className="flex-1 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-60"
+                    >
+                      {quickReceiveSaving ? 'Receiving…' : 'Receive & continue'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setQuickReceiveOpen(false)}
+                      className="rounded-md border border-[var(--color-line)] px-3 text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               )}
               <button
