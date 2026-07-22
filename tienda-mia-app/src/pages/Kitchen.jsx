@@ -1190,16 +1190,20 @@ export default function Kitchen() {
                 <tr>
                   <th className="px-3 py-2">Ingredient</th>
                   <th className="px-3 py-2">Qty / yield</th>
+                  <th className="px-3 py-2">Cost</th>
                   <th className="px-3 py-2" />
                 </tr>
               </thead>
               <tbody>
                 {recipeIngredients.length === 0 && (
-                  <tr><td colSpan={3} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No ingredients yet.</td></tr>
+                  <tr><td colSpan={4} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No ingredients yet.</td></tr>
                 )}
                 {recipeIngredients.map((i) => {
                   const needsConversion = i.unit && i.product_unit && i.unit !== i.product_unit
-                  const canConvert = !needsConversion || convertQuantity(1, i.unit, i.product_unit) !== null
+                  const converted = convertQuantity(i.quantity_per_yield, i.unit, i.product_unit)
+                  const canConvert = !needsConversion || converted !== null
+                  const effectiveQty = converted !== null ? converted : i.quantity_per_yield
+                  const lineCost = effectiveQty * i.current_cost
                   return (
                     <tr key={i.tempId} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">{i.name}</td>
@@ -1212,6 +1216,12 @@ export default function Kitchen() {
                           >
                             check unit
                           </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">
+                        {lineCost.toFixed(2)}
+                        {needsConversion && canConvert && (
+                          <span className="ml-1 text-[10px]">({effectiveQty.toFixed(2)} {i.product_unit})</span>
                         )}
                       </td>
                       <td className="px-3 py-2">
