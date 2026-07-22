@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2, Send, Ban, Upload, FileDown, Pencil, X } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import ProductPicker from '../components/ProductPicker'
@@ -80,10 +81,7 @@ export default function Purchases() {
   }
 
   async function loadProducts() {
-    const { data, error } = await supabase
-      .from('products')
-      .select('id, sku, name, unit, barcode, status')
-      .order('name')
+    const { data, error } = await fetchAllRows('products', 'id, sku, name, unit, barcode, status', 'name')
     if (!error) setProducts(data ?? [])
   }
 

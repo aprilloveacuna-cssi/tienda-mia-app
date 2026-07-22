@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Search, Archive, RotateCcw, Pencil, Download, Upload, FileDown } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
@@ -112,10 +113,7 @@ export default function Products() {
   async function loadProducts() {
     setLoading(true)
     setErrorMsg('')
-    const { data, error } = await supabase
-      .from('products')
-      .select('*')
-      .order('created_at', { ascending: false })
+    const { data, error } = await fetchAllRows('products', '*', 'created_at', { ascending: false })
 
     if (error) {
       setErrorMsg(

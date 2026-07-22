@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -38,18 +39,18 @@ export default function Analytics() {
       try {
         const [settingsRes, productsRes, saleLinesRes] = await Promise.all([
           supabase.from('settings').select('key, value'),
-          supabase
-            .from('products')
-            .select('id, sku, name, category, unit, current_cost, selling_price, reorder_point, inventory_cache(current_stock, inventory_value)')
-            .eq('status', 'active'),
-          supabase
-            .from('sale_lines')
-            .select('product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date)'),
+          fetchAllRows(
+            'products',
+            'id, sku, name, category, unit, current_cost, selling_price, reorder_point, status, inventory_cache(current_stock, inventory_value)'
+          ),
+          fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date)'),
         ])
 
         if (settingsRes.error) throw settingsRes.error
         if (productsRes.error) throw productsRes.error
         if (saleLinesRes.error) throw saleLinesRes.error
+
+        productsRes.data = (productsRes.data ?? []).filter((p) => p.status === 'active')
 
         const settingsMap = {}
         for (const s of settingsRes.data ?? []) settingsMap[s.key] = s.value

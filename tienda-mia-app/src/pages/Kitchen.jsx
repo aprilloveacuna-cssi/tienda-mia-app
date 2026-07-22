@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Plus, Trash2, AlertTriangle, Check } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
@@ -90,16 +91,13 @@ export default function Kitchen() {
     setLoading(true)
     setErrorMsg('')
     const [productsRes, recipesRes, productionsRes] = await Promise.all([
-      supabase.from('products').select('id, sku, name, unit, current_cost, selling_price').eq('status', 'active').order('name'),
+      fetchAllRows('products', 'id, sku, name, unit, current_cost, selling_price, status', 'name'),
       supabase
         .from('recipes')
         .select('*, product:products(name, sku, unit, selling_price), recipe_ingredients(*, ingredient:products(name, sku, unit, current_cost))')
         .eq('status', 'active')
         .order('created_at', { ascending: false }),
-      supabase
-        .from('kitchen_production')
-        .select('*, recipe:recipes(product:products(name, sku, unit))')
-        .order('created_at', { ascending: false }),
+      fetchAllRows('kitchen_production', '*, recipe:recipes(product:products(name, sku, unit))', 'created_at', { ascending: false }),
     ])
 
     if (productsRes.error || recipesRes.error || productionsRes.error) {
@@ -107,7 +105,7 @@ export default function Kitchen() {
       setLoading(false)
       return
     }
-    setProducts(productsRes.data ?? [])
+    setProducts((productsRes.data ?? []).filter((p) => p.status === 'active'))
     setRecipes(recipesRes.data ?? [])
     setProductions(productionsRes.data ?? [])
     setLoading(false)

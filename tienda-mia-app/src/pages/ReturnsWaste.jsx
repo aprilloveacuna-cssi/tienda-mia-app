@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, RotateCcw, Trash } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
@@ -56,9 +57,9 @@ export default function ReturnsWaste() {
     setLoading(true)
     setErrorMsg('')
     const [returnsRes, wastesRes, productsRes, returnReasonsRes, wasteReasonsRes] = await Promise.all([
-      supabase.from('returns').select('*, product:products(name, sku, unit)').order('created_at', { ascending: false }),
-      supabase.from('waste').select('*, product:products(name, sku, unit), batch:batches(batch_number)').order('created_at', { ascending: false }),
-      supabase.from('products').select('id, sku, name, unit, current_cost').eq('status', 'active').order('name'),
+      fetchAllRows('returns', '*, product:products(name, sku, unit)', 'created_at', { ascending: false }),
+      fetchAllRows('waste', '*, product:products(name, sku, unit), batch:batches(batch_number)', 'created_at', { ascending: false }),
+      fetchAllRows('products', 'id, sku, name, unit, current_cost, status', 'name'),
       supabase.from('lists').select('value').eq('list_type', 'ReturnReason').eq('active', true).order('value'),
       supabase.from('lists').select('value').eq('list_type', 'WasteReason').eq('active', true).order('value'),
     ])
@@ -70,7 +71,7 @@ export default function ReturnsWaste() {
     }
     setReturns(returnsRes.data ?? [])
     setWastes(wastesRes.data ?? [])
-    setProducts(productsRes.data ?? [])
+    setProducts((productsRes.data ?? []).filter((p) => p.status === 'active'))
     setReturnReasons((returnReasonsRes.data ?? []).map((r) => r.value))
     setWasteReasons((wasteReasonsRes.data ?? []).map((r) => r.value))
     setLoading(false)

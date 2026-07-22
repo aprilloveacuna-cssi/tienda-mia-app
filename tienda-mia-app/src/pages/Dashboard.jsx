@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
 import DisposeConfirm from '../components/DisposeConfirm'
 
@@ -41,7 +42,7 @@ export default function Dashboard() {
         supabase.from('products').select('*', { count: 'exact', head: true }),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'active'),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'archived'),
-        supabase.from('inventory_cache').select('*, product:products(name, sku, reorder_point)'),
+        fetchAllRows('inventory_cache', '*, product:products(name, sku, reorder_point)'),
       ])
 
       const firstError = totalRes.error || activeRes.error || archivedRes.error || invRes.error

@@ -51,12 +51,8 @@ export default function Adjustments() {
   }
 
   async function loadProducts() {
-    const { data } = await supabase
-      .from('products')
-      .select('id, sku, name, unit')
-      .eq('status', 'active')
-      .order('name')
-    setProducts(data ?? [])
+    const { data } = await fetchAllRows('products', 'id, sku, name, unit, status', 'name')
+    setProducts((data ?? []).filter((p) => p.status === 'active'))
   }
 
   async function loadAdjustmentTypes() {

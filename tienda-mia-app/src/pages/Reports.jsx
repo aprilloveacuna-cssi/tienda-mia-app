@@ -1,6 +1,6 @@
 import { useEffect, useState, Fragment } from 'react'
 import { Printer, Download } from 'lucide-react'
-import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import { useSort, sortRows } from '../lib/sort'
@@ -88,9 +88,10 @@ const REPORTS = {
     description: 'One row per day — transactions, quantity, revenue, cost, and profit. Voided sales excluded.',
     dateField: (r) => r.date,
     async fetch() {
-      const { data, error } = await supabase
-        .from('sale_lines')
-        .select('sale_id, quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_date, status)')
+      const { data, error } = await fetchAllRows(
+        'sale_lines',
+        'sale_id, quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_date, status)'
+      )
       if (error) throw error
       const byDay = {}
       for (const l of data ?? []) {
@@ -123,7 +124,7 @@ const REPORTS = {
     description: 'One row per day — number of purchases posted and total cost received. Drafts and voided excluded.',
     dateField: (r) => r.date,
     async fetch() {
-      const { data, error } = await supabase.from('purchases').select('purchase_date, total_cost, status')
+      const { data, error } = await fetchAllRows('purchases', 'purchase_date, total_cost, status')
       if (error) throw error
       const byDay = {}
       for (const p of data ?? []) {
@@ -146,13 +147,15 @@ const REPORTS = {
     label: 'Inventory',
     description: 'Current stock and value for every active product.',
     async fetch() {
-      const { data, error } = await supabase
-        .from('products')
-        .select('sku, name, category, unit, reorder_point, inventory_cache(current_stock, inventory_value)')
-        .eq('status', 'active')
-        .order('name')
+      const { data, error } = await fetchAllRows(
+        'products',
+        'sku, name, category, unit, reorder_point, status, inventory_cache(current_stock, inventory_value)',
+        'name'
+      )
       if (error) throw error
-      return (data ?? []).map((p) => {
+      return (data ?? [])
+        .filter((p) => p.status === 'active')
+        .map((p) => {
         const cache = Array.isArray(p.inventory_cache) ? p.inventory_cache[0] : p.inventory_cache
         return {
           sku: p.sku,
@@ -188,13 +191,11 @@ const REPORTS = {
     label: 'Inventory Valuation',
     description: 'Inventory value rolled up by category.',
     async fetch() {
-      const { data, error } = await supabase
-        .from('products')
-        .select('category, inventory_cache(current_stock, inventory_value)')
-        .eq('status', 'active')
+      const { data, error } = await fetchAllRows('products', 'category, status, inventory_cache(current_stock, inventory_value)')
       if (error) throw error
       const groups = {}
       for (const p of data ?? []) {
+        if (p.status !== 'active') continue
         const cache = Array.isArray(p.inventory_cache) ? p.inventory_cache[0] : p.inventory_cache
         const cat = p.category ?? 'Uncategorized'
         groups[cat] = groups[cat] ?? { category: cat, productCount: 0, totalValue: 0 }
@@ -215,10 +216,12 @@ const REPORTS = {
     description: 'Every batch ever received, oldest first within each product.',
     dateField: (r) => r.received_date,
     async fetch() {
-      const { data, error } = await supabase
-        .from('batches')
-        .select('batch_number, received_date, expiration_date, unit_cost, status, product:products(name, sku, unit), cache:batch_cache(remaining_quantity)')
-        .order('received_date', { ascending: false })
+      const { data, error } = await fetchAllRows(
+        'batches',
+        'batch_number, received_date, expiration_date, unit_cost, status, product:products(name, sku, unit), cache:batch_cache(remaining_quantity)',
+        'received_date',
+        { ascending: false }
+      )
       if (error) throw error
       return data ?? []
     },
@@ -238,18 +241,14 @@ const REPORTS = {
     dateField: (r) => r.date,
     async fetch() {
       const [batchesRes, wasteRes] = await Promise.all([
-        supabase
-          .from('batches')
-          .select('batch_number, expiration_date, product:products(name, sku, unit), cache:batch_cache(remaining_quantity)')
-          .not('expiration_date', 'is', null),
-        supabase
-          .from('waste')
-          .select('waste_number, waste_date, quantity, reason, product:products(name, sku, unit), batch:batches(batch_number)'),
+        fetchAllRows('batches', 'batch_number, expiration_date, product:products(name, sku, unit), cache:batch_cache(remaining_quantity)'),
+        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit), batch:batches(batch_number)'),
       ])
       if (batchesRes.error) throw batchesRes.error
       if (wasteRes.error) throw wasteRes.error
 
       const expiryRows = (batchesRes.data ?? [])
+        .filter((r) => r.expiration_date != null)
         .filter((r) => Number((Array.isArray(r.cache) ? r.cache[0] : r.cache)?.remaining_quantity ?? 0) > 0)
         .map((r) => ({
           type: 'Expiry',
@@ -292,7 +291,7 @@ const REPORTS = {
     description: 'Every purchase order, regardless of status.',
     dateField: (r) => r.purchase_date,
     async fetch() {
-      const { data, error } = await supabase.from('purchases').select('*').order('purchase_date', { ascending: false })
+      const { data, error } = await fetchAllRows('purchases', '*', 'purchase_date', { ascending: false })
       if (error) throw error
       return data ?? []
     },
@@ -311,12 +310,12 @@ const REPORTS = {
     description: 'Every sale line, with FIFO cost and gross profit.',
     dateField: (r) => r.sale?.sale_date,
     async fetch() {
-      const { data, error } = await supabase
-        .from('sale_lines')
-        .select('quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_number, sale_date, status), product:products(name, sku, unit)')
-        .order('sale_date', { foreignTable: 'sales', ascending: false })
+      const { data, error } = await fetchAllRows(
+        'sale_lines',
+        'quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_number, sale_date, status), product:products(name, sku, unit)'
+      )
       if (error) throw error
-      return data ?? []
+      return (data ?? []).sort((a, b) => (a.sale?.sale_date < b.sale?.sale_date ? 1 : -1))
     },
     columns: [
       { key: 'sale_number', label: 'Sale #', value: (r) => r.sale?.sale_number },
@@ -334,10 +333,12 @@ const REPORTS = {
     description: 'Every production run, with actual (not theoretical) cost.',
     dateField: (r) => r.production_date,
     async fetch() {
-      const { data, error } = await supabase
-        .from('kitchen_production')
-        .select('*, recipe:recipes(product:products(name, sku, unit))')
-        .order('production_date', { ascending: false })
+      const { data, error } = await fetchAllRows(
+        'kitchen_production',
+        '*, recipe:recipes(product:products(name, sku, unit))',
+        'production_date',
+        { ascending: false }
+      )
       if (error) throw error
       return data ?? []
     },
@@ -553,24 +554,21 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         const days = datesInRange(dateFrom, dateTo)
 
         const [productsRes, saleLinesRes, wasteRes] = await Promise.all([
-          supabase
-            .from('products')
-            .select('id, sku, name, unit, current_cost, selling_price, reorder_point, inventory_cache(current_stock)')
-            .eq('status', 'active')
-            .order('name'),
-          supabase
-            .from('sale_lines')
-            .select('product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)'),
-          supabase
-            .from('waste')
-            .select('product_id, quantity, waste_date')
-            .gte('waste_date', dateFrom)
-            .lte('waste_date', dateTo),
+          fetchAllRows(
+            'products',
+            'id, sku, name, unit, current_cost, selling_price, reorder_point, status, inventory_cache(current_stock)',
+            'name'
+          ),
+          fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)'),
+          fetchAllRows('waste', 'product_id, quantity, waste_date'),
         ])
 
         if (productsRes.error) throw productsRes.error
         if (saleLinesRes.error) throw saleLinesRes.error
         if (wasteRes.error) throw wasteRes.error
+
+        productsRes.data = (productsRes.data ?? []).filter((p) => p.status === 'active')
+        wasteRes.data = (wasteRes.data ?? []).filter((w) => withinRange(w.waste_date, dateFrom, dateTo))
 
         const saleLines = (saleLinesRes.data ?? []).filter((l) => withinRange(l.sale?.sale_date, dateFrom, dateTo))
 
