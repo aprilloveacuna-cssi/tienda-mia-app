@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabaseClient'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
+import ProductPicker from '../components/ProductPicker'
 import { useSort, sortRows } from '../lib/sort'
 
 export default function Adjustments() {
@@ -51,7 +52,7 @@ export default function Adjustments() {
   }
 
   async function loadProducts() {
-    const { data } = await fetchAllRows('products', 'id, sku, name, unit, status', 'name')
+    const { data } = await fetchAllRows('products', 'id, sku, name, unit, barcode, status', 'name')
     setProducts((data ?? []).filter((p) => p.status === 'active'))
   }
 
@@ -241,12 +242,7 @@ export default function Adjustments() {
         )}
         <form onSubmit={handleSave} className="space-y-4">
           <Field label="Product" required>
-            <select required value={productId} onChange={(e) => onProductPick(e.target.value)} className="input">
-              <option value="">Select a product…</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>{p.sku} — {p.name}</option>
-              ))}
-            </select>
+            <ProductPicker products={products} value={productId} onChange={onProductPick} />
           </Field>
 
           {productId && (

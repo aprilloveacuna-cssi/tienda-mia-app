@@ -5,6 +5,7 @@ import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
+import ProductPicker from '../components/ProductPicker'
 import { useSort, sortRows } from '../lib/sort'
 
 export default function ReturnsWaste() {
@@ -59,7 +60,7 @@ export default function ReturnsWaste() {
     const [returnsRes, wastesRes, productsRes, returnReasonsRes, wasteReasonsRes] = await Promise.all([
       fetchAllRows('returns', '*, product:products(name, sku, unit)', 'created_at', { ascending: false }),
       fetchAllRows('waste', '*, product:products(name, sku, unit), batch:batches(batch_number)', 'created_at', { ascending: false }),
-      fetchAllRows('products', 'id, sku, name, unit, current_cost, status', 'name'),
+      fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, status', 'name'),
       supabase.from('lists').select('value').eq('list_type', 'ReturnReason').eq('active', true).order('value'),
       supabase.from('lists').select('value').eq('list_type', 'WasteReason').eq('active', true).order('value'),
     ])
@@ -381,12 +382,7 @@ export default function ReturnsWaste() {
           )}
 
           <Field label="Product" required>
-            <select required value={productId} onChange={(e) => onProductPick(e.target.value)} className="input">
-              <option value="">Select a product…</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>{p.sku} — {p.name}</option>
-              ))}
-            </select>
+            <ProductPicker products={products} value={productId} onChange={onProductPick} />
           </Field>
 
           {productId && needsBatch && (

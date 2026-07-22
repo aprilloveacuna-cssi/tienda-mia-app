@@ -5,6 +5,7 @@ import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
+import ProductPicker from '../components/ProductPicker'
 import { useSort, sortRows } from '../lib/sort'
 
 const EMPTY_RECIPE_FORM = {
@@ -104,7 +105,7 @@ export default function Kitchen() {
     setLoading(true)
     setErrorMsg('')
     const [productsRes, recipesRes, productionsRes, leftoversRes] = await Promise.all([
-      fetchAllRows('products', 'id, sku, name, unit, current_cost, selling_price, status, business_unit', 'name'),
+      fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, selling_price, status, business_unit, category', 'name'),
       supabase
         .from('recipes')
         .select('*, product:products(name, sku, unit, selling_price), recipe_ingredients(*, ingredient:products(name, sku, unit, current_cost))')
@@ -377,7 +378,7 @@ export default function Kitchen() {
   }
 
   // ---------- Daily Available Meals (quick entry, no ingredient deduction) ----------
-  const kitchenProducts = products.filter((p) => p.business_unit === 'KITCHEN')
+  const kitchenProducts = products.filter((p) => p.business_unit === 'KITCHEN' || p.category === 'KITCHEN')
 
   function addDailyMealLine(e) {
     e.preventDefault()
@@ -669,17 +670,11 @@ export default function Kitchen() {
 
             <form onSubmit={addDailyMealLine} className="grid grid-cols-4 gap-3">
               <Field label="Meal" required>
-                <select
-                  required
+                <ProductPicker
+                  products={kitchenProducts}
                   value={dailyMealForm.product_id}
-                  onChange={(e) => setDailyMealForm({ ...dailyMealForm, product_id: e.target.value })}
-                  className="input"
-                >
-                  <option value="">Select…</option>
-                  {kitchenProducts.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
+                  onChange={(id) => setDailyMealForm({ ...dailyMealForm, product_id: id })}
+                />
               </Field>
               <Field label="Quantity" required>
                 <input
@@ -749,17 +744,11 @@ export default function Kitchen() {
                 />
               </Field>
               <Field label="Kitchen product" required>
-                <select
-                  required
+                <ProductPicker
+                  products={kitchenProducts}
                   value={leftoverForm.product_id}
-                  onChange={(e) => setLeftoverForm({ ...leftoverForm, product_id: e.target.value })}
-                  className="input"
-                >
-                  <option value="">Select…</option>
-                  {kitchenProducts.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
+                  onChange={(id) => setLeftoverForm({ ...leftoverForm, product_id: id })}
+                />
               </Field>
               <Field label="Leftover qty" required>
                 <input
@@ -827,17 +816,11 @@ export default function Kitchen() {
         )}
         <form onSubmit={saveRecipe} className="space-y-4">
           <Field label="Finished product" required>
-            <select
-              required
+            <ProductPicker
+              products={kitchenProducts}
               value={recipeForm.product_id}
-              onChange={(e) => setRecipeForm({ ...recipeForm, product_id: e.target.value })}
-              className="input"
-            >
-              <option value="">Select a product…</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>{p.sku} — {p.name}</option>
-              ))}
-            </select>
+              onChange={(id) => setRecipeForm({ ...recipeForm, product_id: id })}
+            />
           </Field>
 
           <div className="grid grid-cols-2 gap-3">
@@ -907,16 +890,17 @@ export default function Kitchen() {
 
           <div className="space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
             <Field label="Add ingredient">
-              <select
+              <ProductPicker
+                products={products}
                 value={ingredientForm.ingredient_product_id}
-                onChange={(e) => setIngredientForm({ ...ingredientForm, ingredient_product_id: e.target.value, unit: products.find(p=>p.id===e.target.value)?.unit ?? '' })}
-                className="input"
-              >
-                <option value="">Select a product…</option>
-                {products.map((p) => (
-                  <option key={p.id} value={p.id}>{p.sku} — {p.name}</option>
-                ))}
-              </select>
+                onChange={(id) =>
+                  setIngredientForm({
+                    ...ingredientForm,
+                    ingredient_product_id: id,
+                    unit: products.find((p) => p.id === id)?.unit ?? '',
+                  })
+                }
+              />
             </Field>
             <Field label="Quantity per yield">
               <input
