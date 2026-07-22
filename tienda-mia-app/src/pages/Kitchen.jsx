@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Plus, Trash2, Check, FileDown, Upload } from 'lucide-react'
+import { Plus, Trash2, Check, FileDown, Upload, Pencil, Archive } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
@@ -11,6 +11,7 @@ import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
 const INGREDIENT_HEADER_ALIASES = {
   barcode: 'barcode', sku: 'sku',
+  name: 'name', ingredient: 'name', ingredientname: 'name', productname: 'name',
   quantityperyield: 'quantity_per_yield', qty: 'quantity_per_yield', quantity: 'quantity_per_yield',
   unit: 'unit',
 }
@@ -32,6 +33,10 @@ const RECIPE_UNITS = ['pcs', 'g', 'kg', 'ml', 'L', 'tsp', 'tbsp', 'cup', 'pinch'
 
 function today() {
   return new Date().toISOString().slice(0, 10)
+}
+
+function upper(v) {
+  return v ? v.toUpperCase() : v
 }
 
 function recipeCost(recipe, ingredients) {
@@ -58,6 +63,15 @@ export default function Kitchen() {
   const [dailyMealsSaving, setDailyMealsSaving] = useState(false)
   const [dailyMealsError, setDailyMealsError] = useState('')
   const [leftoverForm, setLeftoverForm] = useState({ product_id: '', quantity: '', leftover_date: today(), notes: '' })
+
+  // Ingredients (raw materials) — separate management list, kept out of the
+  // main Products page since these aren't sold on their own.
+  const [ingredientProducts, setIngredientProducts] = useState([])
+  const [ingredientProductPanelOpen, setIngredientProductPanelOpen] = useState(false)
+  const [editingIngredientId, setEditingIngredientId] = useState(null)
+  const [ingredientProductForm, setIngredientProductForm] = useState({ barcode: '', name: '', unit: '', current_cost: '' })
+  const [savingIngredientProduct, setSavingIngredientProduct] = useState(false)
+  const [ingredientProductError, setIngredientProductError] = useState('')
   const [leftoverSaving, setLeftoverSaving] = useState(false)
   const [leftoverError, setLeftoverError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -105,7 +119,7 @@ export default function Kitchen() {
     setLoading(true)
     setErrorMsg('')
     const [productsRes, recipesRes, leftoversRes] = await Promise.all([
-      fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, selling_price, status, business_unit, category', 'name'),
+      fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, selling_price, status, business_unit, category, product_type', 'name'),
       supabase
         .from('recipes')
         .select('*, product:products(name, sku, unit, selling_price), recipe_ingredients(*, ingredient:products(name, sku, unit, current_cost))')
@@ -119,7 +133,9 @@ export default function Kitchen() {
       setLoading(false)
       return
     }
-    setProducts((productsRes.data ?? []).filter((p) => p.status === 'active'))
+    const allProducts = productsRes.data ?? []
+    setProducts(allProducts.filter((p) => p.status === 'active'))
+    setIngredientProducts(allProducts.filter((p) => p.product_type === 'RAW MATERIAL'))
     setRecipes(recipesRes.data ?? [])
     setLeftovers((leftoversRes.data ?? []).filter((w) => w.reason === 'Daily Leftover'))
     setLoading(false)
@@ -161,9 +177,9 @@ export default function Kitchen() {
   }
 
   function handleDownloadIngredientTemplate() {
-    const headers = ['Barcode', 'Quantity per Yield', 'Unit']
-    const example1 = ['4800123456789', '2', 'tsp']
-    const example2 = ['4800987654321', '250', 'g']
+    const headers = ['Name', 'Quantity per Yield', 'Unit']
+    const example1 = ['PORK', '2', 'kg']
+    const example2 = ['ONION', '250', 'g']
     const csv = [headers, example1, example2]
       .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
       .join('\n')
@@ -213,10 +229,13 @@ export default function Kitchen() {
             ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode))
             : obj.sku
               ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
-              : null
+              : obj.name
+                ? products.find((p) => cleanCode(p.name) === cleanCode(obj.name))
+                : null
 
           if (!product) {
-            skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+            const attempted = obj.barcode || obj.sku || obj.name
+            skipped.push({ rowNum, reason: attempted ? `No product matches "${attempted}"` : 'Missing barcode/SKU/name' })
             return
           }
           const qty = Number(obj.quantity_per_yield)
@@ -305,6 +324,66 @@ export default function Kitchen() {
 
   // ---------- Daily Available Meals (quick entry, no ingredient deduction) ----------
   const kitchenProducts = products.filter((p) => p.business_unit === 'KITCHEN' || p.category === 'KITCHEN')
+
+  // ---------- Ingredients (raw materials) management ----------
+  function openNewIngredientProduct() {
+    setEditingIngredientId(null)
+    setIngredientProductForm({ barcode: '', name: '', unit: '', current_cost: '' })
+    setIngredientProductError('')
+    setIngredientProductPanelOpen(true)
+  }
+
+  function openEditIngredientProduct(p) {
+    setEditingIngredientId(p.id)
+    setIngredientProductForm({
+      barcode: p.barcode ?? '',
+      name: p.name ?? '',
+      unit: p.unit ?? '',
+      current_cost: String(p.current_cost ?? ''),
+    })
+    setIngredientProductError('')
+    setIngredientProductPanelOpen(true)
+  }
+
+  async function handleSaveIngredientProduct(e) {
+    e.preventDefault()
+    if (!ingredientProductForm.name.trim()) return
+    setSavingIngredientProduct(true)
+    setIngredientProductError('')
+
+    // Barcode is optional here — these are internal-only items with no real
+    // scannable code, so make one up if left blank (the column itself still
+    // requires something unique, per the schema).
+    const barcode =
+      ingredientProductForm.barcode.trim() ||
+      `ING-${ingredientProductForm.name.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '-')}-${Math.floor(1000 + Math.random() * 9000)}`
+
+    const payload = {
+      barcode,
+      name: upper(ingredientProductForm.name.trim()),
+      unit: upper(ingredientProductForm.unit.trim()) || null,
+      current_cost: ingredientProductForm.current_cost === '' ? 0 : Number(ingredientProductForm.current_cost),
+      product_type: 'RAW MATERIAL',
+    }
+
+    const { error } = editingIngredientId
+      ? await supabase.from('products').update(payload).eq('id', editingIngredientId)
+      : await supabase.from('products').insert(payload)
+
+    setSavingIngredientProduct(false)
+    if (error) {
+      setIngredientProductError(error.code === '23505' ? 'That code is already used by another product.' : error.message)
+      return
+    }
+    setIngredientProductPanelOpen(false)
+    loadAll()
+  }
+
+  async function toggleArchiveIngredientProduct(p) {
+    const nextStatus = p.status === 'active' ? 'archived' : 'active'
+    await supabase.from('products').update({ status: nextStatus }).eq('id', p.id)
+    loadAll()
+  }
 
   // If this product has a Recipe defined, auto-fill the day's cost from that
   // recipe's ingredient math — still editable, since actual cost can vary day
@@ -450,11 +529,21 @@ export default function Kitchen() {
             New recipe
           </button>
         )}
+        {tab === 'ingredients' && (
+          <button
+            onClick={openNewIngredientProduct}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+          >
+            <Plus size={16} />
+            New ingredient
+          </button>
+        )}
       </div>
 
       <div className="mb-4 flex gap-1 border-b border-[var(--color-line)]">
         {[
           ['recipes', 'Recipes'],
+          ['ingredients', 'Ingredients'],
           ['dailyMeals', 'Daily Meals'],
           ['leftovers', 'Leftovers'],
         ].map(([t, label]) => (
@@ -516,6 +605,58 @@ export default function Kitchen() {
                   </tr>
                 )
               })}
+            </tbody>
+          </table>
+        </div>
+      ) : tab === 'ingredients' ? (
+        <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+              <tr>
+                <th className="px-4 py-3">Name</th>
+                <th className="px-4 py-3">Code</th>
+                <th className="px-4 py-3">Unit</th>
+                <th className="px-4 py-3">Cost</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {loading && (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading ingredients…</td></tr>
+              )}
+              {!loading && ingredientProducts.length === 0 && (
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No ingredients yet — add one to start building recipe ingredient lists.</td></tr>
+              )}
+              {ingredientProducts.map((p) => (
+                <tr key={p.id} className="border-b border-[var(--color-line)] last:border-0">
+                  <td className="px-4 py-3 font-medium">{p.name}</td>
+                  <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.barcode}</td>
+                  <td className="px-4 py-3">{p.unit || '—'}</td>
+                  <td className="px-4 py-3">{Number(p.current_cost).toFixed(2)}</td>
+                  <td className="px-4 py-3">
+                    <StatusChip tone={p.status === 'active' ? 'ok' : 'neutral'}>{p.status}</StatusChip>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => openEditIngredientProduct(p)}
+                        aria-label="Edit"
+                        className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        onClick={() => toggleArchiveIngredientProduct(p)}
+                        aria-label={p.status === 'active' ? 'Archive' : 'Restore'}
+                        className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                      >
+                        <Archive size={14} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -934,6 +1075,67 @@ export default function Kitchen() {
         >
           Add {ingredientImportValid.length} ingredient{ingredientImportValid.length === 1 ? '' : 's'} to this recipe
         </button>
+      </SlidePanel>
+
+      <SlidePanel
+        open={ingredientProductPanelOpen}
+        title={editingIngredientId ? 'Edit ingredient' : 'New ingredient'}
+        onClose={() => setIngredientProductPanelOpen(false)}
+      >
+        {ingredientProductError && (
+          <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+            {ingredientProductError}
+          </div>
+        )}
+        <form onSubmit={handleSaveIngredientProduct} className="space-y-4">
+          <Field label="Name" required>
+            <input
+              required
+              value={ingredientProductForm.name}
+              onChange={(e) => setIngredientProductForm({ ...ingredientProductForm, name: e.target.value })}
+              className="input"
+              placeholder="e.g. Pork"
+            />
+          </Field>
+          <Field label="Internal code (optional)">
+            <input
+              value={ingredientProductForm.barcode}
+              onChange={(e) => setIngredientProductForm({ ...ingredientProductForm, barcode: e.target.value })}
+              className="input"
+              placeholder="Leave blank to auto-generate — no real barcode needed"
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Unit">
+              <select
+                value={ingredientProductForm.unit}
+                onChange={(e) => setIngredientProductForm({ ...ingredientProductForm, unit: e.target.value })}
+                className="input"
+              >
+                <option value="">Select…</option>
+                {RECIPE_UNITS.map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Cost per unit" required>
+              <input
+                type="number" step="0.01" min="0" required
+                value={ingredientProductForm.current_cost}
+                onChange={(e) => setIngredientProductForm({ ...ingredientProductForm, current_cost: e.target.value })}
+                className="input"
+                placeholder="e.g. 97.50"
+              />
+            </Field>
+          </div>
+          <button
+            type="submit"
+            disabled={savingIngredientProduct}
+            className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+          >
+            {savingIngredientProduct ? 'Saving…' : editingIngredientId ? 'Save changes' : 'Add ingredient'}
+          </button>
+        </form>
       </SlidePanel>
     </div>
   )

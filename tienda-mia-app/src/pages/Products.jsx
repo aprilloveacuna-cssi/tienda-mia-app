@@ -122,7 +122,9 @@ export default function Products() {
           : error.message
       )
     } else {
-      setProducts(data ?? [])
+      // Raw materials (recipe ingredients) aren't sold on their own — they get
+      // their own list in Kitchen instead of cluttering this one.
+      setProducts((data ?? []).filter((p) => p.product_type !== 'RAW MATERIAL'))
     }
     setLoading(false)
   }
@@ -400,7 +402,8 @@ export default function Products() {
         <div>
           <h1 className="font-display text-2xl font-semibold">Products</h1>
           <p className="mt-0.5 text-sm text-[var(--color-ink-soft)]">
-            Master data only — stock levels live in Inventory once purchases start flowing in.
+            Master data only — stock levels live in Inventory once purchases start flowing in. Recipe ingredients
+            (raw materials) live in Kitchen instead, since they're not sold on their own.
           </p>
         </div>
         <div className="flex items-center gap-2">
