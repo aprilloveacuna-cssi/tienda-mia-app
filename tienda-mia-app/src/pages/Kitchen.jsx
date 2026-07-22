@@ -257,21 +257,24 @@ export default function Kitchen() {
   }
 
   function handleDownloadRecipeTemplate() {
-    const headers = ['Recipe', 'Yield Qty', 'Prep Loss %', 'Packaging Cost', 'Labor Cost', 'Overhead Cost', 'Ingredient', 'Qty per Yield', 'Unit']
+    const headers = ['Recipe', 'Yield Qty', 'Prep Loss %', 'Packaging Cost', 'Labor Cost', 'Overhead Cost', 'Ingredient', 'Qty per Yield', 'Unit', 'Cost']
     // Recipe-level fields (Yield/Prep Loss/costs) only need filling on a
     // recipe's FIRST row — repeat the Recipe name on every ingredient line,
-    // one line per ingredient, same as the recipe actually reads.
+    // one line per ingredient, same as the recipe actually reads. Each
+    // ingredient line needs EITHER a Qty per Yield+Unit OR a Cost — not both.
+    // Cost works out the quantity automatically from that ingredient's own
+    // cost per unit (already set up in Kitchen → Ingredients).
     const rows = [
       headers,
-      ['CHICKEN ARROZ CALDO', '20', '0', '0', '0', '0', 'MALAGKIT RICE', '1500', 'g'],
-      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'CHICKEN', '0.5', 'kg'],
-      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'SALT', '0.125', 'cup'],
-      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'SPRING ONION', '50', 'g'],
-      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'GARLIC', '20', 'g'],
-      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'EGG', '14', 'pcs'],
-      ['PORK ADOBO', '10', '0', '0', '0', '0', 'PORK', '2', 'kg'],
-      ['PORK ADOBO', '', '', '', '', '', 'SOY SAUCE', '1', 'cup'],
-      ['PORK ADOBO', '', '', '', '', '', 'VINEGAR', '1', 'cup'],
+      ['CHICKEN ARROZ CALDO', '20', '0', '0', '0', '0', 'MALAGKIT RICE', '1500', 'g', ''],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'CHICKEN', '0.5', 'kg', ''],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'SALT', '', '', '5'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'SPRING ONION', '', '', '10'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'GARLIC', '', '', '6'],
+      ['CHICKEN ARROZ CALDO', '', '', '', '', '', 'EGG', '14', 'pcs', ''],
+      ['PORK ADOBO', '10', '0', '0', '0', '0', 'PORK', '2', 'kg', ''],
+      ['PORK ADOBO', '', '', '', '', '', 'SOY SAUCE', '', '', '10'],
+      ['PORK ADOBO', '', '', '', '', '', 'VINEGAR', '', '', '10'],
     ]
     const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
     downloadFile('recipes-template.csv', csv, 'text/csv;charset=utf-8;')
@@ -305,6 +308,7 @@ export default function Kitchen() {
           ingredient: 'ingredient_name', ingredientname: 'ingredient_name',
           qtyperyield: 'quantity_per_yield', quantityperyield: 'quantity_per_yield', qty: 'quantity_per_yield', quantity: 'quantity_per_yield',
           unit: 'unit',
+          cost: 'ingredient_cost', ingredientcost: 'ingredient_cost', costphp: 'ingredient_cost',
         }
         const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
         const cleanName = (v) =>
@@ -374,17 +378,30 @@ export default function Kitchen() {
             skipped.push({ rowNum, reason: `${recipeNameRaw}: no product matches ingredient "${ingredientNameRaw}"` })
             return
           }
-          const qty = Number(obj.quantity_per_yield)
+
+          // Quantity can come directly, or be worked out from a cost — same
+          // logic as the manual "by cost" entry, since ingredient costs are
+          // already set up (e.g. "₱5 worth of salt" instead of "0.25 cup").
+          let qty = Number(obj.quantity_per_yield)
+          let unit = upper(obj.unit) || ingredientProduct.unit
+          if (!qty && obj.ingredient_cost) {
+            if (!ingredientProduct.current_cost) {
+              skipped.push({ rowNum, reason: `${recipeNameRaw}: "${ingredientNameRaw}" has no cost set, so cost-based quantity can't be computed` })
+              return
+            }
+            qty = Number(obj.ingredient_cost) / Number(ingredientProduct.current_cost)
+            unit = ingredientProduct.unit // cost-derived quantity is only meaningful in the ingredient's own costed unit
+          }
           if (!qty || qty <= 0) {
-            skipped.push({ rowNum, reason: `${recipeNameRaw}: missing or invalid quantity for "${ingredientNameRaw}"` })
+            skipped.push({ rowNum, reason: `${recipeNameRaw}: missing or invalid quantity/cost for "${ingredientNameRaw}"` })
             return
           }
 
           group.ingredients.push({
             ingredient_product_id: ingredientProduct.id,
             name: ingredientProduct.name,
-            quantity_per_yield: qty,
-            unit: upper(obj.unit) || ingredientProduct.unit,
+            quantity_per_yield: Math.round(qty * 10000) / 10000,
+            unit,
           })
         })
 
