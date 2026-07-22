@@ -31,6 +31,34 @@ const EMPTY_INGREDIENT_FORM = { ingredient_product_id: '', quantity_per_yield: '
 // top of whatever the product's own inventory unit is, so either works.
 const RECIPE_UNITS = ['pcs', 'g', 'kg', 'ml', 'L', 'tsp', 'tbsp', 'cup', 'pinch', 'slice', 'clove', 'oz']
 
+// Base unit per family — grams for weight, ml for volume. Counted units
+// (pcs/slice/clove) have no reliable conversion to anything else, since that
+// depends on the specific ingredient (a "clove" of garlic isn't a fixed weight).
+const WEIGHT_TO_GRAMS = { g: 1, kg: 1000, oz: 28.3495 }
+const VOLUME_TO_ML = { ml: 1, l: 1000, tsp: 4.92892, tbsp: 14.7868, cup: 236.588, pinch: 0.3081 }
+
+function unitFamily(unit) {
+  const u = (unit || '').toLowerCase()
+  if (u in WEIGHT_TO_GRAMS) return 'weight'
+  if (u in VOLUME_TO_ML) return 'volume'
+  return null
+}
+
+// Converts a quantity from one unit to another when they're in the same
+// family (both weight, or both volume). Returns null when conversion isn't
+// possible — different families, or either side is a counted unit — so the
+// caller can fall back and flag it rather than silently computing something wrong.
+function convertQuantity(qty, fromUnit, toUnit) {
+  if (!fromUnit || !toUnit) return qty
+  const from = fromUnit.toLowerCase()
+  const to = toUnit.toLowerCase()
+  if (from === to) return qty
+  const family = unitFamily(from)
+  if (!family || family !== unitFamily(to)) return null
+  const table = family === 'weight' ? WEIGHT_TO_GRAMS : VOLUME_TO_ML
+  return (qty * table[from]) / table[to]
+}
+
 function today() {
   return new Date().toISOString().slice(0, 10)
 }
@@ -40,7 +68,14 @@ function upper(v) {
 }
 
 function recipeCost(recipe, ingredients) {
-  const rawCost = ingredients.reduce((sum, i) => sum + i.quantity_per_yield * i.current_cost, 0)
+  const rawCost = ingredients.reduce((sum, i) => {
+    const converted = convertQuantity(i.quantity_per_yield, i.unit, i.product_unit)
+    // Falls back to the raw quantity_per_yield when units aren't convertible —
+    // same behavior as before this existed, just now flagged (see unitMismatch)
+    // instead of silently assumed correct.
+    const effectiveQty = converted !== null ? converted : i.quantity_per_yield
+    return sum + effectiveQty * i.current_cost
+  }, 0)
   const lossFactor = 1 - Number(recipe.prep_loss_pct || 0) / 100
   const adjustedRawCost = lossFactor > 0 ? rawCost / lossFactor : rawCost
   const total =
@@ -90,6 +125,8 @@ export default function Kitchen() {
       const ingredients = r.recipe_ingredients.map((ri) => ({
         quantity_per_yield: ri.quantity_per_yield,
         current_cost: Number(ri.ingredient?.current_cost || 0),
+        unit: ri.unit,
+        product_unit: ri.ingredient?.unit,
       }))
       const { perUnit } = recipeCost(r, ingredients)
       const sellingPrice = Number(r.product?.selling_price || 0)
@@ -172,6 +209,7 @@ export default function Kitchen() {
         current_cost: Number(p.current_cost || 0),
         quantity_per_yield: Number(ingredientForm.quantity_per_yield),
         unit: ingredientForm.unit || p.unit,
+        product_unit: p.unit,
       },
     ])
     setIngredientForm(EMPTY_INGREDIENT_FORM)
@@ -256,6 +294,7 @@ export default function Kitchen() {
             current_cost: Number(product.current_cost || 0),
             quantity_per_yield: qty,
             unit: obj.unit || product.unit,
+            product_unit: product.unit,
           })
         })
 
@@ -518,6 +557,8 @@ export default function Kitchen() {
       const ingredients = recipe.recipe_ingredients.map((ri) => ({
         quantity_per_yield: ri.quantity_per_yield,
         current_cost: Number(ri.ingredient?.current_cost || 0),
+        unit: ri.unit,
+        product_unit: ri.ingredient?.unit,
       }))
       autoCost = recipeCost(recipe, ingredients).perUnit.toFixed(2)
     }
@@ -1070,18 +1111,32 @@ export default function Kitchen() {
                 {recipeIngredients.length === 0 && (
                   <tr><td colSpan={3} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No ingredients yet.</td></tr>
                 )}
-                {recipeIngredients.map((i) => (
-                  <tr key={i.tempId} className="border-b border-[var(--color-line)] last:border-0">
-                    <td className="px-3 py-2">{i.name}</td>
-                    <td className="px-3 py-2">{i.quantity_per_yield} {i.unit}</td>
-                    <td className="px-3 py-2">
-                      <button onClick={() => removeIngredientFromRecipe(i.tempId)} aria-label="Remove ingredient"
-                        className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]">
-                        <Trash2 size={14} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {recipeIngredients.map((i) => {
+                  const needsConversion = i.unit && i.product_unit && i.unit !== i.product_unit
+                  const canConvert = !needsConversion || convertQuantity(1, i.unit, i.product_unit) !== null
+                  return (
+                    <tr key={i.tempId} className="border-b border-[var(--color-line)] last:border-0">
+                      <td className="px-3 py-2">{i.name}</td>
+                      <td className="px-3 py-2">
+                        {i.quantity_per_yield} {i.unit}
+                        {needsConversion && !canConvert && (
+                          <span
+                            title={`Costed per ${i.product_unit} — can't auto-convert from ${i.unit}, so this line's cost may be off`}
+                            className="ml-1.5 inline-flex items-center rounded-full bg-[var(--color-amber-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-amber)]"
+                          >
+                            check unit
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        <button onClick={() => removeIngredientFromRecipe(i.tempId)} aria-label="Remove ingredient"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]">
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
