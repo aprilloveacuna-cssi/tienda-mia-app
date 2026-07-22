@@ -11,6 +11,10 @@ import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
 
+function today() {
+  return new Date().toISOString().slice(0, 10)
+}
+
 const SALE_LINE_HEADER_ALIASES = {
   barcode: 'barcode', sku: 'sku',
   quantity: 'quantity', qty: 'quantity',
@@ -41,7 +45,7 @@ export default function Sales() {
   const [pendingLines, setPendingLines] = useState([]) // not yet saved to DB
   const [viewedSale, setViewedSale] = useState(null)
   const [viewedLines, setViewedLines] = useState([])
-  const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '' })
+  const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
   const [importPanelOpen, setImportPanelOpen] = useState(false)
@@ -80,7 +84,7 @@ export default function Sales() {
 
   function openNew() {
     setMode('new')
-    setHeaderForm({ pos_terminal: '', cashier: '' })
+    setHeaderForm({ pos_terminal: '', cashier: '', sale_date: today() })
     setPendingLines([])
     setLineForm(EMPTY_LINE_FORM)
     setLineWarning('')
@@ -360,9 +364,17 @@ export default function Sales() {
     setSaving(true)
     setErrorMsg('')
 
+    // Combines the picked date with right-now's time-of-day, so a backdated
+    // entry (e.g. catching up on yesterday's sales) gets a sensible timestamp
+    // instead of landing at exactly midnight.
+    const now = new Date()
+    const [year, month, day] = headerForm.sale_date.split('-').map(Number)
+    const saleDateTime = new Date(year, month - 1, day, now.getHours(), now.getMinutes(), now.getSeconds())
+
     const { data: sale, error: saleErr } = await supabase
       .from('sales')
       .insert({
+        sale_date: saleDateTime.toISOString(),
         pos_terminal: headerForm.pos_terminal.trim() || null,
         cashier: headerForm.cashier.trim() || null,
         total_amount: runningTotal,
@@ -561,6 +573,16 @@ export default function Sales() {
         {mode === 'new' ? (
           <div>
             <div className="mb-4 grid grid-cols-2 gap-3">
+              <Field label="Sale date" required>
+                <input
+                  type="date"
+                  required
+                  max={today()}
+                  value={headerForm.sale_date}
+                  onChange={(e) => setHeaderForm({ ...headerForm, sale_date: e.target.value })}
+                  className="input"
+                />
+              </Field>
               <Field label="POS terminal">
                 <input
                   value={headerForm.pos_terminal}
