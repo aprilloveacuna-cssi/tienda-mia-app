@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabaseClient'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import DisposeConfirm from '../components/DisposeConfirm'
+import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 
 function stockTone(stock, reorderPoint) {
@@ -52,6 +53,14 @@ export default function Inventory() {
     return row[key]
   }
   const sortedRows = sortRows(rows, sortKey, sortDir, sortAccessor)
+
+  const [search, setSearch] = useState('')
+  const searchedRows = search.trim()
+    ? sortedRows.filter((r) => {
+        const q = search.trim().toLowerCase()
+        return r.product?.name?.toLowerCase().includes(q) || r.product?.sku?.toLowerCase().includes(q)
+      })
+    : sortedRows
 
   async function load() {
     setLoading(true)
@@ -144,6 +153,8 @@ export default function Inventory() {
         </div>
       )}
 
+      <SearchBar value={search} onChange={setSearch} placeholder="Search by name or SKU" />
+
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
@@ -165,7 +176,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {!loading && sortedRows.length === 0 && (
+            {!loading && searchedRows.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No stock movements yet — post a purchase to see inventory appear here.
@@ -173,7 +184,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {sortedRows.map((r) => (
+            {searchedRows.map((r) => (
               <Fragment key={r.product_id}>
                 <tr
                   onClick={() => toggleExpand(r.product_id)}

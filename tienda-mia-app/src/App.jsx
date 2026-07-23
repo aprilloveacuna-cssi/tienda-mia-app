@@ -3,6 +3,7 @@ import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Products from './pages/Products'
 import Purchases from './pages/Purchases'
+import PurchaseList from './pages/PurchaseList'
 import Inventory from './pages/Inventory'
 import Sales from './pages/Sales'
 import Kitchen from './pages/Kitchen'
@@ -19,6 +20,7 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="products" element={<Products />} />
         <Route path="purchases" element={<Purchases />} />
+        <Route path="purchase-list" element={<PurchaseList />} />
         <Route path="inventory" element={<Inventory />} />
         <Route path="sales" element={<Sales />} />
         <Route path="kitchen" element={<Kitchen />} />

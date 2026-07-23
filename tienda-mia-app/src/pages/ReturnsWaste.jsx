@@ -6,6 +6,7 @@ import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import ProductPicker from '../components/ProductPicker'
+import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 
 export default function ReturnsWaste() {
@@ -30,6 +31,15 @@ export default function ReturnsWaste() {
     return row[key]
   }
   const sortedWastes = sortRows(wastes, wasteSortKey, wasteSortDir, wasteSortAccessor)
+
+  const [search, setSearch] = useState('')
+  const q = search.trim().toLowerCase()
+  const searchedReturns = q
+    ? sortedReturns.filter((r) => r.return_number?.toLowerCase().includes(q) || r.product?.name?.toLowerCase().includes(q) || r.reason?.toLowerCase().includes(q))
+    : sortedReturns
+  const searchedWastes = q
+    ? sortedWastes.filter((w) => w.waste_number?.toLowerCase().includes(q) || w.product?.name?.toLowerCase().includes(q) || w.reason?.toLowerCase().includes(q))
+    : sortedWastes
   const [products, setProducts] = useState([])
   const [returnReasons, setReturnReasons] = useState([])
   const [wasteReasons, setWasteReasons] = useState([])
@@ -278,6 +288,12 @@ export default function ReturnsWaste() {
         </div>
       )}
 
+      <SearchBar
+        value={search}
+        onChange={setSearch}
+        placeholder={tab === 'returns' ? 'Search by return #, product, or reason' : 'Search by waste #, product, or reason'}
+      />
+
       {tab === 'returns' ? (
         <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
           <table className="w-full text-left text-sm">
@@ -294,10 +310,10 @@ export default function ReturnsWaste() {
             </thead>
             <tbody>
               {loading && <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
-              {!loading && sortedReturns.length === 0 && (
+              {!loading && searchedReturns.length === 0 && (
                 <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No returns recorded yet.</td></tr>
               )}
-              {sortedReturns.map((r) => (
+              {searchedReturns.map((r) => (
                 <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{r.return_number}</td>
                   <td className="px-4 py-3">{r.return_date}</td>
@@ -331,10 +347,10 @@ export default function ReturnsWaste() {
             </thead>
             <tbody>
               {loading && <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
-              {!loading && sortedWastes.length === 0 && (
+              {!loading && searchedWastes.length === 0 && (
                 <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No waste recorded yet.</td></tr>
               )}
-              {sortedWastes.map((w) => (
+              {searchedWastes.map((w) => (
                 <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{w.waste_number}</td>
                   <td className="px-4 py-3">{w.waste_date}</td>

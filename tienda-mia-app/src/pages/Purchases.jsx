@@ -6,6 +6,7 @@ import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import ProductPicker from '../components/ProductPicker'
 import SortableTh from '../components/SortableTh'
+import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
@@ -39,6 +40,18 @@ export default function Purchases() {
     return row[key]
   }
   const sortedPurchases = sortRows(purchases, purchaseSortKey, purchaseSortDir, purchaseSortAccessor)
+
+  const [search, setSearch] = useState('')
+  const searchedPurchases = search.trim()
+    ? sortedPurchases.filter((p) => {
+        const q = search.trim().toLowerCase()
+        return (
+          p.purchase_number?.toLowerCase().includes(q) ||
+          p.supplier?.toLowerCase().includes(q) ||
+          p.invoice_number?.toLowerCase().includes(q)
+        )
+      })
+    : sortedPurchases
   const [products, setProducts] = useState([])
   const activeProducts = products.filter((p) => p.status === 'active')
   const [loading, setLoading] = useState(true)
@@ -470,6 +483,8 @@ export default function Purchases() {
         </div>
       )}
 
+      <SearchBar value={search} onChange={setSearch} placeholder="Search by purchase #, supplier, or invoice #" />
+
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
@@ -491,7 +506,7 @@ export default function Purchases() {
               </tr>
             )}
 
-            {!loading && sortedPurchases.length === 0 && (
+            {!loading && searchedPurchases.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No purchases yet — create one to start receiving stock.
@@ -499,7 +514,7 @@ export default function Purchases() {
               </tr>
             )}
 
-            {sortedPurchases.map((p) => (
+            {searchedPurchases.map((p) => (
               <tr
                 key={p.id}
                 onClick={() => openExisting(p)}

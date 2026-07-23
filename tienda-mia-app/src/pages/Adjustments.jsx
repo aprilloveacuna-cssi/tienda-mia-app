@@ -5,6 +5,7 @@ import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import ProductPicker from '../components/ProductPicker'
+import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 
 export default function Adjustments() {
@@ -18,6 +19,18 @@ export default function Adjustments() {
     return row[key]
   }
   const sortedAdjustments = sortRows(adjustments, adjSortKey, adjSortDir, adjSortAccessor)
+
+  const [search, setSearch] = useState('')
+  const searchedAdjustments = search.trim()
+    ? sortedAdjustments.filter((a) => {
+        const q = search.trim().toLowerCase()
+        return (
+          a.adjustment_number?.toLowerCase().includes(q) ||
+          a.product?.name?.toLowerCase().includes(q) ||
+          a.reason?.toLowerCase().includes(q)
+        )
+      })
+    : sortedAdjustments
   const [products, setProducts] = useState([])
   const [adjustmentTypes, setAdjustmentTypes] = useState([])
   const [loading, setLoading] = useState(true)
@@ -190,6 +203,8 @@ export default function Adjustments() {
         </div>
       )}
 
+      <SearchBar value={search} onChange={setSearch} placeholder="Search by adjustment #, product, or reason" />
+
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
@@ -208,10 +223,10 @@ export default function Adjustments() {
             {loading && (
               <tr><td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading adjustments…</td></tr>
             )}
-            {!loading && sortedAdjustments.length === 0 && (
+            {!loading && searchedAdjustments.length === 0 && (
               <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No adjustments yet — good sign, means nothing's needed correcting.</td></tr>
             )}
-            {sortedAdjustments.map((a) => {
+            {searchedAdjustments.map((a) => {
               const qty = Number(a.adjustment_quantity)
               return (
                 <tr key={a.id} className="border-b border-[var(--color-line)] last:border-0">

@@ -6,6 +6,7 @@ import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import ProductPicker from '../components/ProductPicker'
 import SortableTh from '../components/SortableTh'
+import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
@@ -35,6 +36,18 @@ export default function Sales() {
     return row[key]
   }
   const sortedSales = sortRows(sales, saleSortKey, saleSortDir, saleSortAccessor)
+
+  const [search, setSearch] = useState('')
+  const searchedSales = search.trim()
+    ? sortedSales.filter((s) => {
+        const q = search.trim().toLowerCase()
+        return (
+          s.sale_number?.toLowerCase().includes(q) ||
+          s.pos_terminal?.toLowerCase().includes(q) ||
+          s.cashier?.toLowerCase().includes(q)
+        )
+      })
+    : sortedSales
   const [products, setProducts] = useState([])
   const activeProducts = products.filter((p) => p.status === 'active')
   const [loading, setLoading] = useState(true)
@@ -575,6 +588,8 @@ export default function Sales() {
         </div>
       )}
 
+      <SearchBar value={search} onChange={setSearch} placeholder="Search by sale #, terminal, or cashier" />
+
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
@@ -595,14 +610,14 @@ export default function Sales() {
                 </td>
               </tr>
             )}
-            {!loading && sortedSales.length === 0 && (
+            {!loading && searchedSales.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No sales yet — record one to see it deduct from Inventory.
                 </td>
               </tr>
             )}
-            {sortedSales.map((s) => (
+            {searchedSales.map((s) => (
               <tr
                 key={s.id}
                 onClick={() => openView(s)}

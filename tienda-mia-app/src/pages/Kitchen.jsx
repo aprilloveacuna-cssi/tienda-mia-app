@@ -6,6 +6,7 @@ import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import ProductPicker from '../components/ProductPicker'
+import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
@@ -156,6 +157,16 @@ export default function Kitchen() {
     return row[key]
   }
   const sortedRecipes = sortRows(recipesWithDerived, recipeSortKey, recipeSortDir, recipeSortAccessor)
+
+  const [search, setSearch] = useState('')
+  const q = search.trim().toLowerCase()
+  const searchedRecipes = q ? sortedRecipes.filter((r) => r.product?.name?.toLowerCase().includes(q)) : sortedRecipes
+  const searchedIngredientProducts = q
+    ? ingredientProducts.filter((p) => p.name?.toLowerCase().includes(q) || p.barcode?.toLowerCase().includes(q))
+    : ingredientProducts
+  const searchedLeftovers = q
+    ? leftovers.filter((w) => w.product?.name?.toLowerCase().includes(q) || w.remarks?.toLowerCase().includes(q))
+    : leftovers
 
   // Recipe builder panel
   const [recipePanelOpen, setRecipePanelOpen] = useState(false)
@@ -1314,6 +1325,20 @@ export default function Kitchen() {
         </div>
       )}
 
+      {(tab === 'recipes' || tab === 'ingredients' || tab === 'leftovers') && (
+        <SearchBar
+          value={search}
+          onChange={setSearch}
+          placeholder={
+            tab === 'recipes'
+              ? 'Search recipes by finished product'
+              : tab === 'ingredients'
+                ? 'Search ingredients by name or code'
+                : 'Search leftovers by product or notes'
+          }
+        />
+      )}
+
       {tab === 'recipes' ? (
         <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
           <table className="w-full text-left text-sm">
@@ -1331,10 +1356,10 @@ export default function Kitchen() {
               {loading && (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading recipes…</td></tr>
               )}
-              {!loading && sortedRecipes.length === 0 && (
+              {!loading && searchedRecipes.length === 0 && (
                 <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No recipes yet — create one to start producing finished goods.</td></tr>
               )}
-              {sortedRecipes.map((r) => {
+              {searchedRecipes.map((r) => {
                 return (
                   <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="px-4 py-3 font-medium">{r.product?.name}</td>
@@ -1391,10 +1416,10 @@ export default function Kitchen() {
               {loading && (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading ingredients…</td></tr>
               )}
-              {!loading && ingredientProducts.length === 0 && (
+              {!loading && searchedIngredientProducts.length === 0 && (
                 <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No ingredients yet — add one to start building recipe ingredient lists.</td></tr>
               )}
-              {ingredientProducts.map((p) => (
+              {searchedIngredientProducts.map((p) => (
                 <tr key={p.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="px-4 py-3 font-medium">{p.name}</td>
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.barcode}</td>
@@ -1712,10 +1737,10 @@ export default function Kitchen() {
                 {loading && (
                   <tr><td colSpan={4} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
                 )}
-                {!loading && leftovers.length === 0 && (
+                {!loading && searchedLeftovers.length === 0 && (
                   <tr><td colSpan={4} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No leftovers recorded yet.</td></tr>
                 )}
-                {leftovers.map((w) => (
+                {searchedLeftovers.map((w) => (
                   <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="px-4 py-3">{w.waste_date}</td>
                     <td className="px-4 py-3 font-medium">{w.product?.name}</td>
