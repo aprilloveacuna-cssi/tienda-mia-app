@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Download, Printer, ArrowLeft } from 'lucide-react'
+import { Plus, Trash2, Download, Printer, ArrowLeft, Pencil, X, Archive, RotateCcw } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import ProductPicker from '../components/ProductPicker'
@@ -27,11 +27,13 @@ export default function PurchaseList() {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [search, setSearch] = useState('')
+  const [showArchived, setShowArchived] = useState(false)
 
-  const [selected, setSelected] = useState(null) // the open purchase_lists row, or null = showing the list-of-lists
+  const [selected, setSelected] = useState(null)
   const [lines, setLines] = useState([])
   const [labelDraft, setLabelDraft] = useState('')
   const [lineForm, setLineForm] = useState(EMPTY_LINE_FORM)
+  const [editingLineId, setEditingLineId] = useState(null)
   const [saving, setSaving] = useState(false)
 
   async function loadLists() {
@@ -76,6 +78,7 @@ export default function PurchaseList() {
     setLabelDraft('')
     setLines([])
     setLineForm(EMPTY_LINE_FORM)
+    setEditingLineId(null)
     loadLists()
   }
 
@@ -83,6 +86,7 @@ export default function PurchaseList() {
     setSelected(list)
     setLabelDraft(list.label ?? '')
     setLineForm(EMPTY_LINE_FORM)
+    setEditingLineId(null)
     setErrorMsg('')
     await loadLines(list.id)
   }
@@ -92,9 +96,23 @@ export default function PurchaseList() {
     if (!error) loadLists()
   }
 
-  async function deleteList(list, e) {
+  async function archiveList(list, e) {
     e.stopPropagation()
-    if (!confirm(`Delete ${list.list_number}${list.label ? ` (${list.label})` : ''}? This can't be undone.`)) return
+    if (!confirm(`Archive ${list.list_number}${list.label ? ` (${list.label})` : ''}? It'll move out of the main list, but nothing is lost — you can restore it anytime from "Show archived."`)) return
+    await supabase.from('purchase_lists').update({ status: 'archived' }).eq('id', list.id)
+    if (selected?.id === list.id) setSelected(null)
+    loadLists()
+  }
+
+  async function restoreList(list, e) {
+    e.stopPropagation()
+    await supabase.from('purchase_lists').update({ status: 'active' }).eq('id', list.id)
+    loadLists()
+  }
+
+  async function permanentlyDeleteList(list, e) {
+    e.stopPropagation()
+    if (!confirm(`Permanently delete ${list.list_number}${list.label ? ` (${list.label})` : ''}? This genuinely cannot be undone — there's no archive after this.`)) return
     await supabase.from('purchase_lists').delete().eq('id', list.id)
     if (selected?.id === list.id) setSelected(null)
     loadLists()
@@ -105,27 +123,43 @@ export default function PurchaseList() {
     setLineForm({
       product_id: id,
       quantity: '',
-      // Defaults to the recorded current cost — still fully editable, since
-      // this is exactly where you'd catch one that's never been set (shows
-      // blank instead of a fake 0.00) or manually override for a price change.
       unit_cost: p?.current_cost ? String(p.current_cost) : '',
       packaging_note: '',
     })
   }
 
-  async function addLine(e) {
+  function startEditLine(line) {
+    setEditingLineId(line.id)
+    setLineForm({
+      product_id: line.product_id,
+      quantity: String(line.quantity),
+      unit_cost: String(line.unit_cost),
+      packaging_note: line.packaging_note ?? '',
+    })
+  }
+
+  function cancelEditLine() {
+    setEditingLineId(null)
+    setLineForm(EMPTY_LINE_FORM)
+  }
+
+  async function submitLine(e) {
     e.preventDefault()
     if (!lineForm.product_id || !lineForm.quantity || lineForm.unit_cost === '') return
     setSaving(true)
     setErrorMsg('')
 
-    const { error } = await supabase.from('purchase_list_lines').insert({
-      purchase_list_id: selected.id,
+    const payload = {
       product_id: lineForm.product_id,
       quantity: Number(lineForm.quantity),
       unit_cost: Number(lineForm.unit_cost),
       packaging_note: lineForm.packaging_note.trim() || null,
-    })
+    }
+
+    const { error } = editingLineId
+      ? await supabase.from('purchase_list_lines').update(payload).eq('id', editingLineId)
+      : await supabase.from('purchase_list_lines').insert({ purchase_list_id: selected.id, ...payload })
+
     await supabase.from('purchase_lists').update({ updated_at: new Date().toISOString() }).eq('id', selected.id)
 
     setSaving(false)
@@ -134,6 +168,7 @@ export default function PurchaseList() {
       return
     }
     setLineForm(EMPTY_LINE_FORM)
+    setEditingLineId(null)
     await loadLines(selected.id)
     loadLists()
   }
@@ -169,14 +204,14 @@ export default function PurchaseList() {
     window.print()
   }
 
+  const visibleLists = lists.filter((l) => (showArchived ? l.status === 'archived' : l.status !== 'archived'))
   const searchedLists = search.trim()
-    ? lists.filter((l) => {
+    ? visibleLists.filter((l) => {
         const q = search.trim().toLowerCase()
         return l.list_number?.toLowerCase().includes(q) || l.label?.toLowerCase().includes(q)
       })
-    : lists
+    : visibleLists
 
-  // ---------- Detail / builder view ----------
   if (selected) {
     return (
       <div>
@@ -236,7 +271,7 @@ export default function PurchaseList() {
           </label>
         </div>
 
-        <form onSubmit={addLine} className="no-print mb-5 grid grid-cols-4 gap-3 rounded-md border border-dashed border-[var(--color-line)] p-4">
+        <form onSubmit={submitLine} className="no-print mb-5 grid grid-cols-4 gap-3 rounded-md border border-dashed border-[var(--color-line)] p-4">
           <div className="col-span-2">
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Product</span>
             <ProductPicker products={products} value={lineForm.product_id} onChange={onProductPick} />
@@ -263,7 +298,7 @@ export default function PurchaseList() {
               className="input"
             />
           </label>
-          <label className="col-span-3 block">
+          <label className="col-span-2 block">
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Packaging note (optional)</span>
             <input
               value={lineForm.packaging_note}
@@ -272,14 +307,26 @@ export default function PurchaseList() {
               className="input"
             />
           </label>
-          <button
-            type="submit"
-            disabled={saving}
-            className="flex items-end justify-center gap-1.5 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-60"
-          >
-            <Plus size={15} />
-            {saving ? 'Adding…' : 'Add'}
-          </button>
+          <div className="flex items-end gap-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-60"
+            >
+              {editingLineId ? <Pencil size={15} /> : <Plus size={15} />}
+              {saving ? 'Saving…' : editingLineId ? 'Update' : 'Add'}
+            </button>
+            {editingLineId && (
+              <button
+                type="button"
+                onClick={cancelEditLine}
+                aria-label="Cancel edit"
+                className="rounded-md border border-[var(--color-line)] px-3 py-2 hover:bg-[var(--color-paper)]"
+              >
+                <X size={15} />
+              </button>
+            )}
+          </div>
         </form>
 
         <div id="printable-report">
@@ -307,7 +354,7 @@ export default function PurchaseList() {
                   <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No lines yet — search a product above to start building the list.</td></tr>
                 )}
                 {lines.map((l) => (
-                  <tr key={l.id} className="border-b border-[var(--color-line)] last:border-0">
+                  <tr key={l.id} className={`border-b border-[var(--color-line)] last:border-0 ${editingLineId === l.id ? 'bg-[var(--color-amber-soft)]' : ''}`}>
                     <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{l.product?.barcode}</td>
                     <td className="px-4 py-3 font-medium">{l.product?.name}</td>
                     <td className="px-4 py-3">{Number(l.unit_cost).toFixed(2)}</td>
@@ -316,13 +363,22 @@ export default function PurchaseList() {
                     <td className="px-4 py-3">{costPerPiece(l).toFixed(2)}</td>
                     <td className="px-4 py-3 font-medium">{costForecast(l).toFixed(2)}</td>
                     <td className="px-4 py-3 no-print">
-                      <button
-                        onClick={() => removeLine(l.id)}
-                        aria-label="Remove line"
-                        className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => startEditLine(l)}
+                          aria-label="Edit line"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          onClick={() => removeLine(l.id)}
+                          aria-label="Remove line"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -343,7 +399,6 @@ export default function PurchaseList() {
     )
   }
 
-  // ---------- List-of-lists view ----------
   return (
     <div>
       <div className="mb-5 flex items-center justify-between">
@@ -369,7 +424,16 @@ export default function PurchaseList() {
         </div>
       )}
 
-      <SearchBar value={search} onChange={setSearch} placeholder="Search by list # or label" />
+      <div className="mb-4 flex items-center justify-between">
+        <SearchBar value={search} onChange={setSearch} placeholder="Search by list # or label" />
+      </div>
+      <button
+        onClick={() => setShowArchived(!showArchived)}
+        className="mb-4 -mt-2 flex items-center gap-1.5 text-xs font-medium text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]"
+      >
+        <Archive size={13} />
+        {showArchived ? 'Hide archived' : 'Show archived'}
+      </button>
 
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">
@@ -389,14 +453,14 @@ export default function PurchaseList() {
             )}
             {!loading && searchedLists.length === 0 && (
               <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
-                {lists.length === 0 ? 'No purchase lists yet — create one to start planning.' : 'No lists match that search.'}
+                {showArchived ? 'Nothing archived.' : lists.length === 0 ? 'No purchase lists yet — create one to start planning.' : 'No lists match that search.'}
               </td></tr>
             )}
             {searchedLists.map((list) => (
               <tr
                 key={list.id}
-                onClick={() => openExisting(list)}
-                className="cursor-pointer border-b border-[var(--color-line)] last:border-0 hover:bg-[var(--color-paper)]"
+                onClick={() => !showArchived && openExisting(list)}
+                className={`border-b border-[var(--color-line)] last:border-0 ${showArchived ? '' : 'cursor-pointer hover:bg-[var(--color-paper)]'}`}
               >
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{list.list_number}</td>
                 <td className="px-4 py-3 font-medium">{list.label || '—'}</td>
@@ -404,13 +468,35 @@ export default function PurchaseList() {
                 <td className="px-4 py-3">{listItemCount(list)}</td>
                 <td className="px-4 py-3">{listTotal(list).toFixed(2)}</td>
                 <td className="px-4 py-3">
-                  <button
-                    onClick={(e) => deleteList(list, e)}
-                    aria-label="Delete list"
-                    className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {showArchived ? (
+                    <div className="flex gap-1">
+                      <button
+                        onClick={(e) => restoreList(list, e)}
+                        aria-label="Restore list"
+                        className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        title="Restore"
+                      >
+                        <RotateCcw size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => permanentlyDeleteList(list, e)}
+                        aria-label="Permanently delete"
+                        className="rounded-md p-1 text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
+                        title="Permanently delete"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={(e) => archiveList(list, e)}
+                      aria-label="Archive list"
+                      className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                      title="Archive"
+                    >
+                      <Archive size={14} />
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
