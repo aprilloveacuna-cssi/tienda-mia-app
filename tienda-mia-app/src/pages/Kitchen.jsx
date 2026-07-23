@@ -102,6 +102,17 @@ export default function Kitchen() {
   // Ingredients (raw materials) — separate management list, kept out of the
   // main Products page since these aren't sold on their own.
   const [ingredientProducts, setIngredientProducts] = useState([])
+
+  // Weekly ingredient purchases — one form covering a whole week's market
+  // list, split into separate dated Purchase records behind the scenes since
+  // items in one week's list are often bought on different actual days.
+  const [weeklyPurchaseLines, setWeeklyPurchaseLines] = useState([])
+  const [weeklyPurchaseForm, setWeeklyPurchaseForm] = useState({ ingredient_product_id: '', quantity: '', unit_cost: '', purchase_date: today() })
+  const [weeklyPurchaseSaving, setWeeklyPurchaseSaving] = useState(false)
+  const [weeklyPurchaseError, setWeeklyPurchaseError] = useState('')
+  const weeklyPurchaseFileInputRef = useRef(null)
+  const [weeklyPurchaseImportOpen, setWeeklyPurchaseImportOpen] = useState(false)
+  const [weeklyPurchaseImportSkipped, setWeeklyPurchaseImportSkipped] = useState([])
   const ingredientProductFileInputRef = useRef(null)
   const [ingredientProductImportOpen, setIngredientProductImportOpen] = useState(false)
   const [ingredientProductImportValid, setIngredientProductImportValid] = useState([])
@@ -750,6 +761,193 @@ export default function Kitchen() {
     loadAll()
   }
 
+  // ---------- Weekly ingredient purchases ----------
+  function addWeeklyPurchaseLine(e) {
+    e.preventDefault()
+    if (!weeklyPurchaseForm.ingredient_product_id || !weeklyPurchaseForm.quantity || !weeklyPurchaseForm.unit_cost || !weeklyPurchaseForm.purchase_date) return
+    const p = ingredientProducts.find((x) => x.id === weeklyPurchaseForm.ingredient_product_id)
+    setWeeklyPurchaseLines([
+      ...weeklyPurchaseLines,
+      {
+        tempId: crypto.randomUUID(),
+        ingredient_product_id: p.id,
+        name: p.name,
+        unit: p.unit,
+        quantity: Number(weeklyPurchaseForm.quantity),
+        unit_cost: Number(weeklyPurchaseForm.unit_cost),
+        purchase_date: weeklyPurchaseForm.purchase_date,
+      },
+    ])
+    // Keeps the date, since a week's list is usually entered in date-order
+    setWeeklyPurchaseForm({ ingredient_product_id: '', quantity: '', unit_cost: '', purchase_date: weeklyPurchaseForm.purchase_date })
+  }
+
+  function removeWeeklyPurchaseLine(tempId) {
+    setWeeklyPurchaseLines(weeklyPurchaseLines.filter((l) => l.tempId !== tempId))
+  }
+
+  async function handleSaveWeeklyPurchases() {
+    if (weeklyPurchaseLines.length === 0) return
+    setWeeklyPurchaseSaving(true)
+    setWeeklyPurchaseError('')
+
+    // One real Purchase record per distinct date — each one goes through the
+    // exact same draft-then-post flow as a normal purchase, so every batch
+    // this creates is fully traceable back to a real purchase record later.
+    const byDate = {}
+    for (const l of weeklyPurchaseLines) {
+      byDate[l.purchase_date] = byDate[l.purchase_date] ?? []
+      byDate[l.purchase_date].push(l)
+    }
+
+    for (const [date, lines] of Object.entries(byDate)) {
+      const { data: purchase, error: purchaseErr } = await supabase
+        .from('purchases')
+        .insert({ purchase_date: date, supplier: 'Weekly Kitchen Purchase' })
+        .select()
+        .single()
+
+      if (purchaseErr) {
+        setWeeklyPurchaseError(`${date}: ${purchaseErr.message}`)
+        setWeeklyPurchaseSaving(false)
+        loadAll()
+        return
+      }
+
+      const lineRows = lines.map((l) => ({
+        purchase_id: purchase.id,
+        product_id: l.ingredient_product_id,
+        quantity: l.quantity,
+        unit_cost: l.unit_cost,
+      }))
+      const { error: lineErr } = await supabase.from('purchase_lines').insert(lineRows)
+      if (lineErr) {
+        setWeeklyPurchaseError(`${date}: ${lineErr.message}`)
+        setWeeklyPurchaseSaving(false)
+        loadAll()
+        return
+      }
+
+      const { error: postErr } = await supabase.from('purchases').update({ status: 'posted' }).eq('id', purchase.id)
+      if (postErr) {
+        setWeeklyPurchaseError(`${date}: posted with an issue — ${postErr.message}`)
+        setWeeklyPurchaseSaving(false)
+        loadAll()
+        return
+      }
+    }
+
+    setWeeklyPurchaseSaving(false)
+    setWeeklyPurchaseLines([])
+    loadAll()
+  }
+
+  function handleDownloadWeeklyPurchaseTemplate() {
+    const headers = ['Ingredient', 'Quantity', 'Unit Cost', 'Purchase Date']
+    const rows = [
+      headers,
+      ['PORK', '10', '330', '2026-07-20'],
+      ['ONION', '5', '95', '2026-07-21'],
+      ['SALT', '20', '18', '2026-07-20'],
+    ]
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile('weekly-ingredient-purchases-template.csv', csv, 'text/csv;charset=utf-8;')
+  }
+
+  function handleWeeklyPurchaseImportClick() {
+    weeklyPurchaseFileInputRef.current?.click()
+  }
+
+  function handleWeeklyPurchaseFileChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const rows = parseCsv(String(reader.result))
+        if (rows.length < 2) {
+          setWeeklyPurchaseError('That file has no data rows.')
+          return
+        }
+        const headerRow = rows[0].map((h) => h.trim())
+        const aliases = {
+          ingredient: 'name', name: 'name',
+          quantity: 'quantity', qty: 'quantity',
+          unitcost: 'unit_cost', cost: 'unit_cost', unitprice: 'unit_cost',
+          purchasedate: 'purchase_date', date: 'purchase_date',
+        }
+        const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
+        const cleanName = (v) =>
+          (v ?? '')
+            .normalize('NFKC')
+            // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+            .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+            .toUpperCase()
+
+        const newLines = []
+        const skipped = []
+
+        rows.slice(1).forEach((r, idx) => {
+          const rowNum = idx + 2
+          if (r.length !== headerRow.length) {
+            skipped.push({ rowNum, reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma` })
+            return
+          }
+          const obj = {}
+          canonicalKeys.forEach((key, i) => {
+            if (key) obj[key] = (r[i] ?? '').trim()
+          })
+
+          const name = obj.name || ''
+          if (!name) {
+            skipped.push({ rowNum, reason: 'Missing ingredient name' })
+            return
+          }
+          const product = ingredientProducts.find((p) => cleanName(p.name) === cleanName(name))
+          if (!product) {
+            skipped.push({ rowNum, reason: `No ingredient matches "${name}" — add it in Ingredients first` })
+            return
+          }
+          const qty = Number(obj.quantity)
+          if (!qty || qty <= 0) {
+            skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
+            return
+          }
+          const cost = Number(obj.unit_cost)
+          if (isNaN(cost) || cost < 0) {
+            skipped.push({ rowNum, reason: 'Missing or invalid unit cost' })
+            return
+          }
+          const date = obj.purchase_date
+          if (!date) {
+            skipped.push({ rowNum, reason: 'Missing purchase date' })
+            return
+          }
+
+          newLines.push({
+            tempId: crypto.randomUUID(),
+            ingredient_product_id: product.id,
+            name: product.name,
+            unit: product.unit,
+            quantity: qty,
+            unit_cost: cost,
+            purchase_date: date,
+          })
+        })
+
+        setWeeklyPurchaseLines((prev) => [...prev, ...newLines])
+        setWeeklyPurchaseImportSkipped(skipped)
+        setWeeklyPurchaseError('')
+        if (skipped.length > 0) setWeeklyPurchaseImportOpen(true)
+      } catch {
+        setWeeklyPurchaseError('Could not read that file — make sure it is a CSV, not an .xlsx.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
   function handleDownloadIngredientProductTemplate() {
     const headers = ['Name', 'Unit', 'Cost per unit']
     const example1 = ['PORK', 'g', '0.33']
@@ -1062,12 +1260,37 @@ export default function Kitchen() {
             </button>
           </div>
         )}
+        {tab === 'weeklyPurchases' && (
+          <div className="flex gap-2">
+            <button
+              onClick={handleDownloadWeeklyPurchaseTemplate}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <FileDown size={16} />
+              Template
+            </button>
+            <button
+              onClick={handleWeeklyPurchaseImportClick}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <Upload size={16} />
+              Import CSV
+            </button>
+            <input
+              ref={weeklyPurchaseFileInputRef}
+              type="file" accept=".csv"
+              onChange={handleWeeklyPurchaseFileChange}
+              className="hidden"
+            />
+          </div>
+        )}
       </div>
 
       <div className="mb-4 flex gap-1 border-b border-[var(--color-line)]">
         {[
           ['recipes', 'Recipes'],
           ['ingredients', 'Ingredients'],
+          ['weeklyPurchases', 'Weekly Purchases'],
           ['dailyMeals', 'Daily Meals'],
           ['leftovers', 'Leftovers'],
         ].map(([t, label]) => (
@@ -1202,6 +1425,109 @@ export default function Kitchen() {
               ))}
             </tbody>
           </table>
+        </div>
+      ) : tab === 'weeklyPurchases' ? (
+        <div>
+          <div className="mb-4 rounded-md border border-dashed border-[var(--color-line)] p-4">
+            <div className="mb-3 text-xs text-[var(--color-ink-soft)]">
+              One line per ingredient purchased, each with its own date — since a week's market list often has
+              different items bought on different days. Saving splits these into separate purchase records by date,
+              each one creating a real batch exactly like posting a purchase normally.
+            </div>
+            {weeklyPurchaseError && (
+              <div className="mb-3 rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                {weeklyPurchaseError}
+              </div>
+            )}
+
+            <div className="mb-3 max-h-64 overflow-auto rounded-md border border-[var(--color-line)]">
+              <table className="w-full text-left text-sm">
+                <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
+                  <tr>
+                    <th className="px-3 py-2">Ingredient</th>
+                    <th className="px-3 py-2">Qty</th>
+                    <th className="px-3 py-2">Unit cost</th>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {weeklyPurchaseLines.length === 0 && (
+                    <tr><td colSpan={5} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No lines added yet.</td></tr>
+                  )}
+                  {weeklyPurchaseLines.map((l) => (
+                    <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
+                      <td className="px-3 py-2">{l.name}</td>
+                      <td className="px-3 py-2">{l.quantity} {l.unit}</td>
+                      <td className="px-3 py-2">{l.unit_cost.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.purchase_date}</td>
+                      <td className="px-3 py-2">
+                        <button
+                          onClick={() => removeWeeklyPurchaseLine(l.tempId)}
+                          aria-label="Remove"
+                          className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <form onSubmit={addWeeklyPurchaseLine} className="grid grid-cols-4 gap-3">
+              <Field label="Ingredient" required>
+                <ProductPicker
+                  products={ingredientProducts}
+                  value={weeklyPurchaseForm.ingredient_product_id}
+                  onChange={(id) => setWeeklyPurchaseForm({ ...weeklyPurchaseForm, ingredient_product_id: id })}
+                />
+              </Field>
+              <Field label="Quantity" required>
+                <input
+                  type="number" step="0.001" min="0" required
+                  value={weeklyPurchaseForm.quantity}
+                  onChange={(e) => setWeeklyPurchaseForm({ ...weeklyPurchaseForm, quantity: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Unit cost" required>
+                <input
+                  type="number" step="0.01" min="0" required
+                  value={weeklyPurchaseForm.unit_cost}
+                  onChange={(e) => setWeeklyPurchaseForm({ ...weeklyPurchaseForm, unit_cost: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Purchase date" required>
+                <input
+                  type="date" required max={today()}
+                  value={weeklyPurchaseForm.purchase_date}
+                  onChange={(e) => setWeeklyPurchaseForm({ ...weeklyPurchaseForm, purchase_date: e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <button
+                type="submit"
+                className="col-span-4 flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-ink)] py-2 text-sm font-medium"
+              >
+                <Plus size={15} />
+                Add line
+              </button>
+            </form>
+          </div>
+
+          <button
+            onClick={handleSaveWeeklyPurchases}
+            disabled={weeklyPurchaseSaving || weeklyPurchaseLines.length === 0}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--color-herb)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+          >
+            <Check size={15} />
+            {weeklyPurchaseSaving
+              ? 'Saving…'
+              : `Save ${weeklyPurchaseLines.length} line${weeklyPurchaseLines.length === 1 ? '' : 's'} across ${new Set(weeklyPurchaseLines.map((l) => l.purchase_date)).size} date${new Set(weeklyPurchaseLines.map((l) => l.purchase_date)).size === 1 ? '' : 's'}`}
+          </button>
         </div>
       ) : tab === 'dailyMeals' ? (
         <div>
@@ -1861,8 +2187,37 @@ export default function Kitchen() {
           {recipeImporting ? 'Importing…' : `Import ${recipeImportValid.length} recipe${recipeImportValid.length === 1 ? '' : 's'}`}
         </button>
       </SlidePanel>
-    </div>
 
+      <SlidePanel
+        open={weeklyPurchaseImportOpen}
+        title="Import results"
+        onClose={() => setWeeklyPurchaseImportOpen(false)}
+      >
+        <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+          Valid rows were added to the line list — review them there, then click "Save" when ready.
+        </div>
+        {weeklyPurchaseImportSkipped.length > 0 && (
+          <div>
+            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+              {weeklyPurchaseImportSkipped.length} row{weeklyPurchaseImportSkipped.length === 1 ? '' : 's'} skipped
+            </div>
+            <div className="max-h-64 space-y-1 overflow-y-auto">
+              {weeklyPurchaseImportSkipped.map((s, i) => (
+                <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                  Row {s.rowNum}: {s.reason}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => setWeeklyPurchaseImportOpen(false)}
+          className="mt-4 w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white"
+        >
+          Done
+        </button>
+      </SlidePanel>
+    </div>
   )
 }
 
