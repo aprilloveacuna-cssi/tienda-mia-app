@@ -4,6 +4,8 @@ import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import ProductPicker from '../components/ProductPicker'
 import SearchBar from '../components/SearchBar'
+import SortableTh from '../components/SortableTh'
+import { useSort, sortRows } from '../lib/sort'
 import { downloadFile } from '../lib/csv'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_cost: '', packaging_note: '' }
@@ -49,7 +51,7 @@ export default function PurchaseList() {
   }
 
   async function loadProducts() {
-    const { data, error } = await fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, status', 'name')
+    const { data, error } = await fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, category, status', 'name')
     if (!error) setProducts((data ?? []).filter((p) => p.status === 'active'))
   }
 
@@ -61,7 +63,7 @@ export default function PurchaseList() {
   async function loadLines(listId) {
     const { data, error } = await supabase
       .from('purchase_list_lines')
-      .select('*, product:products(name, sku, unit, barcode)')
+      .select('*, product:products(name, sku, unit, barcode, category)')
       .eq('purchase_list_id', listId)
       .order('created_at')
     if (!error) setLines(data ?? [])
@@ -182,18 +184,33 @@ export default function PurchaseList() {
 
   const grandTotal = lines.reduce((sum, l) => sum + costForecast(l), 0)
 
+  const { sortKey: lineSortKey, sortDir: lineSortDir, toggleSort: toggleLineSort } = useSort(null)
+  function lineSortAccessor(row, key) {
+    if (key === 'code') return row.product?.barcode
+    if (key === 'description') return row.product?.name
+    if (key === 'category') return row.product?.category
+    if (key === 'unit_cost') return Number(row.unit_cost)
+    if (key === 'quantity') return Number(row.quantity)
+    if (key === 'packaging_note') return row.packaging_note
+    if (key === 'cost_per_piece') return costPerPiece(row)
+    if (key === 'cost_forecast') return costForecast(row)
+    return row[key]
+  }
+  const sortedLines = sortRows(lines, lineSortKey, lineSortDir, lineSortAccessor)
+
   function exportCsv() {
-    const headers = ['Code', 'Description', 'Unit Cost', 'Purchase Qty', 'Packaging', 'Cost Per Piece', 'Cost Forecast']
-    const rows = lines.map((l) => [
+    const headers = ['Code', 'Description', 'Category', 'Unit Cost', 'Purchase Qty', 'Packaging', 'Cost Per Piece', 'Cost Forecast']
+    const rows = sortedLines.map((l) => [
       l.product?.barcode,
       l.product?.name,
+      l.product?.category ?? '',
       Number(l.unit_cost).toFixed(2),
       `${l.quantity} ${l.product?.unit ?? ''}`,
       l.packaging_note ?? '',
       costPerPiece(l).toFixed(2),
       costForecast(l).toFixed(2),
     ])
-    rows.push(['', '', '', '', '', 'TOTAL', grandTotal.toFixed(2)])
+    rows.push(['', '', '', '', '', '', 'TOTAL', grandTotal.toFixed(2)])
     const csv = [headers, ...rows]
       .map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
       .join('\n')
@@ -211,6 +228,15 @@ export default function PurchaseList() {
         return l.list_number?.toLowerCase().includes(q) || l.label?.toLowerCase().includes(q)
       })
     : visibleLists
+
+  const { sortKey: listSortKey, sortDir: listSortDir, toggleSort: toggleListSort } = useSort('updated_at', 'desc')
+  function listSortAccessor(row, key) {
+    if (key === 'items') return listItemCount(row)
+    if (key === 'total') return listTotal(row)
+    if (key === 'updated_at') return new Date(row.updated_at).getTime()
+    return row[key]
+  }
+  const sortedSearchedLists = sortRows(searchedLists, listSortKey, listSortDir, listSortAccessor)
 
   if (selected) {
     return (
@@ -339,24 +365,26 @@ export default function PurchaseList() {
             <table className="w-full min-w-[720px] whitespace-nowrap text-left text-sm">
               <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
                 <tr>
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Description</th>
-                  <th className="px-4 py-3">Unit Cost</th>
-                  <th className="px-4 py-3">Purchase Qty</th>
-                  <th className="px-4 py-3">Packaging</th>
-                  <th className="px-4 py-3">Cost Per Piece</th>
-                  <th className="px-4 py-3">Cost Forecast</th>
+                  <SortableTh label="Code" sortKey="code" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Description" sortKey="description" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Category" sortKey="category" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Unit Cost" sortKey="unit_cost" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Purchase Qty" sortKey="quantity" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Packaging" sortKey="packaging_note" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Cost Per Piece" sortKey="cost_per_piece" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                  <SortableTh label="Cost Forecast" sortKey="cost_forecast" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
                   <th className="px-4 py-3 no-print" />
                 </tr>
               </thead>
               <tbody>
                 {lines.length === 0 && (
-                  <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No lines yet — search a product above to start building the list.</td></tr>
+                  <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No lines yet — search a product above to start building the list.</td></tr>
                 )}
-                {lines.map((l) => (
+                {sortedLines.map((l) => (
                   <tr key={l.id} className={`border-b border-[var(--color-line)] last:border-0 ${editingLineId === l.id ? 'bg-[var(--color-amber-soft)]' : ''}`}>
                     <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{l.product?.barcode}</td>
                     <td className="px-4 py-3 font-medium">{l.product?.name}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{l.product?.category || '—'}</td>
                     <td className="px-4 py-3">{Number(l.unit_cost).toFixed(2)}</td>
                     <td className="px-4 py-3">{l.quantity} {l.product?.unit}</td>
                     <td className="px-4 py-3 text-[var(--color-ink-soft)]">{l.packaging_note || '—'}</td>
@@ -386,7 +414,7 @@ export default function PurchaseList() {
               {lines.length > 0 && (
                 <tfoot className="sticky bottom-0 bg-[var(--color-paper-raised)]">
                   <tr className="border-t border-[var(--color-line)] font-medium">
-                    <td colSpan={6} className="px-4 py-3 text-right text-[var(--color-ink-soft)]">Total</td>
+                    <td colSpan={7} className="px-4 py-3 text-right text-[var(--color-ink-soft)]">Total</td>
                     <td className="px-4 py-3">{grandTotal.toFixed(2)}</td>
                     <td className="no-print" />
                   </tr>
@@ -439,11 +467,11 @@ export default function PurchaseList() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
-              <th className="px-4 py-3">List #</th>
-              <th className="px-4 py-3">Label</th>
-              <th className="px-4 py-3">Last updated</th>
-              <th className="px-4 py-3">Items</th>
-              <th className="px-4 py-3">Total</th>
+              <SortableTh label="List #" sortKey="list_number" activeKey={listSortKey} activeDir={listSortDir} onSort={toggleListSort} />
+              <SortableTh label="Label" sortKey="label" activeKey={listSortKey} activeDir={listSortDir} onSort={toggleListSort} />
+              <SortableTh label="Last updated" sortKey="updated_at" activeKey={listSortKey} activeDir={listSortDir} onSort={toggleListSort} />
+              <SortableTh label="Items" sortKey="items" activeKey={listSortKey} activeDir={listSortDir} onSort={toggleListSort} />
+              <SortableTh label="Total" sortKey="total" activeKey={listSortKey} activeDir={listSortDir} onSort={toggleListSort} />
               <th className="px-4 py-3" />
             </tr>
           </thead>
@@ -451,12 +479,12 @@ export default function PurchaseList() {
             {loading && (
               <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
             )}
-            {!loading && searchedLists.length === 0 && (
+            {!loading && sortedSearchedLists.length === 0 && (
               <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                 {showArchived ? 'Nothing archived.' : lists.length === 0 ? 'No purchase lists yet — create one to start planning.' : 'No lists match that search.'}
               </td></tr>
             )}
-            {searchedLists.map((list) => (
+            {sortedSearchedLists.map((list) => (
               <tr
                 key={list.id}
                 onClick={() => !showArchived && openExisting(list)}
