@@ -20,6 +20,12 @@ export async function fetchAllRows(table, columns = '*', orderBy = null, options
   while (true) {
     let query = supabase.from(table).select(columns)
     if (orderBy) query = query.order(orderBy, { ascending: options.ascending ?? true })
+    // Always add a stable secondary sort by id. Without this, rows that tie
+    // on the primary sort column (e.g. duplicate product names) can be
+    // ordered inconsistently between successive paged requests — Postgres
+    // is free to break ties differently each time — which silently skips
+    // or duplicates rows sitting right at a page boundary.
+    query = query.order('id', { ascending: true })
     query = query.range(from, from + pageSize - 1)
 
     const { data, error } = await query
