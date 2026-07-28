@@ -555,10 +555,14 @@ export default function Products() {
                   {(() => {
                     const status = pairingStatus(p, products)
                     if (status === null) return <span className="text-[var(--color-ink-soft)]">—</span>
-                    return status ? (
-                      <StatusChip tone="ok">paired</StatusChip>
-                    ) : (
-                      <StatusChip tone="attention">needs pairing</StatusChip>
+                    if (!status) return <StatusChip tone="attention">needs pairing</StatusChip>
+                    const pointsTo = p.pairs_with_product_id ? products.find((x) => x.id === p.pairs_with_product_id)?.name : null
+                    const pointedToBy = products.filter((x) => x.pairs_with_product_id === p.id).map((x) => x.name)
+                    const linked = [pointsTo, ...pointedToBy].filter(Boolean).join(', ')
+                    return (
+                      <span title={linked || undefined}>
+                        <StatusChip tone="ok">paired</StatusChip>
+                      </span>
                     )
                   })()}
                 </td>
@@ -741,6 +745,16 @@ export default function Products() {
               />
               Never block sales of this item for low stock
             </label>
+
+            {editingId && (() => {
+              const pairedByNames = products.filter((p) => p.pairs_with_product_id === editingId).map((p) => p.name)
+              return (
+                <div className="mt-3 text-xs text-[var(--color-ink-soft)]">
+                  <span className="font-medium">Paired by:</span>{' '}
+                  {pairedByNames.length > 0 ? pairedByNames.join(', ') : 'no other product points to this one yet'}
+                </div>
+              )
+            })()}
           </div>
 
           <Field label="Notes">

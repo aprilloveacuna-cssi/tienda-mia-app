@@ -361,28 +361,28 @@ export default function Sales() {
 
         // ---------- Pass 2: Kitchen items reconcile against that day's Daily Meals ----------
         // Every Kitchen item's sales this import must trace back to a Daily
-        // Meals batch dated exactly this sale's date. A Meal and its paired
-        // Only both draw from the same prepared batch, so they're checked
-        // together. No batch at all for that dish/date is an error — nothing
-        // to reconcile against. If a batch exists but sold more than was
-        // prepared, the shortfall is topped up automatically so the sale can
-        // go through, rather than blocking a sale that genuinely happened.
-        function groupIdsFor(product) {
-          if (product.pairs_with_product_id) return [product.id, product.pairs_with_product_id].sort()
-          const pointingToMe = products.find((p) => p.pairs_with_product_id === product.id)
-          if (pointingToMe) return [product.id, pointingToMe.id].sort()
-          return [product.id]
+        // Meals batch dated exactly this sale's date. Grouped by the shared
+        // "Only" product (the root a Meal/Silog points to via pairs_with_product_id),
+        // not per individual pair — this matters because more than one Meal
+        // variant (e.g. both a Meal and a Silog) can point to the same Only,
+        // and their combined need has to be checked together against the one
+        // batch they actually share, not independently against the same
+        // snapshot (which could under-detect a shortfall). No batch at all
+        // for that dish/date is an error. If sold more than was prepared, the
+        // shortfall is topped up automatically so the sale can go through.
+        function groupRootId(product) {
+          return product.pairs_with_product_id || product.id
         }
 
         const kitchenGroups = new Map()
         for (const pr of parsedRows) {
           const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
           if (!isKitchen) continue
-          const key = groupIdsFor(pr.product).join(',')
-          if (!kitchenGroups.has(key)) {
-            kitchenGroups.set(key, { groupIds: groupIdsFor(pr.product), neededQty: 0, rowNums: [], names: new Set() })
+          const rootId = groupRootId(pr.product)
+          if (!kitchenGroups.has(rootId)) {
+            kitchenGroups.set(rootId, { rootId, neededQty: 0, rowNums: [], names: new Set() })
           }
-          const g = kitchenGroups.get(key)
+          const g = kitchenGroups.get(rootId)
           g.neededQty += pr.qty
           g.rowNums.push(pr.rowNum)
           g.names.add(pr.product.name)
@@ -391,10 +391,15 @@ export default function Sales() {
         const blockedRowNums = new Set()
 
         for (const g of kitchenGroups.values()) {
+          // Every product that resolves to this same root — the Only itself,
+          // plus every Meal/Silog pointing at it — since Daily Meals could in
+          // principle have been logged against any of them.
+          const memberIds = products.filter((p) => groupRootId(p) === g.rootId).map((p) => p.id)
+
           const { data: dmBatches } = await supabase
             .from('batches')
             .select('id, product_id, unit_cost')
-            .in('product_id', g.groupIds)
+            .in('product_id', memberIds)
             .eq('source_type', 'KitchenProduction')
             .eq('received_date', headerForm.sale_date)
 
