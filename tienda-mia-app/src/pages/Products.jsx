@@ -94,7 +94,19 @@ const EMPTY_FORM = {
   notes: '',
   pairs_with_product_id: '',
   rice_cups: '',
+  egg_qty: '',
   unlimited_stock: false,
+}
+
+// Only meaningful for items with a Meal/Only/Silog naming pattern — anything
+// else returns null (not applicable), since most products were never meant
+// to be paired at all and shouldn't show as "needs pairing".
+function pairingStatus(product, allProducts) {
+  const name = (product.name ?? '').toUpperCase()
+  const looksPairable = / MEAL$/.test(name) || / ONLY$/.test(name) || /[- ]SILOG$/.test(name)
+  if (!looksPairable) return null
+  const isPaired = Boolean(product.pairs_with_product_id) || allProducts.some((p) => p.pairs_with_product_id === product.id)
+  return isPaired
 }
 
 export default function Products() {
@@ -156,20 +168,32 @@ export default function Products() {
     loadLists()
   }, [])
 
+  const [pairingFilter, setPairingFilter] = useState('all') // 'all' | 'needsPairing'
+
   const filtered = useMemo(() => {
     const q = normalizeSearchText(search)
-    if (!q) return products
-    return products.filter(
-      (p) =>
-        normalizeSearchText(p.name).includes(q) ||
-        normalizeSearchText(p.barcode).includes(q) ||
-        normalizeSearchText(p.sku).includes(q)
-    )
-  }, [products, search])
+    let rows = products
+    if (q) {
+      rows = rows.filter(
+        (p) =>
+          normalizeSearchText(p.name).includes(q) ||
+          normalizeSearchText(p.barcode).includes(q) ||
+          normalizeSearchText(p.sku).includes(q)
+      )
+    }
+    if (pairingFilter === 'needsPairing') {
+      rows = rows.filter((p) => pairingStatus(p, products) === false)
+    }
+    return rows
+  }, [products, search, pairingFilter])
 
   const { sortKey, sortDir, toggleSort } = useSort('name')
   function sortAccessor(row, key) {
     if (key === 'price') return Number(row.selling_price ?? 0)
+    if (key === 'paired') {
+      const status = pairingStatus(row, products)
+      return status === null ? -1 : status ? 1 : 0
+    }
     return row[key]
   }
   const sorted = sortRows(filtered, sortKey, sortDir, sortAccessor)
@@ -197,6 +221,7 @@ export default function Products() {
       notes: product.notes ?? '',
       pairs_with_product_id: product.pairs_with_product_id ?? '',
       rice_cups: product.rice_cups ?? '',
+      egg_qty: product.egg_qty ?? '',
       unlimited_stock: product.unlimited_stock ?? false,
     })
     setPanelOpen(true)
@@ -222,6 +247,7 @@ export default function Products() {
       notes: form.notes.trim() || null,
       pairs_with_product_id: form.pairs_with_product_id || null,
       rice_cups: form.rice_cups === '' ? null : Number(form.rice_cups),
+      egg_qty: form.egg_qty === '' ? null : Number(form.egg_qty),
       unlimited_stock: form.unlimited_stock,
     }
 
@@ -460,6 +486,25 @@ export default function Products() {
         />
       </div>
 
+      <div className="mb-4 flex gap-1">
+        {[
+          ['all', 'All'],
+          ['needsPairing', 'Needs pairing'],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() => setPairingFilter(value)}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+              pairingFilter === value
+                ? 'bg-[var(--color-ink)] text-white'
+                : 'border border-[var(--color-line)] text-[var(--color-ink-soft)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {errorMsg && (
         <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
           {errorMsg}
@@ -474,6 +519,7 @@ export default function Products() {
               <SortableTh label="Barcode" sortKey="barcode" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Name" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Category" sortKey="category" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Paired" sortKey="paired" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Unit" sortKey="unit" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Price" sortKey="price" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
@@ -483,7 +529,7 @@ export default function Products() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={9} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
                   Loading products…
                 </td>
               </tr>
@@ -491,7 +537,7 @@ export default function Products() {
 
             {!loading && sorted.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   {products.length === 0
                     ? 'No products yet — add your first one to start the master list.'
                     : 'No products match that search.'}
@@ -505,6 +551,17 @@ export default function Products() {
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.barcode}</td>
                 <td className="px-4 py-3 font-medium">{p.name}</td>
                 <td className="px-4 py-3 text-[var(--color-ink-soft)]">{p.category || '—'}</td>
+                <td className="px-4 py-3">
+                  {(() => {
+                    const status = pairingStatus(p, products)
+                    if (status === null) return <span className="text-[var(--color-ink-soft)]">—</span>
+                    return status ? (
+                      <StatusChip tone="ok">paired</StatusChip>
+                    ) : (
+                      <StatusChip tone="attention">needs pairing</StatusChip>
+                    )
+                  })()}
+                </td>
                 <td className="px-4 py-3 text-[var(--color-ink-soft)]">{p.unit || '—'}</td>
                 <td className="px-4 py-3">
                   {p.selling_price ? Number(p.selling_price).toFixed(2) : '—'}
@@ -647,9 +704,9 @@ export default function Products() {
 
           <div className="rounded-md border border-dashed border-[var(--color-line)] p-4">
             <div className="mb-3 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
-              Meal / Rice tracking (optional)
+              Meal / Rice / Egg tracking (optional)
             </div>
-            <div className="mb-3 grid grid-cols-2 gap-3">
+            <div className="mb-3 grid grid-cols-3 gap-3">
               <Field label="Pairs with (e.g. Meal ↔ Only)">
                 <ProductPicker
                   products={products.filter((p) => p.id !== editingId)}
@@ -663,6 +720,15 @@ export default function Products() {
                   value={form.rice_cups}
                   onChange={(e) => setForm({ ...form, rice_cups: e.target.value })}
                   placeholder="e.g. 1 for a Meal or Rice, 0.5 for Half Rice"
+                  className="input"
+                />
+              </Field>
+              <Field label="Eggs this represents">
+                <input
+                  type="number" step="1" min="0"
+                  value={form.egg_qty}
+                  onChange={(e) => setForm({ ...form, egg_qty: e.target.value })}
+                  placeholder="e.g. 1 for a Silog, 2 for double egg"
                   className="input"
                 />
               </Field>

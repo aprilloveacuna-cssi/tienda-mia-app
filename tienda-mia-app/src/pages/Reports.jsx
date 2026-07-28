@@ -849,6 +849,8 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [pairRows, setPairRows] = useState([])
   const [riceTotal, setRiceTotal] = useState(0)
   const [riceBreakdown, setRiceBreakdown] = useState([])
+  const [eggTotal, setEggTotal] = useState(0)
+  const [eggBreakdown, setEggBreakdown] = useState([])
 
   useEffect(() => {
     let cancelled = false
@@ -857,7 +859,7 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       setErrorMsg('')
       try {
         const [productsRes, saleLinesRes] = await Promise.all([
-          fetchAllRows('products', 'id, name, pairs_with_product_id, rice_cups, status'),
+          fetchAllRows('products', 'id, name, pairs_with_product_id, rice_cups, egg_qty, status'),
           fetchAllRows('sale_lines', 'product_id, quantity, sale:sales(sale_date, status)'),
         ])
         if (productsRes.error) throw productsRes.error
@@ -894,26 +896,34 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           })
           .sort((a, b) => b.combined - a.combined)
 
-        // Rice cups: every sale line for a product with rice_cups set contributes
-        // quantity × rice_cups — covers Meals (1 cup each), standalone Rice (1),
-        // and Half Rice (0.5), all added together into one running total.
-        let total = 0
-        const byProduct = {}
-        for (const l of lines) {
-          const p = productsById[l.product_id]
-          if (!p || !p.rice_cups) continue
-          const cups = Number(l.quantity) * Number(p.rice_cups)
-          total += cups
-          byProduct[p.name] = (byProduct[p.name] ?? 0) + cups
+        // Tallies a field (rice_cups or egg_qty) across every sale line whose
+        // product has it set — covers Meals/Silogs (1 each), standalone Rice
+        // (1), Half Rice (0.5), or however many eggs a product represents.
+        function tally(field) {
+          let total = 0
+          const byProduct = {}
+          for (const l of lines) {
+            const p = productsById[l.product_id]
+            if (!p || !p[field]) continue
+            const amount = Number(l.quantity) * Number(p[field])
+            total += amount
+            byProduct[p.name] = (byProduct[p.name] ?? 0) + amount
+          }
+          const breakdown = Object.entries(byProduct)
+            .map(([name, amount]) => ({ name, amount }))
+            .sort((a, b) => b.amount - a.amount)
+          return { total, breakdown }
         }
-        const breakdown = Object.entries(byProduct)
-          .map(([name, cups]) => ({ name, cups }))
-          .sort((a, b) => b.cups - a.cups)
+
+        const rice = tally('rice_cups')
+        const egg = tally('egg_qty')
 
         if (!cancelled) {
           setPairRows(rows)
-          setRiceTotal(total)
-          setRiceBreakdown(breakdown)
+          setRiceTotal(rice.total)
+          setRiceBreakdown(rice.breakdown)
+          setEggTotal(egg.total)
+          setEggBreakdown(egg.breakdown)
         }
       } catch (err) {
         if (!cancelled) setErrorMsg(err.message ?? 'Could not load this report.')
@@ -933,7 +943,10 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       ...pairRows.map((r) => [r.mealName, r.onlyName, r.mealQty, r.onlyQty, r.combined]),
       [],
       ['Rice cups sold', '', '', '', riceTotal.toFixed(2)],
-      ...riceBreakdown.map((b) => [b.name, '', '', '', b.cups.toFixed(2)]),
+      ...riceBreakdown.map((b) => [b.name, '', '', '', b.amount.toFixed(2)]),
+      [],
+      ['Eggs sold', '', '', '', eggTotal.toFixed(2)],
+      ...eggBreakdown.map((b) => [b.name, '', '', '', b.amount.toFixed(2)]),
     ]
     const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
     downloadFile(`meal-rice-summary_${dateFrom}_to_${dateTo}.csv`, csv, 'text/csv;charset=utf-8;')
@@ -1028,7 +1041,7 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           <div className="text-xs text-[var(--color-ink-soft)]">Meals (1 cup each) + Rice (1) + Half Rice (0.5), combined</div>
         </div>
         {riceBreakdown.length > 0 && (
-          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+          <div className="mb-6 overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
             <table className="w-full text-left text-sm">
               <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
                 <tr>
@@ -1040,7 +1053,35 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                 {riceBreakdown.map((b) => (
                   <tr key={b.name} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="px-4 py-3">{b.name}</td>
-                    <td className="px-4 py-3">{b.cups.toFixed(2)}</td>
+                    <td className="px-4 py-3">{b.amount.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+          Eggs sold
+        </div>
+        <div className="mb-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
+          <div className="font-display text-2xl font-semibold">{eggTotal.toFixed(2)} eggs</div>
+          <div className="text-xs text-[var(--color-ink-soft)]">Silogs and anything else set up with an egg count, combined</div>
+        </div>
+        {eggBreakdown.length > 0 && (
+          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <th className="px-4 py-3">Product</th>
+                  <th className="px-4 py-3">Eggs contributed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {eggBreakdown.map((b) => (
+                  <tr key={b.name} className="border-b border-[var(--color-line)] last:border-0">
+                    <td className="px-4 py-3">{b.name}</td>
+                    <td className="px-4 py-3">{b.amount.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>
