@@ -389,6 +389,7 @@ export default function Reports() {
   const [dateTo, setDateTo] = useState(today)
 
   const isMatrix = reportKey === 'dailyMatrix'
+  const isMealRice = reportKey === 'mealRice'
   const report = isMatrix ? null : REPORTS[reportKey]
 
   const { sortKey, sortDir, toggleSort } = useSort(null)
@@ -408,7 +409,7 @@ export default function Reports() {
   }
 
   useEffect(() => {
-    if (isMatrix) return
+    if (isMatrix || isMealRice) return
     let cancelled = false
     async function load() {
       setLoading(true)
@@ -451,7 +452,7 @@ export default function Reports() {
             Every export reflects real transaction data, computed the same way the rest of the app sees it.
           </p>
         </div>
-        {!isMatrix && (
+        {!isMatrix && !isMealRice && (
           <div className="flex gap-2">
             <button
               onClick={exportCsv}
@@ -493,9 +494,17 @@ export default function Reports() {
         >
           Daily Sales Matrix
         </button>
+        <button
+          onClick={() => selectReport('mealRice')}
+          className={`px-3 py-2 text-sm font-medium ${
+            isMealRice ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
+          }`}
+        >
+          Meal / Rice Summary
+        </button>
       </div>
 
-      {!isMatrix && (
+      {!isMatrix && !isMealRice && (
         <div className="no-print mb-4 flex flex-wrap items-end gap-3">
           <label className="text-sm">
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
@@ -519,6 +528,8 @@ export default function Reports() {
 
       {isMatrix ? (
         <DailySalesMatrix dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
+      ) : isMealRice ? (
+        <MealRiceSummary dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
       ) : (
         <div id="printable-report">
           <div className="mb-3">
@@ -823,6 +834,220 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ---------- Meal / Rice Summary ----------
+// Reporting-only view: combines a "Meal" product's sold quantity with its
+// paired "Only" counterpart (configured in Products → Meal / Rice tracking),
+// and separately tallies total rice cups sold — Meals count as whatever
+// rice_cups their pairing implies, plus any standalone Rice / Half Rice sales.
+function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
+  const [loading, setLoading] = useState(true)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [pairRows, setPairRows] = useState([])
+  const [riceTotal, setRiceTotal] = useState(0)
+  const [riceBreakdown, setRiceBreakdown] = useState([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      setErrorMsg('')
+      try {
+        const [productsRes, saleLinesRes] = await Promise.all([
+          fetchAllRows('products', 'id, name, pairs_with_product_id, rice_cups, status'),
+          fetchAllRows('sale_lines', 'product_id, quantity, sale:sales(sale_date, status)'),
+        ])
+        if (productsRes.error) throw productsRes.error
+        if (saleLinesRes.error) throw saleLinesRes.error
+
+        const products = productsRes.data ?? []
+        const productsById = Object.fromEntries(products.map((p) => [p.id, p]))
+
+        const lines = (saleLinesRes.data ?? []).filter(
+          (l) => l.sale?.status !== 'voided' && withinRange(l.sale?.sale_date, dateFrom, dateTo)
+        )
+
+        const qtyByProduct = {}
+        for (const l of lines) {
+          qtyByProduct[l.product_id] = (qtyByProduct[l.product_id] ?? 0) + Number(l.quantity)
+        }
+
+        // One row per configured pair (only products with pairs_with_product_id set
+        // are treated as the "Meal" side, by convention — the Only side is looked up).
+        const rows = products
+          .filter((p) => p.pairs_with_product_id)
+          .map((meal) => {
+            const only = productsById[meal.pairs_with_product_id]
+            const mealQty = qtyByProduct[meal.id] ?? 0
+            const onlyQty = only ? qtyByProduct[only.id] ?? 0 : 0
+            return {
+              id: meal.id,
+              mealName: meal.name,
+              onlyName: only?.name ?? '(paired product not found)',
+              mealQty,
+              onlyQty,
+              combined: mealQty + onlyQty,
+            }
+          })
+          .sort((a, b) => b.combined - a.combined)
+
+        // Rice cups: every sale line for a product with rice_cups set contributes
+        // quantity × rice_cups — covers Meals (1 cup each), standalone Rice (1),
+        // and Half Rice (0.5), all added together into one running total.
+        let total = 0
+        const byProduct = {}
+        for (const l of lines) {
+          const p = productsById[l.product_id]
+          if (!p || !p.rice_cups) continue
+          const cups = Number(l.quantity) * Number(p.rice_cups)
+          total += cups
+          byProduct[p.name] = (byProduct[p.name] ?? 0) + cups
+        }
+        const breakdown = Object.entries(byProduct)
+          .map(([name, cups]) => ({ name, cups }))
+          .sort((a, b) => b.cups - a.cups)
+
+        if (!cancelled) {
+          setPairRows(rows)
+          setRiceTotal(total)
+          setRiceBreakdown(breakdown)
+        }
+      } catch (err) {
+        if (!cancelled) setErrorMsg(err.message ?? 'Could not load this report.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [dateFrom, dateTo])
+
+  function exportCsv() {
+    const rows = [
+      ['Meal', 'Only', 'Meal Qty', 'Only Qty', 'Combined Qty'],
+      ...pairRows.map((r) => [r.mealName, r.onlyName, r.mealQty, r.onlyQty, r.combined]),
+      [],
+      ['Rice cups sold', '', '', '', riceTotal.toFixed(2)],
+      ...riceBreakdown.map((b) => [b.name, '', '', '', b.cups.toFixed(2)]),
+    ]
+    const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile(`meal-rice-summary_${dateFrom}_to_${dateTo}.csv`, csv, 'text/csv;charset=utf-8;')
+  }
+
+  return (
+    <div>
+      <div className="no-print mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
+            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="input" />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">To</span>
+            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
+          </label>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={exportCsv}
+            disabled={loading || pairRows.length === 0}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            <Download size={15} />
+            Export CSV
+          </button>
+          <button
+            onClick={() => window.print()}
+            disabled={loading || pairRows.length === 0}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            <Printer size={15} />
+            Print / Save PDF
+          </button>
+        </div>
+      </div>
+
+      {errorMsg && (
+        <div className="no-print mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+          {errorMsg}
+        </div>
+      )}
+
+      <div id="printable-report">
+        <div className="mb-3">
+          <div className="font-display text-lg font-semibold">Meal / Rice Summary</div>
+          <div className="text-xs text-[var(--color-ink-soft)]">{dateFrom} to {dateTo}</div>
+        </div>
+
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+          Combined Meal + Only totals
+        </div>
+        <div className="mb-6 overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+              <tr>
+                <th className="px-4 py-3">Meal</th>
+                <th className="px-4 py-3">Only</th>
+                <th className="px-4 py-3">Meal Qty</th>
+                <th className="px-4 py-3">Only Qty</th>
+                <th className="px-4 py-3">Combined</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
+              )}
+              {!loading && pairRows.length === 0 && (
+                <tr><td colSpan={5} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                  No Meal/Only pairs configured yet — set "Pairs with" on a product in Products to start tracking this.
+                </td></tr>
+              )}
+              {pairRows.map((r) => (
+                <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
+                  <td className="px-4 py-3 font-medium">{r.mealName}</td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.onlyName}</td>
+                  <td className="px-4 py-3">{r.mealQty}</td>
+                  <td className="px-4 py-3">{r.onlyQty}</td>
+                  <td className="px-4 py-3 font-medium">{r.combined}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+          Rice cups sold
+        </div>
+        <div className="mb-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
+          <div className="font-display text-2xl font-semibold">{riceTotal.toFixed(2)} cups</div>
+          <div className="text-xs text-[var(--color-ink-soft)]">Meals (1 cup each) + Rice (1) + Half Rice (0.5), combined</div>
+        </div>
+        {riceBreakdown.length > 0 && (
+          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <th className="px-4 py-3">Product</th>
+                  <th className="px-4 py-3">Cups contributed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {riceBreakdown.map((b) => (
+                  <tr key={b.name} className="border-b border-[var(--color-line)] last:border-0">
+                    <td className="px-4 py-3">{b.name}</td>
+                    <td className="px-4 py-3">{b.cups.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

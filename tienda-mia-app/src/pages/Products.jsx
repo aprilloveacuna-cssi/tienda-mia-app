@@ -5,6 +5,7 @@ import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
+import ProductPicker from '../components/ProductPicker'
 import { useSort, sortRows } from '../lib/sort'
 
 // Maps flexible spreadsheet header names to the actual product columns, so an
@@ -90,6 +91,9 @@ const EMPTY_FORM = {
   reorder_point: '',
   safety_stock: '',
   notes: '',
+  pairs_with_product_id: '',
+  rice_cups: '',
+  unlimited_stock: false,
 }
 
 export default function Products() {
@@ -190,6 +194,9 @@ export default function Products() {
       reorder_point: product.reorder_point ?? '',
       safety_stock: product.safety_stock ?? '',
       notes: product.notes ?? '',
+      pairs_with_product_id: product.pairs_with_product_id ?? '',
+      rice_cups: product.rice_cups ?? '',
+      unlimited_stock: product.unlimited_stock ?? false,
     })
     setPanelOpen(true)
   }
@@ -212,6 +219,9 @@ export default function Products() {
       reorder_point: form.reorder_point === '' ? 0 : Number(form.reorder_point),
       safety_stock: form.safety_stock === '' ? 0 : Number(form.safety_stock),
       notes: form.notes.trim() || null,
+      pairs_with_product_id: form.pairs_with_product_id || null,
+      rice_cups: form.rice_cups === '' ? null : Number(form.rice_cups),
+      unlimited_stock: form.unlimited_stock,
     }
 
     const { error } = editingId
@@ -632,6 +642,38 @@ export default function Products() {
                 className="input"
               />
             </Field>
+          </div>
+
+          <div className="rounded-md border border-dashed border-[var(--color-line)] p-4">
+            <div className="mb-3 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+              Meal / Rice tracking (optional)
+            </div>
+            <div className="mb-3 grid grid-cols-2 gap-3">
+              <Field label="Pairs with (e.g. Meal ↔ Only)">
+                <ProductPicker
+                  products={products.filter((p) => p.id !== editingId)}
+                  value={form.pairs_with_product_id}
+                  onChange={(id) => setForm({ ...form, pairs_with_product_id: id })}
+                />
+              </Field>
+              <Field label="Rice cups this represents">
+                <input
+                  type="number" step="0.5" min="0"
+                  value={form.rice_cups}
+                  onChange={(e) => setForm({ ...form, rice_cups: e.target.value })}
+                  placeholder="e.g. 1 for a Meal or Rice, 0.5 for Half Rice"
+                  className="input"
+                />
+              </Field>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={form.unlimited_stock}
+                onChange={(e) => setForm({ ...form, unlimited_stock: e.target.checked })}
+              />
+              Never block sales of this item for low stock
+            </label>
           </div>
 
           <Field label="Notes">

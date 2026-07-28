@@ -18,11 +18,13 @@ begin
 
       update purchase_lines set batch_id = new_batch_id where id = line.id;
 
+      -- Current cost reflects the most recent purchase price — updated BEFORE
+      -- the ledger write below, since that write is what recalculates inventory_value
+      -- off the product's current_cost. Order matters here.
+      update products set current_cost = line.unit_cost where id = line.product_id;
+
       insert into inventory_ledger (product_id, batch_id, transaction_type, quantity_change, unit_cost_at_transaction, source_module, source_reference_id, created_by)
       values (line.product_id, new_batch_id, 'Purchase', line.quantity, line.unit_cost, 'Purchases', new.id, new.created_by);
-
-      -- Current cost reflects the most recent purchase price
-      update products set current_cost = line.unit_cost where id = line.product_id;
     end loop;
   end if;
   return new;

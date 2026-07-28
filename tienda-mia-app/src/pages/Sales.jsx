@@ -93,7 +93,7 @@ export default function Sales() {
   async function loadProducts() {
     const { data, error } = await fetchAllRows(
       'products',
-      'id, sku, name, unit, selling_price, current_cost, barcode, status, business_unit, category',
+      'id, sku, name, unit, selling_price, current_cost, barcode, status, business_unit, category, unlimited_stock, pairs_with_product_id',
       'name'
     )
     if (!error) setProducts(data ?? [])
@@ -204,13 +204,6 @@ export default function Sales() {
         const headerRow = rows[0].map((h) => h.trim())
         const canonicalKeys = headerRow.map((h) => SALE_LINE_HEADER_ALIASES[normalizeHeader(h)] ?? null)
 
-        const valid = []
-        const skipped = []
-        // Accumulates alongside `pendingLines` so each row in this same file
-        // correctly sees stock already claimed by earlier rows in the file —
-        // React state wouldn't update fast enough inside this loop to rely on.
-        const accumulator = [...pendingLines]
-
         // Strips stray whitespace (including non-breaking spaces Excel/Sheets
         // sometimes paste in) and ignores case, so a barcode that LOOKS
         // identical doesn't get skipped over an invisible formatting difference.
@@ -221,13 +214,12 @@ export default function Sales() {
             .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
             .toUpperCase()
 
+        // ---------- Pass 1: parse every row and match it to a product ----------
+        const parsedRows = []
+        const skipped = []
+
         for (const [idx, r] of rows.slice(1).entries()) {
           const rowNum = idx + 2
-
-          // A row with the wrong number of columns almost always means a stray
-          // quote or unescaped comma earlier in the file threw off parsing from
-          // that point on — flag it clearly rather than let it silently
-          // produce a garbled value that just fails to match anything.
           if (r.length !== headerRow.length) {
             skipped.push({
               rowNum,
@@ -262,31 +254,133 @@ export default function Sales() {
           }
           const unitPrice = obj.unit_price ? Number(obj.unit_price) : Number(product.selling_price ?? 0)
 
+          parsedRows.push({ rowNum, product, qty, unitPrice })
+        }
+
+        // ---------- Pass 2: Kitchen items reconcile against that day's Daily Meals ----------
+        // Every Kitchen item's sales this import must trace back to a Daily
+        // Meals batch dated exactly this sale's date. A Meal and its paired
+        // Only both draw from the same prepared batch, so they're checked
+        // together. No batch at all for that dish/date is an error — nothing
+        // to reconcile against. If a batch exists but sold more than was
+        // prepared, the shortfall is topped up automatically so the sale can
+        // go through, rather than blocking a sale that genuinely happened.
+        function groupIdsFor(product) {
+          if (product.pairs_with_product_id) return [product.id, product.pairs_with_product_id].sort()
+          const pointingToMe = products.find((p) => p.pairs_with_product_id === product.id)
+          if (pointingToMe) return [product.id, pointingToMe.id].sort()
+          return [product.id]
+        }
+
+        const kitchenGroups = new Map()
+        for (const pr of parsedRows) {
+          const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
+          if (!isKitchen) continue
+          const key = groupIdsFor(pr.product).join(',')
+          if (!kitchenGroups.has(key)) {
+            kitchenGroups.set(key, { groupIds: groupIdsFor(pr.product), neededQty: 0, rowNums: [], names: new Set() })
+          }
+          const g = kitchenGroups.get(key)
+          g.neededQty += pr.qty
+          g.rowNums.push(pr.rowNum)
+          g.names.add(pr.product.name)
+        }
+
+        const blockedRowNums = new Set()
+
+        for (const g of kitchenGroups.values()) {
+          const { data: dmBatches } = await supabase
+            .from('batches')
+            .select('id, product_id, unit_cost')
+            .in('product_id', g.groupIds)
+            .eq('source_type', 'KitchenProduction')
+            .eq('received_date', headerForm.sale_date)
+
+          if (!dmBatches || dmBatches.length === 0) {
+            for (const rn of g.rowNums) blockedRowNums.add(rn)
+            skipped.push({
+              rowNum: g.rowNums[0],
+              reason: `${[...g.names].join(' / ')}: no Daily Meals entry for ${headerForm.sale_date} — add it in Kitchen → Daily Meals first`,
+            })
+            continue
+          }
+
+          const { data: cacheRows } = await supabase
+            .from('batch_cache')
+            .select('remaining_quantity')
+            .in('batch_id', dmBatches.map((b) => b.id))
+          const remaining = (cacheRows ?? []).reduce((s, c) => s + Number(c.remaining_quantity), 0)
+
+          if (remaining < g.neededQty) {
+            const shortfall = g.neededQty - remaining
+            const topUpProductId = dmBatches[0].product_id
+            const topUpCost = Number(dmBatches[0].unit_cost ?? 0)
+
+            const { data: newBatch, error: batchErr } = await supabase
+              .from('batches')
+              .insert({
+                product_id: topUpProductId,
+                source_type: 'KitchenProduction',
+                received_quantity: shortfall,
+                unit_cost: topUpCost,
+                received_date: headerForm.sale_date,
+              })
+              .select()
+              .single()
+
+            if (!batchErr) {
+              await supabase.from('inventory_ledger').insert({
+                product_id: topUpProductId,
+                batch_id: newBatch.id,
+                transaction_type: 'KitchenProduction',
+                quantity_change: shortfall,
+                unit_cost_at_transaction: topUpCost,
+                source_module: 'Kitchen',
+                source_reference_id: newBatch.id,
+              })
+            }
+          }
+        }
+
+        // ---------- Pass 3: normal per-row FIFO stock check ----------
+        const valid = []
+        // Accumulates alongside `pendingLines` so each row in this same file
+        // correctly sees stock already claimed by earlier rows in the file —
+        // React state wouldn't update fast enough inside this loop to rely on.
+        const accumulator = [...pendingLines]
+
+        for (const pr of parsedRows) {
+          if (blockedRowNums.has(pr.rowNum)) continue
+
           try {
-            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(product.id, qty, accumulator)
-            if (!satisfied) {
-              skipped.push({ rowNum, reason: `${product.name}: only ${totalAvailable} ${product.unit} available` })
+            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(pr.product.id, pr.qty, accumulator)
+            if (!satisfied && !pr.product.unlimited_stock) {
+              skipped.push({ rowNum: pr.rowNum, reason: `${pr.product.name}: only ${totalAvailable} ${pr.product.unit} available` })
               continue
             }
-            const lineTotal = qty * unitPrice
-            const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+            const lineTotal = pr.qty * pr.unitPrice
+            const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+            const openQty = pr.qty - consumedQty
+            const fifoCost =
+              consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(pr.product.current_cost ?? 0)
             const newLine = {
               tempId: crypto.randomUUID(),
-              product_id: product.id,
-              product_name: product.name,
-              category: product.category,
-              unit: product.unit,
-              quantity: qty,
-              unit_price: unitPrice,
+              product_id: pr.product.id,
+              product_name: pr.product.name,
+              category: pr.product.category,
+              unit: pr.product.unit,
+              quantity: pr.qty,
+              unit_price: pr.unitPrice,
               line_total: lineTotal,
               fifo_cost: fifoCost,
               gross_profit: lineTotal - fifoCost,
               consumption,
+              openQty,
             }
             accumulator.push(newLine)
             valid.push(newLine)
           } catch {
-            skipped.push({ rowNum, reason: 'Could not check stock for this row' })
+            skipped.push({ rowNum: pr.rowNum, reason: 'Could not check stock for this row' })
           }
         }
 
@@ -324,7 +418,12 @@ export default function Sales() {
         lineForm.product_id,
         qty
       )
-      if (!satisfied) {
+
+      // Items flagged "never block for low stock" (e.g. Rice, where real
+      // batch-level stock isn't tracked precisely) still consume whatever
+      // real batches exist first, then treat the remainder as an open
+      // quantity costed at current cost — never blocking the sale itself.
+      if (!satisfied && !product.unlimited_stock) {
         setLineWarning(
           totalAvailable === 0
             ? `${product.name} has no stock available.`
@@ -335,7 +434,10 @@ export default function Sales() {
 
       const unitPrice = Number(lineForm.unit_price)
       const lineTotal = qty * unitPrice
-      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+      const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+      const openQty = qty - consumedQty
+      const fifoCost =
+        consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
 
       setPendingLines([
         ...pendingLines,
@@ -351,6 +453,7 @@ export default function Sales() {
           fifo_cost: fifoCost,
           gross_profit: lineTotal - fifoCost,
           consumption,
+          openQty,
         },
       ])
       setLineForm(EMPTY_LINE_FORM)
@@ -706,7 +809,17 @@ export default function Sales() {
                   )}
                   {pendingLines.map((l) => (
                     <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
-                      <td className="px-3 py-2">{l.product_name}</td>
+                      <td className="px-3 py-2">
+                        {l.product_name}
+                        {l.openQty > 0 && (
+                          <span
+                            title="Consumed whatever real stock exists, rest costed at current cost — this item never blocks a sale"
+                            className="ml-1.5 rounded-full bg-[var(--color-amber-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-amber)]"
+                          >
+                            {l.openQty} open
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.unit}</td>
                       <td className="px-3 py-2">{l.unit_price.toFixed(2)}</td>
