@@ -218,7 +218,7 @@ const REPORTS = {
     async fetch() {
       const { data, error } = await fetchAllRows(
         'batches',
-        'batch_number, received_date, expiration_date, unit_cost, status, product:products(name, sku, unit), cache:batch_cache(remaining_quantity)',
+        'batch_number, received_date, expiration_date, unit_cost, status, product:products(name, sku, unit, category), cache:batch_cache(remaining_quantity)',
         'received_date',
         { ascending: false }
       )
@@ -228,6 +228,7 @@ const REPORTS = {
     columns: [
       { key: 'batch_number', label: 'Batch #' },
       { key: 'product', label: 'Product', value: (r) => r.product?.name },
+      { key: 'category', label: 'Category', value: (r) => r.product?.category ?? '—' },
       { key: 'received_date', label: 'Received' },
       { key: 'remaining', label: 'Remaining', value: (r) => `${r.cache?.remaining_quantity ?? 0} ${r.product?.unit ?? ''}` },
       { key: 'unit_cost', label: 'Unit cost', value: (r) => Number(r.unit_cost).toFixed(2) },
@@ -241,8 +242,8 @@ const REPORTS = {
     dateField: (r) => r.date,
     async fetch() {
       const [batchesRes, wasteRes] = await Promise.all([
-        fetchAllRows('batches', 'batch_number, expiration_date, product:products(name, sku, unit), cache:batch_cache(remaining_quantity)'),
-        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit), batch:batches(batch_number)'),
+        fetchAllRows('batches', 'batch_number, expiration_date, product:products(name, sku, unit, category), cache:batch_cache(remaining_quantity)'),
+        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit, category), batch:batches(batch_number)'),
       ])
       if (batchesRes.error) throw batchesRes.error
       if (wasteRes.error) throw wasteRes.error
@@ -255,6 +256,7 @@ const REPORTS = {
           date: r.expiration_date,
           reference: r.batch_number,
           product: r.product?.name,
+          category: r.product?.category,
           unit: r.product?.unit,
           quantity: (Array.isArray(r.cache) ? r.cache[0] : r.cache)?.remaining_quantity ?? 0,
           note: expiryLabel(r.expiration_date),
@@ -265,6 +267,7 @@ const REPORTS = {
         date: w.waste_date,
         reference: w.waste_number,
         product: w.product?.name,
+        category: w.product?.category,
         unit: w.product?.unit,
         quantity: w.quantity,
         note: w.reason,
@@ -281,6 +284,7 @@ const REPORTS = {
       { key: 'date', label: 'Date' },
       { key: 'reference', label: 'Reference' },
       { key: 'product', label: 'Product' },
+      { key: 'category', label: 'Category', value: (r) => r.category ?? '—' },
       { key: 'quantity', label: 'Quantity', value: (r) => `${r.quantity} ${r.unit ?? ''}` },
       { key: 'note', label: 'Note' },
     ],
@@ -312,7 +316,7 @@ const REPORTS = {
     async fetch() {
       const { data, error } = await fetchAllRows(
         'sale_lines',
-        'quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_number, sale_date, status), product:products(name, sku, unit)'
+        'quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_number, sale_date, status), product:products(name, sku, unit, category)'
       )
       if (error) throw error
       return (data ?? []).sort((a, b) => (a.sale?.sale_date < b.sale?.sale_date ? 1 : -1))
@@ -321,6 +325,7 @@ const REPORTS = {
       { key: 'sale_number', label: 'Sale #', value: (r) => r.sale?.sale_number },
       { key: 'sale_date', label: 'Date', value: (r) => (r.sale?.sale_date ? new Date(r.sale.sale_date).toLocaleDateString() : '') },
       { key: 'product', label: 'Product', value: (r) => r.product?.name },
+      { key: 'category', label: 'Category', value: (r) => r.product?.category ?? '—' },
       { key: 'quantity', label: 'Qty', value: (r) => `${r.quantity} ${r.product?.unit ?? ''}` },
       { key: 'unit_price', label: 'Price', value: (r) => Number(r.unit_price).toFixed(2) },
       { key: 'fifo_cost', label: 'FIFO cost', value: (r) => Number(r.fifo_cost).toFixed(2) },
@@ -335,7 +340,7 @@ const REPORTS = {
     async fetch() {
       const { data, error } = await fetchAllRows(
         'kitchen_production',
-        '*, recipe:recipes(product:products(name, sku, unit))',
+        '*, recipe:recipes(product:products(name, sku, unit, category))',
         'production_date',
         { ascending: false }
       )
@@ -346,6 +351,7 @@ const REPORTS = {
       { key: 'production_number', label: 'Production #' },
       { key: 'production_date', label: 'Date' },
       { key: 'product', label: 'Product', value: (r) => r.recipe?.product?.name },
+      { key: 'category', label: 'Category', value: (r) => r.recipe?.product?.category ?? '—' },
       { key: 'quantity_produced', label: 'Qty produced', value: (r) => `${r.quantity_produced} ${r.recipe?.product?.unit ?? ''}` },
       { key: 'cost_per_unit', label: 'Cost/unit', value: (r) => Number(r.cost_per_unit).toFixed(2) },
       { key: 'total_cost', label: 'Total cost', value: (r) => Number(r.total_cost).toFixed(2) },
@@ -357,13 +363,14 @@ const REPORTS = {
     description: 'Daily leftover servings recorded per kitchen item — informational, doesn\'t affect stock.',
     dateField: (r) => r.waste_date,
     async fetch() {
-      const { data, error } = await fetchAllRows('waste', '*, product:products(name, sku, unit)', 'waste_date', { ascending: false })
+      const { data, error } = await fetchAllRows('waste', '*, product:products(name, sku, unit, category)', 'waste_date', { ascending: false })
       if (error) throw error
       return (data ?? []).filter((w) => w.reason === 'Daily Leftover')
     },
     columns: [
       { key: 'waste_date', label: 'Date' },
       { key: 'product', label: 'Product', value: (r) => r.product?.name },
+      { key: 'category', label: 'Category', value: (r) => r.product?.category ?? '—' },
       { key: 'quantity', label: 'Leftover qty', value: (r) => `${r.quantity} ${r.product?.unit ?? ''}` },
       { key: 'remarks', label: 'Notes', value: (r) => r.remarks ?? '—' },
     ],
@@ -573,7 +580,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         const [productsRes, saleLinesRes, wasteRes] = await Promise.all([
           fetchAllRows(
             'products',
-            'id, sku, name, unit, current_cost, selling_price, reorder_point, status, inventory_cache(current_stock)',
+            'id, sku, name, unit, current_cost, selling_price, reorder_point, status, category, inventory_cache(current_stock)',
             'name'
           ),
           fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)'),
@@ -666,17 +673,17 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   function exportMatrixCsv() {
     if (!matrix) return
     const { days, terminals, productRows } = matrix
-    const dayHeader1 = ['', '', '', ''].concat(
+    const dayHeader1 = ['', '', '', '', ''].concat(
       days.flatMap((d) => [d, ''])
     ).concat(['', '', '', '', '', '', '', ''])
-    const dayHeader2 = ['SKU', 'Description', 'Unit Cost', 'Price'].concat(
+    const dayHeader2 = ['SKU', 'Description', 'Category', 'Unit Cost', 'Price'].concat(
       days.flatMap(() => terminals)
     ).concat(['Total Qty Sold', 'Total Sales', 'Total Cost', 'Remaining Qty', 'Percent', 'Avg Qty Sales', 'Movement', 'Waste', 'Suggested Purchase (7d)'])
 
     const lines = [dayHeader1, dayHeader2].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
 
     for (const pr of productRows) {
-      const row = [pr.product.sku, pr.product.name, Number(pr.product.current_cost).toFixed(2), Number(pr.product.selling_price).toFixed(2)]
+      const row = [pr.product.sku, pr.product.name, pr.product.category ?? '', Number(pr.product.current_cost).toFixed(2), Number(pr.product.selling_price).toFixed(2)]
       for (const d of days) {
         const cell = pr.byDay[d] ?? [0, 0]
         row.push(cell[0], cell[1])
@@ -751,7 +758,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
             <table className="w-full whitespace-nowrap text-left text-xs">
               <thead className="text-[var(--color-ink-soft)]">
                 <tr className="border-b border-[var(--color-line)]">
-                  <th className="px-2 py-2" colSpan={4} />
+                  <th className="px-2 py-2" colSpan={5} />
                   {matrix.days.map((d) => (
                     <th key={d} className="px-2 py-2 text-center" colSpan={2}>{d.slice(5)}</th>
                   ))}
@@ -760,6 +767,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                 <tr className="border-b border-[var(--color-line)] uppercase tracking-wide">
                   <th className="px-2 py-2">SKU</th>
                   <th className="px-2 py-2">Description</th>
+                  <th className="px-2 py-2">Category</th>
                   <th className="px-2 py-2">Cost</th>
                   <th className="px-2 py-2">Price</th>
                   {matrix.days.map((d) => (
@@ -781,12 +789,13 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
               </thead>
               <tbody>
                 {matrix.productRows.length === 0 && (
-                  <tr><td colSpan={4 + matrix.days.length * 2 + 9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No active products.</td></tr>
+                  <tr><td colSpan={5 + matrix.days.length * 2 + 9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No active products.</td></tr>
                 )}
                 {matrix.productRows.map((pr) => (
                   <tr key={pr.product.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="font-mono px-2 py-1.5">{pr.product.sku}</td>
                     <td className="px-2 py-1.5">{pr.product.name}</td>
+                    <td className="px-2 py-1.5 text-[var(--color-ink-soft)]">{pr.product.category || '—'}</td>
                     <td className="px-2 py-1.5">{Number(pr.product.current_cost).toFixed(2)}</td>
                     <td className="px-2 py-1.5">{Number(pr.product.selling_price).toFixed(2)}</td>
                     {matrix.days.map((d) => {

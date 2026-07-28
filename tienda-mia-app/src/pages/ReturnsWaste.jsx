@@ -17,6 +17,7 @@ export default function ReturnsWaste() {
   const { sortKey: returnSortKey, sortDir: returnSortDir, toggleSort: toggleReturnSort } = useSort('return_date', 'desc')
   function returnSortAccessor(row, key) {
     if (key === 'product') return row.product?.name
+    if (key === 'category') return row.product?.category
     if (key === 'quantity') return Number(row.quantity ?? 0)
     if (key === 'restock') return row.restock ? 1 : 0
     return row[key]
@@ -26,6 +27,7 @@ export default function ReturnsWaste() {
   const { sortKey: wasteSortKey, sortDir: wasteSortDir, toggleSort: toggleWasteSort } = useSort('waste_date', 'desc')
   function wasteSortAccessor(row, key) {
     if (key === 'product') return row.product?.name
+    if (key === 'category') return row.product?.category
     if (key === 'quantity') return Number(row.quantity ?? 0)
     if (key === 'disposed_by') return row.disposed_by ?? ''
     return row[key]
@@ -68,8 +70,8 @@ export default function ReturnsWaste() {
     setLoading(true)
     setErrorMsg('')
     const [returnsRes, wastesRes, productsRes, returnReasonsRes, wasteReasonsRes] = await Promise.all([
-      fetchAllRows('returns', '*, product:products(name, sku, unit)', 'created_at', { ascending: false }),
-      fetchAllRows('waste', '*, product:products(name, sku, unit), batch:batches(batch_number)', 'created_at', { ascending: false }),
+      fetchAllRows('returns', '*, product:products(name, sku, unit, category)', 'created_at', { ascending: false }),
+      fetchAllRows('waste', '*, product:products(name, sku, unit, category), batch:batches(batch_number)', 'created_at', { ascending: false }),
       fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, status', 'name'),
       supabase.from('lists').select('value').eq('list_type', 'ReturnReason').eq('active', true).order('value'),
       supabase.from('lists').select('value').eq('list_type', 'WasteReason').eq('active', true).order('value'),
@@ -303,15 +305,16 @@ export default function ReturnsWaste() {
                 <SortableTh label="Date" sortKey="return_date" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
                 <SortableTh label="Type" sortKey="return_type" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
                 <SortableTh label="Product" sortKey="product" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
+                <SortableTh label="Category" sortKey="category" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
                 <SortableTh label="Qty" sortKey="quantity" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
                 <th className="px-4 py-3">Reason</th>
                 <SortableTh label="Restocked" sortKey="restock" activeKey={returnSortKey} activeDir={returnSortDir} onSort={toggleReturnSort} />
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
+              {loading && <tr><td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
               {!loading && searchedReturns.length === 0 && (
-                <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No returns recorded yet.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No returns recorded yet.</td></tr>
               )}
               {searchedReturns.map((r) => (
                 <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
@@ -321,6 +324,7 @@ export default function ReturnsWaste() {
                     <StatusChip tone={r.return_type === 'Customer' ? 'ok' : 'attention'}>{r.return_type}</StatusChip>
                   </td>
                   <td className="px-4 py-3 font-medium">{r.product?.name}</td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.product?.category || '—'}</td>
                   <td className="px-4 py-3">{r.quantity} {r.product?.unit}</td>
                   <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.reason}</td>
                   <td className="px-4 py-3">
@@ -339,6 +343,7 @@ export default function ReturnsWaste() {
                 <SortableTh label="Waste #" sortKey="waste_number" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <SortableTh label="Date" sortKey="waste_date" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <SortableTh label="Product" sortKey="product" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
+                <SortableTh label="Category" sortKey="category" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <th className="px-4 py-3">Batch</th>
                 <SortableTh label="Qty" sortKey="quantity" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <th className="px-4 py-3">Reason</th>
@@ -346,15 +351,16 @@ export default function ReturnsWaste() {
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
+              {loading && <tr><td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
               {!loading && searchedWastes.length === 0 && (
-                <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No waste recorded yet.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No waste recorded yet.</td></tr>
               )}
               {searchedWastes.map((w) => (
                 <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{w.waste_number}</td>
                   <td className="px-4 py-3">{w.waste_date}</td>
                   <td className="px-4 py-3 font-medium">{w.product?.name}</td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">{w.product?.category || '—'}</td>
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{w.batch?.batch_number ?? '—'}</td>
                   <td className="px-4 py-3">
                     <StatusChip tone="critical">-{w.quantity} {w.product?.unit}</StatusChip>

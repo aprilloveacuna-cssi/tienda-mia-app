@@ -47,6 +47,7 @@ export default function Inventory() {
   function sortAccessor(row, key) {
     if (key === 'sku') return row.product?.sku
     if (key === 'name') return row.product?.name
+    if (key === 'category') return row.product?.category
     if (key === 'stock') return Number(row.current_stock ?? 0)
     if (key === 'value') return Number(row.inventory_value ?? 0)
     if (key === 'status') return stockLabel(row.current_stock, row.product?.reorder_point)
@@ -67,7 +68,7 @@ export default function Inventory() {
     setErrorMsg('')
     const { data, error } = await supabase
       .from('inventory_cache')
-      .select('*, product:products(name, sku, unit, reorder_point)')
+      .select('*, product:products(name, sku, unit, reorder_point, category)')
 
     if (error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
@@ -162,6 +163,7 @@ export default function Inventory() {
               <th className="w-8 px-4 py-3" />
               <SortableTh label="SKU" sortKey="sku" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Product" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Category" sortKey="category" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Stock" sortKey="stock" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Value" sortKey="value" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
@@ -170,7 +172,7 @@ export default function Inventory() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
                   Loading inventory…
                 </td>
               </tr>
@@ -178,7 +180,7 @@ export default function Inventory() {
 
             {!loading && searchedRows.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No stock movements yet — post a purchase to see inventory appear here.
                 </td>
               </tr>
@@ -197,6 +199,7 @@ export default function Inventory() {
                     {r.product.sku}
                   </td>
                   <td className="px-4 py-3 font-medium">{r.product.name}</td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.product.category || '—'}</td>
                   <td className="px-4 py-3">
                     {Number(r.current_stock)} {r.product.unit}
                   </td>
@@ -210,7 +213,7 @@ export default function Inventory() {
                 {expanded.has(r.product_id) && (
                   <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)] last:border-0">
                     <td />
-                    <td colSpan={5} className="px-4 py-3">
+                    <td colSpan={6} className="px-4 py-3">
                       <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
                         Batches (oldest first — FIFO order)
                       </div>

@@ -14,6 +14,7 @@ export default function Adjustments() {
   const { sortKey: adjSortKey, sortDir: adjSortDir, toggleSort: toggleAdjSort } = useSort('adjustment_date', 'desc')
   function adjSortAccessor(row, key) {
     if (key === 'product') return row.product?.name
+    if (key === 'category') return row.product?.category
     if (key === 'batch') return row.batch?.batch_number ?? ''
     if (key === 'change') return Number(row.adjustment_quantity ?? 0)
     return row[key]
@@ -54,7 +55,7 @@ export default function Adjustments() {
     setErrorMsg('')
     const { data, error } = await supabase
       .from('adjustments')
-      .select('*, product:products(name, sku, unit), batch:batches(batch_number)')
+      .select('*, product:products(name, sku, unit, category), batch:batches(batch_number)')
       .order('created_at', { ascending: false })
     if (error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
@@ -212,6 +213,7 @@ export default function Adjustments() {
               <SortableTh label="Adjustment #" sortKey="adjustment_number" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
               <SortableTh label="Date" sortKey="adjustment_date" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
               <SortableTh label="Product" sortKey="product" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
+              <SortableTh label="Category" sortKey="category" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
               <SortableTh label="Batch" sortKey="batch" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
               <th className="px-4 py-3">Old → New</th>
               <SortableTh label="Change" sortKey="change" activeKey={adjSortKey} activeDir={adjSortDir} onSort={toggleAdjSort} />
@@ -221,10 +223,10 @@ export default function Adjustments() {
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading adjustments…</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading adjustments…</td></tr>
             )}
             {!loading && searchedAdjustments.length === 0 && (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No adjustments yet — good sign, means nothing's needed correcting.</td></tr>
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No adjustments yet — good sign, means nothing's needed correcting.</td></tr>
             )}
             {searchedAdjustments.map((a) => {
               const qty = Number(a.adjustment_quantity)
@@ -233,6 +235,7 @@ export default function Adjustments() {
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{a.adjustment_number}</td>
                   <td className="px-4 py-3">{a.adjustment_date}</td>
                   <td className="px-4 py-3 font-medium">{a.product?.name}</td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">{a.product?.category || '—'}</td>
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{a.batch?.batch_number ?? 'Overall'}</td>
                   <td className="px-4 py-3">{Number(a.old_value)} → {Number(a.new_value)}</td>
                   <td className="px-4 py-3">

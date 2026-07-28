@@ -244,6 +244,7 @@ function VelocityTab({ products }) {
   const withSales = products.filter((p) => p.hasSales).sort((a, b) => b.qtySold - a.qtySold)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
     { key: 'abc', label: 'ABC class', render: (p) => <StatusChip tone={p.abcClass === 'A' ? 'ok' : p.abcClass === 'B' ? 'attention' : 'neutral'}>{p.abcClass}</StatusChip> },
     { key: 'qty', label: 'Qty sold', render: (p) => `${p.qtySold} ${p.unit}` },
     { key: 'revenue', label: 'Revenue', render: (p) => p.revenue.toFixed(2) },
@@ -264,6 +265,7 @@ function InventoryHealthTab({ products }) {
   const deadStock = products.filter((p) => !p.hasSales && p.currentStock > 0)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
     { key: 'stock', label: 'Stock', render: (p) => `${p.currentStock} ${p.unit}` },
     { key: 'value', label: 'Capital tied up', render: (p) => p.inventoryValue.toFixed(2) },
   ]
@@ -281,6 +283,7 @@ function EoqTab({ products, leadTimeDays }) {
   const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
     { key: 'weekly', label: 'Weekly demand', render: (p) => p.weeklyDemand.toFixed(1) },
     { key: 'safety', label: 'Safety stock', render: (p) => p.safetyStock.toFixed(1) },
     { key: 'reorder', label: 'Reorder point', render: (p) => p.reorderPoint.toFixed(1) },
@@ -349,7 +352,7 @@ function TierBlock({ title, tone, items }) {
                 <span>{p.currentStock} {p.unit} on hand</span>
               </div>
               <p className="mt-0.5 text-xs text-[var(--color-ink-soft)]">
-                Current stock will last about {p.daysOfStockRemaining !== null ? p.daysOfStockRemaining.toFixed(0) : '—'} days.
+                {p.category ? `${p.category} — ` : ''}Current stock will last about {p.daysOfStockRemaining !== null ? p.daysOfStockRemaining.toFixed(0) : '—'} days.
                 Average weekly sales is {p.weeklyDemand.toFixed(1)} {p.unit}. Recommended purchase is {p.recommendedQty} {p.unit}.
               </p>
             </div>
@@ -364,6 +367,7 @@ function ForecastTab({ products }) {
   const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
     { key: 'nextWeek', label: 'Next week (est.)', render: (p) => `${p.weeklyDemand.toFixed(1)} ${p.unit}` },
     { key: 'nextMonth', label: 'Next month (est.)', render: (p) => `${p.monthlyDemand.toFixed(1)} ${p.unit}` },
     {

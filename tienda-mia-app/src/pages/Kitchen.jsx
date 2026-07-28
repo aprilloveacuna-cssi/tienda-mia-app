@@ -96,6 +96,7 @@ export default function Kitchen() {
   const [dailyMealsDate, setDailyMealsDate] = useState(today())
   const [dailyMealLines, setDailyMealLines] = useState([])
   const [dailyMealForm, setDailyMealForm] = useState({ product_id: '', quantity: '', unit_cost: '', expiration_date: '' })
+  const [dailyMealCostSource, setDailyMealCostSource] = useState('')
   const [dailyMealsSaving, setDailyMealsSaving] = useState(false)
   const [dailyMealsError, setDailyMealsError] = useState('')
   const [leftoverForm, setLeftoverForm] = useState({ product_id: '', quantity: '', leftover_date: today(), notes: '' })
@@ -150,6 +151,7 @@ export default function Kitchen() {
   const { sortKey: recipeSortKey, sortDir: recipeSortDir, toggleSort: toggleRecipeSort } = useSort('name')
   function recipeSortAccessor(row, key) {
     if (key === 'name') return row.product?.name
+    if (key === 'category') return row.product?.category
     if (key === 'yield') return Number(row.yield_quantity ?? 0)
     if (key === 'ingredients') return row.recipe_ingredients.length
     if (key === 'cost') return row.perUnit
@@ -194,10 +196,10 @@ export default function Kitchen() {
       fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, selling_price, status, business_unit, category, product_type', 'name'),
       supabase
         .from('recipes')
-        .select('*, product:products(name, sku, unit, selling_price), recipe_ingredients(*, ingredient:products(name, sku, unit, current_cost))')
+        .select('*, product:products(name, sku, unit, selling_price, category), recipe_ingredients(*, ingredient:products(name, sku, unit, current_cost, category))')
         .eq('status', 'active')
         .order('created_at', { ascending: false }),
-      fetchAllRows('waste', '*, product:products(name, sku, unit)', 'waste_date', { ascending: false }),
+      fetchAllRows('waste', '*, product:products(name, sku, unit, category)', 'waste_date', { ascending: false }),
     ])
 
     if (productsRes.error || recipesRes.error || leftoversRes.error) {
@@ -783,6 +785,7 @@ export default function Kitchen() {
         tempId: crypto.randomUUID(),
         ingredient_product_id: p.id,
         name: p.name,
+        category: p.category,
         unit: p.unit,
         quantity: Number(weeklyPurchaseForm.quantity),
         unit_cost: Number(weeklyPurchaseForm.unit_cost),
@@ -1081,8 +1084,11 @@ export default function Kitchen() {
   // recipe's ingredient math — still editable, since actual cost can vary day
   // to day, but saves re-typing it every time for dishes you've already priced.
   function onDailyMealProductPick(id) {
+    const p = kitchenProducts.find((x) => x.id === id)
     const recipe = recipes.find((r) => r.product_id === id)
+
     let autoCost = ''
+    let source = ''
     if (recipe) {
       const ingredients = recipe.recipe_ingredients.map((ri) => ({
         quantity_per_yield: ri.quantity_per_yield,
@@ -1091,7 +1097,21 @@ export default function Kitchen() {
         product_unit: ri.ingredient?.unit,
       }))
       autoCost = recipeCost(recipe, ingredients).perUnit.toFixed(2)
+      source = 'recipe'
+    } else if (Number(p?.current_cost) > 0) {
+      // No recipe defined — the product's own recorded cost is the next best
+      // thing, since it reflects whatever was actually entered last time.
+      autoCost = Number(p.current_cost).toFixed(2)
+      source = 'current cost'
+    } else if (Number(p?.selling_price) > 0) {
+      // Neither exists yet — likely a brand new kitchen item. Selling price
+      // is at least usually set from day one, so it's a better starting point
+      // than a blank field, even though it's not a true cost.
+      autoCost = Number(p.selling_price).toFixed(2)
+      source = 'selling price — no cost on file, double-check this'
     }
+
+    setDailyMealCostSource(source)
     setDailyMealForm({ ...dailyMealForm, product_id: id, unit_cost: autoCost || dailyMealForm.unit_cost })
   }
 
@@ -1105,6 +1125,7 @@ export default function Kitchen() {
         tempId: crypto.randomUUID(),
         product_id: p.id,
         product_name: p.name,
+        category: p.category,
         unit: p.unit,
         quantity: Number(dailyMealForm.quantity),
         unit_cost: Number(dailyMealForm.unit_cost),
@@ -1112,6 +1133,7 @@ export default function Kitchen() {
       },
     ])
     setDailyMealForm({ product_id: '', quantity: '', unit_cost: '', expiration_date: '' })
+    setDailyMealCostSource('')
   }
 
   function removeDailyMealLine(tempId) {
@@ -1345,6 +1367,7 @@ export default function Kitchen() {
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
               <tr>
                 <SortableTh label="Finished product" sortKey="name" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
+                <SortableTh label="Category" sortKey="category" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
                 <SortableTh label="Yield" sortKey="yield" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
                 <SortableTh label="Ingredients" sortKey="ingredients" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
                 <SortableTh label="Cost / unit" sortKey="cost" activeKey={recipeSortKey} activeDir={recipeSortDir} onSort={toggleRecipeSort} />
@@ -1354,15 +1377,16 @@ export default function Kitchen() {
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading recipes…</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading recipes…</td></tr>
               )}
               {!loading && searchedRecipes.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No recipes yet — create one to start producing finished goods.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No recipes yet — create one to start producing finished goods.</td></tr>
               )}
               {searchedRecipes.map((r) => {
                 return (
                   <tr key={r.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="px-4 py-3 font-medium">{r.product?.name}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.product?.category || '—'}</td>
                     <td className="px-4 py-3">{r.yield_quantity} {r.product?.unit}</td>
                     <td className="px-4 py-3 text-[var(--color-ink-soft)]">{r.recipe_ingredients.length} items</td>
                     <td className="px-4 py-3">{r.perUnit.toFixed(2)}</td>
@@ -1405,6 +1429,7 @@ export default function Kitchen() {
             <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
               <tr>
                 <th className="px-4 py-3">Name</th>
+                <th className="px-4 py-3">Category</th>
                 <th className="px-4 py-3">Code</th>
                 <th className="px-4 py-3">Unit</th>
                 <th className="px-4 py-3">Cost</th>
@@ -1414,14 +1439,15 @@ export default function Kitchen() {
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading ingredients…</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading ingredients…</td></tr>
               )}
               {!loading && searchedIngredientProducts.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No ingredients yet — add one to start building recipe ingredient lists.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No ingredients yet — add one to start building recipe ingredient lists.</td></tr>
               )}
               {searchedIngredientProducts.map((p) => (
                 <tr key={p.id} className="border-b border-[var(--color-line)] last:border-0">
                   <td className="px-4 py-3 font-medium">{p.name}</td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">{p.category || '—'}</td>
                   <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{p.barcode}</td>
                   <td className="px-4 py-3">{p.unit || '—'}</td>
                   <td className="px-4 py-3">{Number(p.current_cost).toFixed(2)}</td>
@@ -1470,6 +1496,7 @@ export default function Kitchen() {
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Ingredient</th>
+                    <th className="px-3 py-2">Category</th>
                     <th className="px-3 py-2">Qty</th>
                     <th className="px-3 py-2">Unit cost</th>
                     <th className="px-3 py-2">Date</th>
@@ -1478,11 +1505,12 @@ export default function Kitchen() {
                 </thead>
                 <tbody>
                   {weeklyPurchaseLines.length === 0 && (
-                    <tr><td colSpan={5} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No lines added yet.</td></tr>
+                    <tr><td colSpan={6} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No lines added yet.</td></tr>
                   )}
                   {weeklyPurchaseLines.map((l) => (
                     <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">{l.name}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.unit}</td>
                       <td className="px-3 py-2">{l.unit_cost.toFixed(2)}</td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.purchase_date}</td>
@@ -1581,6 +1609,7 @@ export default function Kitchen() {
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Meal</th>
+                    <th className="px-3 py-2">Category</th>
                     <th className="px-3 py-2">Qty</th>
                     <th className="px-3 py-2">Cost</th>
                     <th className="px-3 py-2">Expiry</th>
@@ -1589,11 +1618,12 @@ export default function Kitchen() {
                 </thead>
                 <tbody>
                   {dailyMealLines.length === 0 && (
-                    <tr><td colSpan={5} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No meals added yet.</td></tr>
+                    <tr><td colSpan={6} className="px-3 py-4 text-center text-[var(--color-ink-soft)]">No meals added yet.</td></tr>
                   )}
                   {dailyMealLines.map((l) => (
                     <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">{l.product_name}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.unit}</td>
                       <td className="px-3 py-2">{l.unit_cost.toFixed(2)}</td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.expiration_date || '—'}</td>
@@ -1632,11 +1662,20 @@ export default function Kitchen() {
                 <input
                   type="number" step="0.01" min="0" required
                   value={dailyMealForm.unit_cost}
-                  onChange={(e) => setDailyMealForm({ ...dailyMealForm, unit_cost: e.target.value })}
+                  onChange={(e) => {
+                    setDailyMealForm({ ...dailyMealForm, unit_cost: e.target.value })
+                    setDailyMealCostSource('')
+                  }}
                   className="input"
                 />
-                {recipes.some((r) => r.product_id === dailyMealForm.product_id) && (
-                  <span className="mt-1 block text-[10px] text-[var(--color-herb)]">from recipe — editable</span>
+                {dailyMealCostSource && (
+                  <span
+                    className={`mt-1 block text-[10px] ${
+                      dailyMealCostSource === 'recipe' ? 'text-[var(--color-herb)]' : 'text-[var(--color-amber)]'
+                    }`}
+                  >
+                    from {dailyMealCostSource} — editable
+                  </span>
                 )}
               </Field>
               <Field label="Expiry (optional)">
@@ -1729,21 +1768,23 @@ export default function Kitchen() {
                 <tr>
                   <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3">Product</th>
+                  <th className="px-4 py-3">Category</th>
                   <th className="px-4 py-3">Leftover qty</th>
                   <th className="px-4 py-3">Notes</th>
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={4} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
                 )}
                 {!loading && searchedLeftovers.length === 0 && (
-                  <tr><td colSpan={4} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No leftovers recorded yet.</td></tr>
+                  <tr><td colSpan={5} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No leftovers recorded yet.</td></tr>
                 )}
                 {searchedLeftovers.map((w) => (
                   <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="px-4 py-3">{w.waste_date}</td>
                     <td className="px-4 py-3 font-medium">{w.product?.name}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{w.product?.category || '—'}</td>
                     <td className="px-4 py-3">{w.quantity} {w.product?.unit}</td>
                     <td className="px-4 py-3 text-[var(--color-ink-soft)]">{w.remarks || '—'}</td>
                   </tr>

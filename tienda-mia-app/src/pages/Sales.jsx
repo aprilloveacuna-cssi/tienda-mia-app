@@ -93,7 +93,7 @@ export default function Sales() {
   async function loadProducts() {
     const { data, error } = await fetchAllRows(
       'products',
-      'id, sku, name, unit, selling_price, current_cost, barcode, status, business_unit',
+      'id, sku, name, unit, selling_price, current_cost, barcode, status, business_unit, category',
       'name'
     )
     if (!error) setProducts(data ?? [])
@@ -121,7 +121,7 @@ export default function Sales() {
     setErrorMsg('')
     const { data } = await supabase
       .from('sale_lines')
-      .select('*, product:products(name, sku, unit)')
+      .select('*, product:products(name, sku, unit, category)')
       .eq('sale_id', sale.id)
     setViewedLines(data ?? [])
     setPanelOpen(true)
@@ -274,6 +274,7 @@ export default function Sales() {
               tempId: crypto.randomUUID(),
               product_id: product.id,
               product_name: product.name,
+              category: product.category,
               unit: product.unit,
               quantity: qty,
               unit_price: unitPrice,
@@ -342,6 +343,7 @@ export default function Sales() {
           tempId: crypto.randomUUID(),
           product_id: lineForm.product_id,
           product_name: product.name,
+          category: product.category,
           unit: product.unit,
           quantity: qty,
           unit_price: unitPrice,
@@ -686,6 +688,7 @@ export default function Sales() {
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Product</th>
+                    <th className="px-3 py-2">Category</th>
                     <th className="px-3 py-2">Qty</th>
                     <th className="px-3 py-2">Price</th>
                     <th className="px-3 py-2">Total</th>
@@ -696,7 +699,7 @@ export default function Sales() {
                 <tbody>
                   {pendingLines.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-3 py-5 text-center text-[var(--color-ink-soft)]">
+                      <td colSpan={7} className="px-3 py-5 text-center text-[var(--color-ink-soft)]">
                         No lines yet.
                       </td>
                     </tr>
@@ -704,6 +707,7 @@ export default function Sales() {
                   {pendingLines.map((l) => (
                     <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">{l.product_name}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.unit}</td>
                       <td className="px-3 py-2">{l.unit_price.toFixed(2)}</td>
                       <td className="px-3 py-2">{l.line_total.toFixed(2)}</td>
@@ -731,7 +735,7 @@ export default function Sales() {
                 </tbody>
                 <tfoot className="sticky bottom-0 bg-[var(--color-paper-raised)]">
                   <tr className="border-t border-[var(--color-line)] font-medium">
-                    <td colSpan={3} className="px-3 py-2 text-right text-[var(--color-ink-soft)]">Total</td>
+                    <td colSpan={4} className="px-3 py-2 text-right text-[var(--color-ink-soft)]">Total</td>
                     <td className="px-3 py-2">{runningTotal.toFixed(2)}</td>
                     <td className="px-3 py-2 text-[var(--color-herb)]">{runningProfit.toFixed(2)}</td>
                     <td />
@@ -902,6 +906,7 @@ export default function Sales() {
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Product</th>
+                    <th className="px-3 py-2">Category</th>
                     <th className="px-3 py-2">Qty</th>
                     <th className="px-3 py-2">Price</th>
                     <th className="px-3 py-2">FIFO cost</th>
@@ -912,6 +917,7 @@ export default function Sales() {
                   {viewedLines.map((l) => (
                     <tr key={l.id} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">{l.product?.name}</td>
+                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.product?.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.product?.unit}</td>
                       <td className="px-3 py-2">{Number(l.unit_price).toFixed(2)}</td>
                       <td className="px-3 py-2">{Number(l.fifo_cost).toFixed(2)}</td>
