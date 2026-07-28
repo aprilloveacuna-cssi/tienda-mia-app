@@ -86,7 +86,7 @@ export default function Dashboard() {
         supabase.from('products').select('*', { count: 'exact', head: true }),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'active'),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'archived'),
-        fetchAllRows('inventory_cache', '*, product:products(name, sku, reorder_point)'),
+        fetchAllRows('inventory_cache', '*, product:products(name, sku, reorder_point)', null, { tiebreaker: 'product_id' }),
       ])
 
       const firstError = totalRes.error || activeRes.error || archivedRes.error || invRes.error

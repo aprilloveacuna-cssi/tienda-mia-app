@@ -16,16 +16,20 @@ export async function fetchAllRows(table, columns = '*', orderBy = null, options
   const pageSize = 1000
   let allRows = []
   let from = 0
+  // Most tables use a standard `id` primary key — a few (cache/snapshot
+  // tables keyed by what they summarize, like inventory_cache by product_id)
+  // don't, so the tiebreaker column is overridable via options.tiebreaker.
+  const tiebreaker = options.tiebreaker ?? 'id'
 
   while (true) {
     let query = supabase.from(table).select(columns)
     if (orderBy) query = query.order(orderBy, { ascending: options.ascending ?? true })
-    // Always add a stable secondary sort by id. Without this, rows that tie
-    // on the primary sort column (e.g. duplicate product names) can be
-    // ordered inconsistently between successive paged requests — Postgres
-    // is free to break ties differently each time — which silently skips
-    // or duplicates rows sitting right at a page boundary.
-    query = query.order('id', { ascending: true })
+    // Always add a stable secondary sort. Without this, rows that tie on the
+    // primary sort column (e.g. duplicate product names) can be ordered
+    // inconsistently between successive paged requests — Postgres is free
+    // to break ties differently each time — which silently skips or
+    // duplicates rows sitting right at a page boundary.
+    query = query.order(tiebreaker, { ascending: true })
     query = query.range(from, from + pageSize - 1)
 
     const { data, error } = await query
