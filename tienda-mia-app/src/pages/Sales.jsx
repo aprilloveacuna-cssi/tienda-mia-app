@@ -247,9 +247,14 @@ export default function Sales() {
   }
 
   function handleDownloadSalesLineTemplate() {
-    const headers = ['Barcode', 'Quantity', 'Unit Price']
-    const example = ['4800123456789', '3', '45']
-    const csv = [headers, example].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const headers = ['Barcode', 'Quantity', 'Unit Price', 'Total Price']
+    // Give either Unit Price or Total Price per row, not both — Total Price
+    // gets divided by Quantity to work out the per-unit price automatically.
+    const example1 = ['4800123456789', '3', '45', '']
+    const example2 = ['4800987654321', '5', '', '225']
+    const csv = [headers, example1, example2]
+      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n')
     downloadFile('sale-lines-template.csv', csv, 'text/csv;charset=utf-8;')
   }
 
