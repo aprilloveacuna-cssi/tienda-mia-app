@@ -9,6 +9,7 @@ import SortableTh from '../components/SortableTh'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
+import { normalizeSearchText } from '../lib/search'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
 
@@ -40,11 +41,11 @@ export default function Sales() {
   const [search, setSearch] = useState('')
   const searchedSales = search.trim()
     ? sortedSales.filter((s) => {
-        const q = search.trim().toLowerCase()
+        const q = normalizeSearchText(search)
         return (
-          s.sale_number?.toLowerCase().includes(q) ||
-          s.pos_terminal?.toLowerCase().includes(q) ||
-          s.cashier?.toLowerCase().includes(q)
+          normalizeSearchText(s.sale_number).includes(q) ||
+          normalizeSearchText(s.pos_terminal).includes(q) ||
+          normalizeSearchText(s.cashier).includes(q)
         )
       })
     : sortedSales

@@ -8,6 +8,7 @@ import SortableTh from '../components/SortableTh'
 import ProductPicker from '../components/ProductPicker'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
+import { normalizeSearchText } from '../lib/search'
 
 export default function ReturnsWaste() {
   const [tab, setTab] = useState('returns')
@@ -35,12 +36,12 @@ export default function ReturnsWaste() {
   const sortedWastes = sortRows(wastes, wasteSortKey, wasteSortDir, wasteSortAccessor)
 
   const [search, setSearch] = useState('')
-  const q = search.trim().toLowerCase()
+  const q = normalizeSearchText(search)
   const searchedReturns = q
-    ? sortedReturns.filter((r) => r.return_number?.toLowerCase().includes(q) || r.product?.name?.toLowerCase().includes(q) || r.reason?.toLowerCase().includes(q))
+    ? sortedReturns.filter((r) => normalizeSearchText(r.return_number).includes(q) || normalizeSearchText(r.product?.name).includes(q) || normalizeSearchText(r.reason).includes(q))
     : sortedReturns
   const searchedWastes = q
-    ? sortedWastes.filter((w) => w.waste_number?.toLowerCase().includes(q) || w.product?.name?.toLowerCase().includes(q) || w.reason?.toLowerCase().includes(q))
+    ? sortedWastes.filter((w) => normalizeSearchText(w.waste_number).includes(q) || normalizeSearchText(w.product?.name).includes(q) || normalizeSearchText(w.reason).includes(q))
     : sortedWastes
   const [products, setProducts] = useState([])
   const [returnReasons, setReturnReasons] = useState([])

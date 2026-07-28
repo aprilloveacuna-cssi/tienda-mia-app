@@ -9,6 +9,7 @@ import ProductPicker from '../components/ProductPicker'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
+import { normalizeSearchText } from '../lib/search'
 
 const INGREDIENT_HEADER_ALIASES = {
   barcode: 'barcode', sku: 'sku',
@@ -161,13 +162,13 @@ export default function Kitchen() {
   const sortedRecipes = sortRows(recipesWithDerived, recipeSortKey, recipeSortDir, recipeSortAccessor)
 
   const [search, setSearch] = useState('')
-  const q = search.trim().toLowerCase()
-  const searchedRecipes = q ? sortedRecipes.filter((r) => r.product?.name?.toLowerCase().includes(q)) : sortedRecipes
+  const q = normalizeSearchText(search)
+  const searchedRecipes = q ? sortedRecipes.filter((r) => normalizeSearchText(r.product?.name).includes(q)) : sortedRecipes
   const searchedIngredientProducts = q
-    ? ingredientProducts.filter((p) => p.name?.toLowerCase().includes(q) || p.barcode?.toLowerCase().includes(q))
+    ? ingredientProducts.filter((p) => normalizeSearchText(p.name).includes(q) || normalizeSearchText(p.barcode).includes(q))
     : ingredientProducts
   const searchedLeftovers = q
-    ? leftovers.filter((w) => w.product?.name?.toLowerCase().includes(q) || w.remarks?.toLowerCase().includes(q))
+    ? leftovers.filter((w) => normalizeSearchText(w.product?.name).includes(q) || normalizeSearchText(w.remarks).includes(q))
     : leftovers
 
   // Recipe builder panel

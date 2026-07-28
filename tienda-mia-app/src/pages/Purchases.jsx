@@ -9,6 +9,7 @@ import SortableTh from '../components/SortableTh'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
+import { normalizeSearchText } from '../lib/search'
 
 const LINE_HEADER_ALIASES = {
   barcode: 'barcode', sku: 'sku',
@@ -44,11 +45,11 @@ export default function Purchases() {
   const [search, setSearch] = useState('')
   const searchedPurchases = search.trim()
     ? sortedPurchases.filter((p) => {
-        const q = search.trim().toLowerCase()
+        const q = normalizeSearchText(search)
         return (
-          p.purchase_number?.toLowerCase().includes(q) ||
-          p.supplier?.toLowerCase().includes(q) ||
-          p.invoice_number?.toLowerCase().includes(q)
+          normalizeSearchText(p.purchase_number).includes(q) ||
+          normalizeSearchText(p.supplier).includes(q) ||
+          normalizeSearchText(p.invoice_number).includes(q)
         )
       })
     : sortedPurchases

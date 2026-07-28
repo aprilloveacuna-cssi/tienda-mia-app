@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
+import { normalizeSearchText } from '../lib/search'
 
 /**
  * Search-as-you-type product picker — swaps in for a plain <select> once a
@@ -28,11 +29,11 @@ export default function ProductPicker({ products, value, onChange, placeholder =
 
   const filtered = query.trim()
     ? products.filter((p) => {
-        const q = query.toLowerCase()
+        const q = normalizeSearchText(query)
         return (
-          p.name?.toLowerCase().includes(q) ||
-          p.sku?.toLowerCase().includes(q) ||
-          p.barcode?.toLowerCase().includes(q)
+          normalizeSearchText(p.name).includes(q) ||
+          normalizeSearchText(p.sku).includes(q) ||
+          normalizeSearchText(p.barcode).includes(q)
         )
       })
     : products

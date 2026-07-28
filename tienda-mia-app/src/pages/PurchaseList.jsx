@@ -7,6 +7,7 @@ import SearchBar from '../components/SearchBar'
 import SortableTh from '../components/SortableTh'
 import { useSort, sortRows } from '../lib/sort'
 import { downloadFile } from '../lib/csv'
+import { normalizeSearchText } from '../lib/search'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_cost: '', packaging_note: '' }
 
@@ -224,8 +225,8 @@ export default function PurchaseList() {
   const visibleLists = lists.filter((l) => (showArchived ? l.status === 'archived' : l.status !== 'archived'))
   const searchedLists = search.trim()
     ? visibleLists.filter((l) => {
-        const q = search.trim().toLowerCase()
-        return l.list_number?.toLowerCase().includes(q) || l.label?.toLowerCase().includes(q)
+        const q = normalizeSearchText(search)
+        return normalizeSearchText(l.list_number).includes(q) || normalizeSearchText(l.label).includes(q)
       })
     : visibleLists
 

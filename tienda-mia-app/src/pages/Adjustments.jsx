@@ -7,6 +7,7 @@ import SortableTh from '../components/SortableTh'
 import ProductPicker from '../components/ProductPicker'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
+import { normalizeSearchText } from '../lib/search'
 
 export default function Adjustments() {
   const [adjustments, setAdjustments] = useState([])
@@ -24,11 +25,11 @@ export default function Adjustments() {
   const [search, setSearch] = useState('')
   const searchedAdjustments = search.trim()
     ? sortedAdjustments.filter((a) => {
-        const q = search.trim().toLowerCase()
+        const q = normalizeSearchText(search)
         return (
-          a.adjustment_number?.toLowerCase().includes(q) ||
-          a.product?.name?.toLowerCase().includes(q) ||
-          a.reason?.toLowerCase().includes(q)
+          normalizeSearchText(a.adjustment_number).includes(q) ||
+          normalizeSearchText(a.product?.name).includes(q) ||
+          normalizeSearchText(a.reason).includes(q)
         )
       })
     : sortedAdjustments

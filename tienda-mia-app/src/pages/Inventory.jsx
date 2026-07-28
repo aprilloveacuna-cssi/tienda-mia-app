@@ -6,6 +6,7 @@ import SortableTh from '../components/SortableTh'
 import DisposeConfirm from '../components/DisposeConfirm'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
+import { normalizeSearchText } from '../lib/search'
 
 function stockTone(stock, reorderPoint) {
   if (stock <= 0) return 'critical'
@@ -58,8 +59,8 @@ export default function Inventory() {
   const [search, setSearch] = useState('')
   const searchedRows = search.trim()
     ? sortedRows.filter((r) => {
-        const q = search.trim().toLowerCase()
-        return r.product?.name?.toLowerCase().includes(q) || r.product?.sku?.toLowerCase().includes(q)
+        const q = normalizeSearchText(search)
+        return normalizeSearchText(r.product?.name).includes(q) || normalizeSearchText(r.product?.sku).includes(q)
       })
     : sortedRows
 

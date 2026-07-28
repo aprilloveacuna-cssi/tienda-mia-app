@@ -7,6 +7,7 @@ import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import ProductPicker from '../components/ProductPicker'
 import { useSort, sortRows } from '../lib/sort'
+import { normalizeSearchText } from '../lib/search'
 
 // Maps flexible spreadsheet header names to the actual product columns, so an
 // import doesn't fail just because someone wrote "Price" instead of "Selling Price".
@@ -156,13 +157,13 @@ export default function Products() {
   }, [])
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
+    const q = normalizeSearchText(search)
     if (!q) return products
     return products.filter(
       (p) =>
-        p.name?.toLowerCase().includes(q) ||
-        p.barcode?.toLowerCase().includes(q) ||
-        p.sku?.toLowerCase().includes(q)
+        normalizeSearchText(p.name).includes(q) ||
+        normalizeSearchText(p.barcode).includes(q) ||
+        normalizeSearchText(p.sku).includes(q)
     )
   }, [products, search])
 
