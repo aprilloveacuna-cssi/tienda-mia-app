@@ -21,6 +21,7 @@ const SALE_LINE_HEADER_ALIASES = {
   barcode: 'barcode', sku: 'sku',
   quantity: 'quantity', qty: 'quantity',
   unitprice: 'unit_price', price: 'unit_price',
+  totalprice: 'total_price', total: 'total_price', saletotal: 'total_price',
 }
 
 function statusTone(status) {
@@ -75,6 +76,15 @@ export default function Sales() {
   const [quickReceiveSaving, setQuickReceiveSaving] = useState(false)
   const [quickReceiveError, setQuickReceiveError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [discountPct, setDiscountPct] = useState(20)
+
+  // Manual add-line price mismatch resolution
+  const [priceMismatch, setPriceMismatch] = useState(null) // { recordedPrice, givenPrice }
+  const [discountMode, setDiscountMode] = useState(false)
+  const [discountQtyDraft, setDiscountQtyDraft] = useState('')
+
+  // Bulk import price mismatch resolution
+  const [importMismatches, setImportMismatches] = useState([])
 
   async function loadSales() {
     setLoading(true)
@@ -100,9 +110,15 @@ export default function Sales() {
     if (!error) setProducts(data ?? [])
   }
 
+  async function loadDiscountSetting() {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'SENIOR_PWD_DISCOUNT_PCT').maybeSingle()
+    if (data) setDiscountPct(Number(data.value))
+  }
+
   useEffect(() => {
     loadSales()
     loadProducts()
+    loadDiscountSetting()
   }, [])
 
   function openNew() {
@@ -175,6 +191,61 @@ export default function Sales() {
     return { consumption, satisfied: remaining <= 0, totalAvailable }
   }
 
+  // Splits one product's sold quantity into a discounted portion and a
+  // regular-price portion — used when a Senior/PWD discount only applies to
+  // some of what was sold. Each portion gets its own FIFO consumption, run
+  // in sequence against the same reservation source, so together they
+  // consume exactly the same physical stock a single undivided line would.
+  async function buildDiscountSplitLines(product, totalQty, discountedQty, reservationSource) {
+    const lines = []
+    const regularQty = totalQty - discountedQty
+    const discountedUnitPrice = Math.round(Number(product.selling_price) * (1 - discountPct / 100) * 100) / 100
+
+    if (discountedQty > 0) {
+      const { consumption } = await computeFifoConsumption(product.id, discountedQty, reservationSource)
+      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+      const lineTotal = discountedQty * discountedUnitPrice
+      lines.push({
+        tempId: crypto.randomUUID(),
+        product_id: product.id,
+        product_name: product.name,
+        category: product.category,
+        unit: product.unit,
+        quantity: discountedQty,
+        unit_price: discountedUnitPrice,
+        line_total: lineTotal,
+        fifo_cost: fifoCost,
+        gross_profit: lineTotal - fifoCost,
+        consumption,
+        is_discounted: true,
+        discount_amount: discountedQty * (Number(product.selling_price) - discountedUnitPrice),
+      })
+    }
+
+    if (regularQty > 0) {
+      const { consumption } = await computeFifoConsumption(product.id, regularQty, [...reservationSource, ...lines])
+      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+      const lineTotal = regularQty * Number(product.selling_price)
+      lines.push({
+        tempId: crypto.randomUUID(),
+        product_id: product.id,
+        product_name: product.name,
+        category: product.category,
+        unit: product.unit,
+        quantity: regularQty,
+        unit_price: Number(product.selling_price),
+        line_total: lineTotal,
+        fifo_cost: fifoCost,
+        gross_profit: lineTotal - fifoCost,
+        consumption,
+        is_discounted: false,
+        discount_amount: 0,
+      })
+    }
+
+    return lines
+  }
+
   function handleDownloadSalesLineTemplate() {
     const headers = ['Barcode', 'Quantity', 'Unit Price']
     const example = ['4800123456789', '3', '45']
@@ -218,6 +289,7 @@ export default function Sales() {
         // ---------- Pass 1: parse every row and match it to a product ----------
         const parsedRows = []
         const skipped = []
+        const mismatches = []
 
         for (const [idx, r] of rows.slice(1).entries()) {
           const rowNum = idx + 2
@@ -253,7 +325,31 @@ export default function Sales() {
             skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
             continue
           }
-          const unitPrice = obj.unit_price ? Number(obj.unit_price) : Number(product.selling_price ?? 0)
+
+          // Either Unit Price or Total Price can be given — Total Price gets
+          // divided back down to a per-unit price. Neither given at all just
+          // defaults to the recorded price (no mismatch possible by definition).
+          let unitPrice
+          const priceWasGiven = Boolean(obj.unit_price || obj.total_price)
+          if (obj.unit_price) {
+            unitPrice = Number(obj.unit_price)
+          } else if (obj.total_price) {
+            unitPrice = Number(obj.total_price) / qty
+          } else {
+            unitPrice = Number(product.selling_price ?? 0)
+          }
+
+          if (priceWasGiven && Math.abs(unitPrice - Number(product.selling_price ?? 0)) > 0.01) {
+            mismatches.push({
+              tempId: crypto.randomUUID(),
+              rowNum,
+              product,
+              qty,
+              givenUnitPrice: unitPrice,
+              recordedPrice: Number(product.selling_price ?? 0),
+            })
+            continue
+          }
 
           parsedRows.push({ rowNum, product, qty, unitPrice })
         }
@@ -387,6 +483,7 @@ export default function Sales() {
 
         setImportPreviewValid(valid)
         setImportPreviewSkipped(skipped)
+        setImportMismatches(mismatches)
         setImportParsing(false)
         setImportPanelOpen(true)
       } catch {
@@ -395,6 +492,73 @@ export default function Sales() {
       }
     }
     reader.readAsText(file)
+  }
+
+  function setMismatchDraft(tempId, draft) {
+    setImportMismatches(importMismatches.map((m) => (m.tempId === tempId ? { ...m, discountQtyDraft: draft } : m)))
+  }
+
+  async function resolveMismatchUpdatePrice(mismatch) {
+    const { error } = await supabase.from('products').update({ selling_price: mismatch.givenUnitPrice }).eq('id', mismatch.product.id)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    const updatedProduct = { ...mismatch.product, selling_price: mismatch.givenUnitPrice }
+    setProducts(products.map((p) => (p.id === updatedProduct.id ? updatedProduct : p)))
+
+    try {
+      const reservationSource = [...pendingLines, ...importPreviewValid]
+      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(updatedProduct.id, mismatch.qty, reservationSource)
+      if (!satisfied && !updatedProduct.unlimited_stock) {
+        setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: `${updatedProduct.name}: only ${totalAvailable} ${updatedProduct.unit} available` }])
+      } else {
+        const lineTotal = mismatch.qty * mismatch.givenUnitPrice
+        const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+        const openQty = mismatch.qty - consumedQty
+        const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(updatedProduct.current_cost ?? 0)
+        setImportPreviewValid([
+          ...importPreviewValid,
+          {
+            tempId: crypto.randomUUID(),
+            product_id: updatedProduct.id,
+            product_name: updatedProduct.name,
+            category: updatedProduct.category,
+            unit: updatedProduct.unit,
+            quantity: mismatch.qty,
+            unit_price: mismatch.givenUnitPrice,
+            line_total: lineTotal,
+            fifo_cost: fifoCost,
+            gross_profit: lineTotal - fifoCost,
+            consumption,
+            openQty,
+            is_discounted: false,
+            discount_amount: 0,
+          },
+        ])
+      }
+    } catch {
+      setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
+    }
+    setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
+  }
+
+  async function resolveMismatchDiscount(mismatch) {
+    const discountedQty = Number(mismatch.discountQtyDraft)
+    if (!discountedQty || discountedQty <= 0 || discountedQty > mismatch.qty) return
+    try {
+      const reservationSource = [...pendingLines, ...importPreviewValid]
+      const newLines = await buildDiscountSplitLines(mismatch.product, mismatch.qty, discountedQty, reservationSource)
+      setImportPreviewValid([...importPreviewValid, ...newLines])
+    } catch {
+      setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
+    }
+    setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
+  }
+
+  function resolveMismatchSkip(mismatch) {
+    setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Price mismatch left unresolved — skipped' }])
+    setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
   }
 
   function handleConfirmImportLines() {
@@ -406,6 +570,50 @@ export default function Sales() {
     setImportPreviewSkipped([])
   }
 
+  async function proceedAddLine(product, qty, unitPrice) {
+    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(product.id, qty)
+
+    // Items flagged "never block for low stock" (e.g. Rice, where real
+    // batch-level stock isn't tracked precisely) still consume whatever
+    // real batches exist first, then treat the remainder as an open
+    // quantity costed at current cost — never blocking the sale itself.
+    if (!satisfied && !product.unlimited_stock) {
+      setLineWarning(
+        totalAvailable === 0
+          ? `${product.name} has no stock available.`
+          : `Only ${totalAvailable} ${product.unit} of ${product.name} available (across pending lines already added).`
+      )
+      return false
+    }
+
+    const lineTotal = qty * unitPrice
+    const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+    const openQty = qty - consumedQty
+    const fifoCost =
+      consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
+
+    setPendingLines([
+      ...pendingLines,
+      {
+        tempId: crypto.randomUUID(),
+        product_id: product.id,
+        product_name: product.name,
+        category: product.category,
+        unit: product.unit,
+        quantity: qty,
+        unit_price: unitPrice,
+        line_total: lineTotal,
+        fifo_cost: fifoCost,
+        gross_profit: lineTotal - fifoCost,
+        consumption,
+        openQty,
+        is_discounted: false,
+        discount_amount: 0,
+      },
+    ])
+    return true
+  }
+
   async function handleAddLine(e) {
     e.preventDefault()
     setLineWarning('')
@@ -413,55 +621,73 @@ export default function Sales() {
 
     const qty = Number(lineForm.quantity)
     const product = products.find((p) => p.id === lineForm.product_id)
+    const unitPrice = Number(lineForm.unit_price)
+
+    // A price that doesn't match what's on file usually means either the
+    // price genuinely changed, or this is a Senior/PWD discount — either way
+    // it needs a decision, not a silent guess. Skipped entirely if already
+    // resolved for this exact attempt (priceMismatch cleared just before).
+    if (!priceMismatch && Math.abs(unitPrice - Number(product.selling_price)) > 0.01) {
+      setPriceMismatch({ recordedPrice: Number(product.selling_price), givenPrice: unitPrice })
+      return
+    }
 
     try {
-      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(
-        lineForm.product_id,
-        qty
-      )
-
-      // Items flagged "never block for low stock" (e.g. Rice, where real
-      // batch-level stock isn't tracked precisely) still consume whatever
-      // real batches exist first, then treat the remainder as an open
-      // quantity costed at current cost — never blocking the sale itself.
-      if (!satisfied && !product.unlimited_stock) {
-        setLineWarning(
-          totalAvailable === 0
-            ? `${product.name} has no stock available.`
-            : `Only ${totalAvailable} ${product.unit} of ${product.name} available (across pending lines already added).`
-        )
-        return
+      const added = await proceedAddLine(product, qty, unitPrice)
+      if (added) {
+        setLineForm(EMPTY_LINE_FORM)
+        setPriceMismatch(null)
+        setDiscountMode(false)
+        setDiscountQtyDraft('')
       }
-
-      const unitPrice = Number(lineForm.unit_price)
-      const lineTotal = qty * unitPrice
-      const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-      const openQty = qty - consumedQty
-      const fifoCost =
-        consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
-
-      setPendingLines([
-        ...pendingLines,
-        {
-          tempId: crypto.randomUUID(),
-          product_id: lineForm.product_id,
-          product_name: product.name,
-          category: product.category,
-          unit: product.unit,
-          quantity: qty,
-          unit_price: unitPrice,
-          line_total: lineTotal,
-          fifo_cost: fifoCost,
-          gross_profit: lineTotal - fifoCost,
-          consumption,
-          openQty,
-        },
-      ])
-      setLineForm(EMPTY_LINE_FORM)
     } catch {
       setLineWarning('Could not check available stock — try again.')
     }
   }
+
+  async function handleUpdatePriceAndAdd() {
+    const product = products.find((p) => p.id === lineForm.product_id)
+    const newPrice = priceMismatch.givenPrice
+    const { error } = await supabase.from('products').update({ selling_price: newPrice }).eq('id', product.id)
+    if (error) {
+      setLineWarning(`Could not update price: ${error.message}`)
+      return
+    }
+    setProducts(products.map((p) => (p.id === product.id ? { ...p, selling_price: newPrice } : p)))
+    setPriceMismatch(null)
+    try {
+      const added = await proceedAddLine({ ...product, selling_price: newPrice }, Number(lineForm.quantity), newPrice)
+      if (added) {
+        setLineForm(EMPTY_LINE_FORM)
+        setDiscountMode(false)
+        setDiscountQtyDraft('')
+      }
+    } catch {
+      setLineWarning('Could not check available stock — try again.')
+    }
+  }
+
+  async function handleConfirmDiscountSplit() {
+    const product = products.find((p) => p.id === lineForm.product_id)
+    const qty = Number(lineForm.quantity)
+    const discountedQty = Number(discountQtyDraft)
+    if (!discountedQty || discountedQty <= 0 || discountedQty > qty) {
+      setLineWarning(`Discounted quantity must be between 1 and ${qty}.`)
+      return
+    }
+    try {
+      const newLines = await buildDiscountSplitLines(product, qty, discountedQty, pendingLines)
+      setPendingLines([...pendingLines, ...newLines])
+      setLineForm(EMPTY_LINE_FORM)
+      setPriceMismatch(null)
+      setDiscountMode(false)
+      setDiscountQtyDraft('')
+      setLineWarning('')
+    } catch {
+      setLineWarning('Could not check available stock — try again.')
+    }
+  }
+
 
   function removeLine(tempId) {
     setPendingLines(pendingLines.filter((l) => l.tempId !== tempId))
@@ -537,6 +763,10 @@ export default function Sales() {
     () => pendingLines.reduce((sum, l) => sum + l.gross_profit, 0),
     [pendingLines]
   )
+  const runningDiscount = useMemo(
+    () => pendingLines.reduce((sum, l) => sum + (l.discount_amount ?? 0), 0),
+    [pendingLines]
+  )
 
   async function completeSale() {
     if (pendingLines.length === 0) {
@@ -580,6 +810,8 @@ export default function Sales() {
           unit_price: line.unit_price,
           fifo_cost: line.fifo_cost,
           gross_profit: line.gross_profit,
+          is_discounted: line.is_discounted ?? false,
+          discount_amount: line.discount_amount ?? 0,
         })
         .select()
         .single()
@@ -820,6 +1052,14 @@ export default function Sales() {
                             {l.openQty} open
                           </span>
                         )}
+                        {l.is_discounted && (
+                          <span
+                            title={`Senior/PWD discount — ₱${l.discount_amount.toFixed(2)} off`}
+                            className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
+                          >
+                            discounted
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.unit}</td>
@@ -857,6 +1097,12 @@ export default function Sales() {
                 </tfoot>
               </table>
             </div>
+
+            {runningDiscount > 0 && (
+              <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3 py-2 text-xs text-[var(--color-herb)]">
+                Senior/PWD discounts this sale: ₱{runningDiscount.toFixed(2)} — factor this into remittance, since it's a real reduction from gross.
+              </div>
+            )}
 
             <div className="mb-3 flex gap-2">
               <button
@@ -925,6 +1171,61 @@ export default function Sales() {
                     >
                       Receive stock now
                     </button>
+                  )}
+                </div>
+              )}
+
+              {priceMismatch && (
+                <div className="space-y-2 rounded-md bg-[var(--color-amber-soft)] p-3 text-xs">
+                  <div className="flex items-start gap-1.5 text-[var(--color-amber)]">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    This is ₱{priceMismatch.givenPrice.toFixed(2)}, but the recorded price is ₱{priceMismatch.recordedPrice.toFixed(2)}.
+                  </div>
+                  {!discountMode ? (
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleUpdatePriceAndAdd}
+                        className="rounded-md border border-[var(--color-ink)] px-2.5 py-1.5 font-medium"
+                      >
+                        Update price to ₱{priceMismatch.givenPrice.toFixed(2)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDiscountMode(true)}
+                        className="rounded-md border border-[var(--color-ink)] px-2.5 py-1.5 font-medium"
+                      >
+                        Mark as discounted
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-end gap-2">
+                      <label className="block">
+                        <span className="mb-1 block text-[var(--color-ink-soft)]">
+                          Discounted qty (out of {lineForm.quantity})
+                        </span>
+                        <input
+                          type="number" min="1" max={lineForm.quantity} step="1"
+                          value={discountQtyDraft}
+                          onChange={(e) => setDiscountQtyDraft(e.target.value)}
+                          className="input w-28"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleConfirmDiscountSplit}
+                        className="rounded-md bg-[var(--color-ink)] px-2.5 py-1.5 font-medium text-white"
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDiscountMode(false)}
+                        className="text-[var(--color-ink-soft)] underline underline-offset-2"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   )}
                 </div>
               )}
@@ -1066,10 +1367,14 @@ export default function Sales() {
         title="Import sale lines"
         onClose={() => setImportPanelOpen(false)}
       >
-        <div className="mb-4 grid grid-cols-2 gap-3">
+        <div className="mb-4 grid grid-cols-3 gap-3">
           <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
             <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{importPreviewValid.length}</div>
             <div className="text-xs text-[var(--color-ink-soft)]">ready to add</div>
+          </div>
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
+            <div className="font-display text-xl font-semibold text-[var(--color-amber)]">{importMismatches.length}</div>
+            <div className="text-xs text-[var(--color-ink-soft)]">price mismatch</div>
           </div>
           <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
             <div className="font-display text-xl font-semibold text-[var(--color-rust)]">{importPreviewSkipped.length}</div>
@@ -1106,6 +1411,53 @@ export default function Sales() {
           </div>
         )}
 
+        {importMismatches.length > 0 && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-amber)]">
+              Price mismatches — resolve before importing ({importMismatches.length})
+            </div>
+            <div className="max-h-64 space-y-2 overflow-y-auto">
+              {importMismatches.map((m) => (
+                <div key={m.tempId} className="space-y-2 rounded-md bg-[var(--color-amber-soft)] p-2.5 text-xs">
+                  <div className="text-[var(--color-amber)]">
+                    Row {m.rowNum}: <span className="font-medium">{m.product.name}</span> is ₱{m.givenUnitPrice.toFixed(2)},
+                    recorded price is ₱{m.recordedPrice.toFixed(2)} ({m.qty} {m.product.unit})
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <button
+                      onClick={() => resolveMismatchUpdatePrice(m)}
+                      className="rounded-md border border-[var(--color-ink)] px-2 py-1 font-medium"
+                    >
+                      Update price to ₱{m.givenUnitPrice.toFixed(2)}
+                    </button>
+                    <label className="block">
+                      <span className="mb-1 block text-[var(--color-ink-soft)]">Discounted qty</span>
+                      <input
+                        type="number" min="1" max={m.qty} step="1"
+                        value={m.discountQtyDraft ?? ''}
+                        onChange={(e) => setMismatchDraft(m.tempId, e.target.value)}
+                        className="input w-20"
+                      />
+                    </label>
+                    <button
+                      onClick={() => resolveMismatchDiscount(m)}
+                      className="rounded-md bg-[var(--color-ink)] px-2 py-1 font-medium text-white"
+                    >
+                      Mark discounted
+                    </button>
+                    <button
+                      onClick={() => resolveMismatchSkip(m)}
+                      className="text-[var(--color-ink-soft)] underline underline-offset-2"
+                    >
+                      Skip row
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
           This only adds lines to the sale you're building — nothing is saved to Inventory until you click
           "Complete sale" on the main panel.
@@ -1113,10 +1465,12 @@ export default function Sales() {
 
         <button
           onClick={handleConfirmImportLines}
-          disabled={importing || importPreviewValid.length === 0}
+          disabled={importing || importPreviewValid.length === 0 || importMismatches.length > 0}
           className="w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
         >
-          Add {importPreviewValid.length} line{importPreviewValid.length === 1 ? '' : 's'} to this sale
+          {importMismatches.length > 0
+            ? `Resolve ${importMismatches.length} price mismatch${importMismatches.length === 1 ? '' : 'es'} first`
+            : `Add ${importPreviewValid.length} line${importPreviewValid.length === 1 ? '' : 's'} to this sale`}
         </button>
       </SlidePanel>
     </div>

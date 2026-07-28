@@ -28,6 +28,11 @@ const FIELD_META = {
     type: 'number',
     suffix: 'days',
   },
+  SENIOR_PWD_DISCOUNT_PCT: {
+    label: 'Senior / PWD discount',
+    type: 'number',
+    suffix: '% off — applied identically to both, since they compute the same',
+  },
 }
 
 function prettifyKey(key) {
