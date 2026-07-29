@@ -150,24 +150,42 @@ export default function Sales() {
     setLineWarning('')
   }
 
-  // For a Kitchen item that points to another via pairs_with_product_id (a
-  // Meal or Silog pointing to its Only), the real prepared stock lives under
-  // whatever it points to — that's where Daily Meals actually logs it. Stock
-  // lookups need to happen against that product, not the sold item's own id,
-  // even though the sale itself is still recorded against what was actually sold.
-  function resolveStockProductId(product) {
+  // Follows pairs_with_product_id links in EITHER direction, to any depth,
+  // to find every product that shares one physical stock pool with this one.
+  // Pairing direction isn't reliable in practice (some pairs point Meal→Only,
+  // some Only→Meal, some chain three deep) — what matters isn't who points
+  // to whom, it's which products are connected at all, since Daily Meals
+  // could have been logged against any single member of that group.
+  function resolveStockGroupIds(product) {
     const isKitchen = product.business_unit === 'KITCHEN' || product.category === 'KITCHEN'
-    if (!isKitchen) return product.id
-    return product.pairs_with_product_id || product.id
+    if (!isKitchen) return [product.id]
+
+    const productsById = Object.fromEntries(products.map((p) => [p.id, p]))
+    const visited = new Set()
+    const queue = [product.id]
+    while (queue.length > 0) {
+      const currentId = queue.shift()
+      if (visited.has(currentId)) continue
+      visited.add(currentId)
+      const current = productsById[currentId]
+      if (!current) continue
+      if (current.pairs_with_product_id) queue.push(current.pairs_with_product_id)
+      for (const p of products) {
+        if (p.pairs_with_product_id === currentId) queue.push(p.id)
+      }
+    }
+    return [...visited]
   }
 
-  // Walks batch_cache in FIFO order for this product, accounting for quantity
-  // already claimed by lines added earlier in this same not-yet-saved sale.
-  async function computeFifoConsumption(productId, qtyNeeded, reservationSource = pendingLines) {
+  // Walks batch_cache in FIFO order across every product in the given group,
+  // accounting for quantity already claimed by lines added earlier in this
+  // same not-yet-saved sale.
+  async function computeFifoConsumption(productIds, qtyNeeded, reservationSource = pendingLines) {
+    const ids = Array.isArray(productIds) ? productIds : [productIds]
     const { data: batches, error } = await supabase
       .from('batch_cache')
       .select('*')
-      .eq('product_id', productId)
+      .in('product_id', ids)
       .gt('remaining_quantity', 0)
       .order('fifo_sequence')
 
@@ -188,7 +206,7 @@ export default function Sales() {
       if (available <= 0) continue
       const take = Math.min(available, remaining)
       if (take > 0) {
-        consumption.push({ batch_id: b.batch_id, qty: take, unit_cost: Number(b.unit_cost) })
+        consumption.push({ batch_id: b.batch_id, qty: take, unit_cost: Number(b.unit_cost), product_id: b.product_id })
         remaining -= take
       }
       if (remaining <= 0) break
@@ -211,16 +229,15 @@ export default function Sales() {
     const lines = []
     const regularQty = totalQty - discountedQty
     const discountedUnitPrice = Math.round(Number(product.selling_price) * (1 - discountPct / 100) * 100) / 100
-    const stockProductId = resolveStockProductId(product)
+    const stockGroupIds = resolveStockGroupIds(product)
 
     if (discountedQty > 0) {
-      const { consumption } = await computeFifoConsumption(stockProductId, discountedQty, reservationSource)
+      const { consumption } = await computeFifoConsumption(stockGroupIds, discountedQty, reservationSource)
       const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
       const lineTotal = discountedQty * discountedUnitPrice
       lines.push({
         tempId: crypto.randomUUID(),
         product_id: product.id,
-        stock_product_id: stockProductId,
         product_name: product.name,
         category: product.category,
         unit: product.unit,
@@ -236,13 +253,12 @@ export default function Sales() {
     }
 
     if (regularQty > 0) {
-      const { consumption } = await computeFifoConsumption(stockProductId, regularQty, [...reservationSource, ...lines])
+      const { consumption } = await computeFifoConsumption(stockGroupIds, regularQty, [...reservationSource, ...lines])
       const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
       const lineTotal = regularQty * Number(product.selling_price)
       lines.push({
         tempId: crypto.randomUUID(),
         product_id: product.id,
-        stock_product_id: stockProductId,
         product_name: product.name,
         category: product.category,
         unit: product.unit,
@@ -375,19 +391,14 @@ export default function Sales() {
 
         // ---------- Pass 2: Kitchen items reconcile against that day's Daily Meals ----------
         // Every Kitchen item's sales this import must trace back to a Daily
-        // Meals batch dated exactly this sale's date. Grouped by the shared
-        // "Only" product (the root a Meal/Silog points to via pairs_with_product_id),
-        // not per individual pair — this matters because more than one Meal
-        // variant (e.g. both a Meal and a Silog) can point to the same Only,
-        // and their combined need has to be checked together against the one
-        // batch they actually share, not independently against the same
-        // snapshot (which could under-detect a shortfall). No batch at all
-        // for that dish/date is an error. If sold more than was prepared, the
-        // shortfall is topped up automatically so the sale can go through.
-        function groupRootId(product) {
-          return product.pairs_with_product_id || product.id
-        }
-
+        // Meals batch dated exactly this sale's date. Grouped by every product
+        // connected via pairs_with_product_id, in any direction, at any depth
+        // — pairing direction isn't consistent in practice (some point Meal→
+        // Only, some Only→Meal, some chain further), so what matters is which
+        // products are linked at all, not who points to whom. Their combined
+        // need is checked together against whichever batch the group actually
+        // shares. No batch at all for that dish/date is an error. If sold more
+        // than was prepared, the shortfall is topped up automatically.
         const kitchenGroups = new Map()
         for (const pr of parsedRows) {
           const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
@@ -398,11 +409,12 @@ export default function Sales() {
           // "prepared" in a tracked quantity the way a dish is.
           const isPaired = Boolean(pr.product.pairs_with_product_id) || products.some((p) => p.pairs_with_product_id === pr.product.id)
           if (!isPaired) continue
-          const rootId = groupRootId(pr.product)
-          if (!kitchenGroups.has(rootId)) {
-            kitchenGroups.set(rootId, { rootId, neededQty: 0, rowNums: [], names: new Set() })
+          const groupIds = resolveStockGroupIds(pr.product)
+          const key = [...groupIds].sort().join(',')
+          if (!kitchenGroups.has(key)) {
+            kitchenGroups.set(key, { groupIds, neededQty: 0, rowNums: [], names: new Set() })
           }
-          const g = kitchenGroups.get(rootId)
+          const g = kitchenGroups.get(key)
           g.neededQty += pr.qty
           g.rowNums.push(pr.rowNum)
           g.names.add(pr.product.name)
@@ -411,15 +423,10 @@ export default function Sales() {
         const blockedRowNums = new Set()
 
         for (const g of kitchenGroups.values()) {
-          // Every product that resolves to this same root — the Only itself,
-          // plus every Meal/Silog pointing at it — since Daily Meals could in
-          // principle have been logged against any of them.
-          const memberIds = products.filter((p) => groupRootId(p) === g.rootId).map((p) => p.id)
-
           const { data: dmBatches } = await supabase
             .from('batches')
             .select('id, product_id, unit_cost')
-            .in('product_id', memberIds)
+            .in('product_id', g.groupIds)
             .eq('source_type', 'KitchenProduction')
             .eq('received_date', headerForm.sale_date)
 
@@ -480,8 +487,8 @@ export default function Sales() {
           if (blockedRowNums.has(pr.rowNum)) continue
 
           try {
-            const stockProductId = resolveStockProductId(pr.product)
-            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockProductId, pr.qty, accumulator)
+            const stockGroupIds = resolveStockGroupIds(pr.product)
+            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
             if (!satisfied && !pr.product.unlimited_stock) {
               skipped.push({ rowNum: pr.rowNum, reason: `${pr.product.name}: only ${totalAvailable} ${pr.product.unit} available` })
               continue
@@ -494,7 +501,6 @@ export default function Sales() {
             const newLine = {
               tempId: crypto.randomUUID(),
               product_id: pr.product.id,
-              stock_product_id: stockProductId,
               product_name: pr.product.name,
               category: pr.product.category,
               unit: pr.product.unit,
@@ -541,8 +547,8 @@ export default function Sales() {
 
     try {
       const reservationSource = [...pendingLines, ...importPreviewValid]
-      const stockProductId = resolveStockProductId(updatedProduct)
-      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockProductId, mismatch.qty, reservationSource)
+      const stockGroupIds = resolveStockGroupIds(updatedProduct)
+      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, mismatch.qty, reservationSource)
       if (!satisfied && !updatedProduct.unlimited_stock) {
         setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: `${updatedProduct.name}: only ${totalAvailable} ${updatedProduct.unit} available` }])
       } else {
@@ -555,7 +561,6 @@ export default function Sales() {
           {
             tempId: crypto.randomUUID(),
             product_id: updatedProduct.id,
-            stock_product_id: stockProductId,
             product_name: updatedProduct.name,
             category: updatedProduct.category,
             unit: updatedProduct.unit,
@@ -605,8 +610,8 @@ export default function Sales() {
   }
 
   async function proceedAddLine(product, qty, unitPrice) {
-    const stockProductId = resolveStockProductId(product)
-    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockProductId, qty)
+    const stockGroupIds = resolveStockGroupIds(product)
+    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, qty)
 
     // Items flagged "never block for low stock" (e.g. Rice, where real
     // batch-level stock isn't tracked precisely) still consume whatever
@@ -632,7 +637,6 @@ export default function Sales() {
       {
         tempId: crypto.randomUUID(),
         product_id: product.id,
-        stock_product_id: stockProductId,
         product_name: product.name,
         category: product.category,
         unit: product.unit,
@@ -860,7 +864,7 @@ export default function Sales() {
       }
 
       const ledgerRows = line.consumption.map((c) => ({
-        product_id: line.stock_product_id ?? line.product_id,
+        product_id: c.product_id ?? line.product_id,
         batch_id: c.batch_id,
         transaction_type: 'Sale',
         quantity_change: -c.qty,
