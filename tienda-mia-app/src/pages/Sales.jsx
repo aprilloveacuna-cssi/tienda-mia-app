@@ -177,6 +177,53 @@ export default function Sales() {
     return [...visited]
   }
 
+  // A Kitchen item's sale never blocks. Checks everything remaining across
+  // its whole paired group — any date, since leftovers from an earlier day
+  // are real, sellable stock, not just today's batch — and tops up the
+  // shortfall automatically if that's not enough. No hard errors, no "was
+  // this the exact date," no "was this specifically paired." One rule, used
+  // everywhere a Kitchen item gets sold — manual entry and bulk import alike.
+  async function ensureKitchenStock(product, qty, saleDate) {
+    const isKitchen = product.business_unit === 'KITCHEN' || product.category === 'KITCHEN'
+    if (!isKitchen || product.unlimited_stock) return
+
+    const groupIds = resolveStockGroupIds(product)
+    const { data: cacheRows } = await supabase
+      .from('batch_cache')
+      .select('remaining_quantity')
+      .in('product_id', groupIds)
+      .gt('remaining_quantity', 0)
+    const remaining = (cacheRows ?? []).reduce((s, c) => s + Number(c.remaining_quantity), 0)
+
+    if (remaining >= qty) return
+    const shortfall = qty - remaining
+    const topUpCost = Number(product.current_cost ?? 0)
+
+    const { data: newBatch, error: batchErr } = await supabase
+      .from('batches')
+      .insert({
+        product_id: product.id,
+        source_type: 'KitchenProduction',
+        received_quantity: shortfall,
+        unit_cost: topUpCost,
+        received_date: saleDate,
+      })
+      .select()
+      .single()
+
+    if (!batchErr) {
+      await supabase.from('inventory_ledger').insert({
+        product_id: product.id,
+        batch_id: newBatch.id,
+        transaction_type: 'KitchenProduction',
+        quantity_change: shortfall,
+        unit_cost_at_transaction: topUpCost,
+        source_module: 'Kitchen',
+        source_reference_id: newBatch.id,
+      })
+    }
+  }
+
   // Walks batch_cache in FIFO order across every product in the given group,
   // accounting for quantity already claimed by lines added earlier in this
   // same not-yet-saved sale.
@@ -229,6 +276,7 @@ export default function Sales() {
     const lines = []
     const regularQty = totalQty - discountedQty
     const discountedUnitPrice = Math.round(Number(product.selling_price) * (1 - discountPct / 100) * 100) / 100
+    await ensureKitchenStock(product, totalQty, headerForm.sale_date)
     const stockGroupIds = resolveStockGroupIds(product)
 
     if (discountedQty > 0) {
@@ -389,91 +437,22 @@ export default function Sales() {
           parsedRows.push({ rowNum, product, qty, unitPrice })
         }
 
-        // ---------- Pass 2: Kitchen items reconcile against that day's Daily Meals ----------
-        // Every Kitchen item's sales this import must trace back to a Daily
-        // Meals batch dated exactly this sale's date. Grouped by every product
-        // connected via pairs_with_product_id, in any direction, at any depth
-        // — pairing direction isn't consistent in practice (some point Meal→
-        // Only, some Only→Meal, some chain further), so what matters is which
-        // products are linked at all, not who points to whom. Their combined
-        // need is checked together against whichever batch the group actually
-        // shares. No batch at all for that dish/date is an error. If sold more
-        // than was prepared, the shortfall is topped up automatically.
+        // ---------- Pass 2: Kitchen items always have enough stock ----------
+        // One rule, applied here per distinct group so a Meal+Silog sharing
+        // one Only only gets topped up once for their combined need, not
+        // once per row. See ensureKitchenStock for what the rule actually is.
         const kitchenGroups = new Map()
         for (const pr of parsedRows) {
           const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
           if (!isKitchen || pr.product.unlimited_stock) continue
-          // Only items actually part of a configured Meal/Only pairing need a
-          // Daily Meals entry to reconcile against — a standalone Kitchen item
-          // with no pairing (packaging, add-ons, sides) was never meant to be
-          // "prepared" in a tracked quantity the way a dish is.
-          const isPaired = Boolean(pr.product.pairs_with_product_id) || products.some((p) => p.pairs_with_product_id === pr.product.id)
-          if (!isPaired) continue
-          const groupIds = resolveStockGroupIds(pr.product)
-          const key = [...groupIds].sort().join(',')
+          const key = [...resolveStockGroupIds(pr.product)].sort().join(',')
           if (!kitchenGroups.has(key)) {
-            kitchenGroups.set(key, { groupIds, neededQty: 0, rowNums: [], names: new Set() })
+            kitchenGroups.set(key, { neededQty: 0, product: pr.product })
           }
-          const g = kitchenGroups.get(key)
-          g.neededQty += pr.qty
-          g.rowNums.push(pr.rowNum)
-          g.names.add(pr.product.name)
+          kitchenGroups.get(key).neededQty += pr.qty
         }
-
-        const blockedRowNums = new Set()
-
         for (const g of kitchenGroups.values()) {
-          const { data: dmBatches } = await supabase
-            .from('batches')
-            .select('id, product_id, unit_cost')
-            .in('product_id', g.groupIds)
-            .eq('source_type', 'KitchenProduction')
-            .eq('received_date', headerForm.sale_date)
-
-          if (!dmBatches || dmBatches.length === 0) {
-            for (const rn of g.rowNums) blockedRowNums.add(rn)
-            skipped.push({
-              rowNum: g.rowNums[0],
-              reason: `${[...g.names].join(' / ')}: no Daily Meals entry for ${headerForm.sale_date} — add it in Kitchen → Daily Meals first`,
-            })
-            continue
-          }
-
-          const { data: cacheRows } = await supabase
-            .from('batch_cache')
-            .select('remaining_quantity')
-            .in('batch_id', dmBatches.map((b) => b.id))
-          const remaining = (cacheRows ?? []).reduce((s, c) => s + Number(c.remaining_quantity), 0)
-
-          if (remaining < g.neededQty) {
-            const shortfall = g.neededQty - remaining
-            const topUpProductId = dmBatches[0].product_id
-            const topUpCost = Number(dmBatches[0].unit_cost ?? 0)
-
-            const { data: newBatch, error: batchErr } = await supabase
-              .from('batches')
-              .insert({
-                product_id: topUpProductId,
-                source_type: 'KitchenProduction',
-                received_quantity: shortfall,
-                unit_cost: topUpCost,
-                received_date: headerForm.sale_date,
-              })
-              .select()
-              .single()
-
-            if (!batchErr) {
-              await supabase.from('inventory_ledger').insert({
-                product_id: topUpProductId,
-                batch_id: newBatch.id,
-                transaction_type: 'KitchenProduction',
-                quantity_change: shortfall,
-                unit_cost_at_transaction: topUpCost,
-                source_module: 'Kitchen',
-                source_reference_id: newBatch.id,
-              })
-            }
-          }
+          await ensureKitchenStock(g.product, g.neededQty, headerForm.sale_date)
         }
 
         // ---------- Pass 3: normal per-row FIFO stock check ----------
@@ -484,8 +463,6 @@ export default function Sales() {
         const accumulator = [...pendingLines]
 
         for (const pr of parsedRows) {
-          if (blockedRowNums.has(pr.rowNum)) continue
-
           try {
             const stockGroupIds = resolveStockGroupIds(pr.product)
             const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
@@ -547,6 +524,7 @@ export default function Sales() {
 
     try {
       const reservationSource = [...pendingLines, ...importPreviewValid]
+      await ensureKitchenStock(updatedProduct, mismatch.qty, headerForm.sale_date)
       const stockGroupIds = resolveStockGroupIds(updatedProduct)
       const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, mismatch.qty, reservationSource)
       if (!satisfied && !updatedProduct.unlimited_stock) {
@@ -610,6 +588,7 @@ export default function Sales() {
   }
 
   async function proceedAddLine(product, qty, unitPrice) {
+    await ensureKitchenStock(product, qty, headerForm.sale_date)
     const stockGroupIds = resolveStockGroupIds(product)
     const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, qty)
 
