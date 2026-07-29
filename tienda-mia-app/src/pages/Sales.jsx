@@ -150,6 +150,17 @@ export default function Sales() {
     setLineWarning('')
   }
 
+  // For a Kitchen item that points to another via pairs_with_product_id (a
+  // Meal or Silog pointing to its Only), the real prepared stock lives under
+  // whatever it points to — that's where Daily Meals actually logs it. Stock
+  // lookups need to happen against that product, not the sold item's own id,
+  // even though the sale itself is still recorded against what was actually sold.
+  function resolveStockProductId(product) {
+    const isKitchen = product.business_unit === 'KITCHEN' || product.category === 'KITCHEN'
+    if (!isKitchen) return product.id
+    return product.pairs_with_product_id || product.id
+  }
+
   // Walks batch_cache in FIFO order for this product, accounting for quantity
   // already claimed by lines added earlier in this same not-yet-saved sale.
   async function computeFifoConsumption(productId, qtyNeeded, reservationSource = pendingLines) {
@@ -200,14 +211,16 @@ export default function Sales() {
     const lines = []
     const regularQty = totalQty - discountedQty
     const discountedUnitPrice = Math.round(Number(product.selling_price) * (1 - discountPct / 100) * 100) / 100
+    const stockProductId = resolveStockProductId(product)
 
     if (discountedQty > 0) {
-      const { consumption } = await computeFifoConsumption(product.id, discountedQty, reservationSource)
+      const { consumption } = await computeFifoConsumption(stockProductId, discountedQty, reservationSource)
       const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
       const lineTotal = discountedQty * discountedUnitPrice
       lines.push({
         tempId: crypto.randomUUID(),
         product_id: product.id,
+        stock_product_id: stockProductId,
         product_name: product.name,
         category: product.category,
         unit: product.unit,
@@ -223,12 +236,13 @@ export default function Sales() {
     }
 
     if (regularQty > 0) {
-      const { consumption } = await computeFifoConsumption(product.id, regularQty, [...reservationSource, ...lines])
+      const { consumption } = await computeFifoConsumption(stockProductId, regularQty, [...reservationSource, ...lines])
       const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
       const lineTotal = regularQty * Number(product.selling_price)
       lines.push({
         tempId: crypto.randomUUID(),
         product_id: product.id,
+        stock_product_id: stockProductId,
         product_name: product.name,
         category: product.category,
         unit: product.unit,
@@ -377,7 +391,13 @@ export default function Sales() {
         const kitchenGroups = new Map()
         for (const pr of parsedRows) {
           const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
-          if (!isKitchen) continue
+          if (!isKitchen || pr.product.unlimited_stock) continue
+          // Only items actually part of a configured Meal/Only pairing need a
+          // Daily Meals entry to reconcile against — a standalone Kitchen item
+          // with no pairing (packaging, add-ons, sides) was never meant to be
+          // "prepared" in a tracked quantity the way a dish is.
+          const isPaired = Boolean(pr.product.pairs_with_product_id) || products.some((p) => p.pairs_with_product_id === pr.product.id)
+          if (!isPaired) continue
           const rootId = groupRootId(pr.product)
           if (!kitchenGroups.has(rootId)) {
             kitchenGroups.set(rootId, { rootId, neededQty: 0, rowNums: [], names: new Set() })
@@ -460,7 +480,8 @@ export default function Sales() {
           if (blockedRowNums.has(pr.rowNum)) continue
 
           try {
-            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(pr.product.id, pr.qty, accumulator)
+            const stockProductId = resolveStockProductId(pr.product)
+            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockProductId, pr.qty, accumulator)
             if (!satisfied && !pr.product.unlimited_stock) {
               skipped.push({ rowNum: pr.rowNum, reason: `${pr.product.name}: only ${totalAvailable} ${pr.product.unit} available` })
               continue
@@ -473,6 +494,7 @@ export default function Sales() {
             const newLine = {
               tempId: crypto.randomUUID(),
               product_id: pr.product.id,
+              stock_product_id: stockProductId,
               product_name: pr.product.name,
               category: pr.product.category,
               unit: pr.product.unit,
@@ -519,7 +541,8 @@ export default function Sales() {
 
     try {
       const reservationSource = [...pendingLines, ...importPreviewValid]
-      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(updatedProduct.id, mismatch.qty, reservationSource)
+      const stockProductId = resolveStockProductId(updatedProduct)
+      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockProductId, mismatch.qty, reservationSource)
       if (!satisfied && !updatedProduct.unlimited_stock) {
         setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: `${updatedProduct.name}: only ${totalAvailable} ${updatedProduct.unit} available` }])
       } else {
@@ -532,6 +555,7 @@ export default function Sales() {
           {
             tempId: crypto.randomUUID(),
             product_id: updatedProduct.id,
+            stock_product_id: stockProductId,
             product_name: updatedProduct.name,
             category: updatedProduct.category,
             unit: updatedProduct.unit,
@@ -581,7 +605,8 @@ export default function Sales() {
   }
 
   async function proceedAddLine(product, qty, unitPrice) {
-    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(product.id, qty)
+    const stockProductId = resolveStockProductId(product)
+    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockProductId, qty)
 
     // Items flagged "never block for low stock" (e.g. Rice, where real
     // batch-level stock isn't tracked precisely) still consume whatever
@@ -607,6 +632,7 @@ export default function Sales() {
       {
         tempId: crypto.randomUUID(),
         product_id: product.id,
+        stock_product_id: stockProductId,
         product_name: product.name,
         category: product.category,
         unit: product.unit,
@@ -834,7 +860,7 @@ export default function Sales() {
       }
 
       const ledgerRows = line.consumption.map((c) => ({
-        product_id: line.product_id,
+        product_id: line.stock_product_id ?? line.product_id,
         batch_id: c.batch_id,
         transaction_type: 'Sale',
         quantity_change: -c.qty,
