@@ -94,6 +94,7 @@ export default function Kitchen() {
   const [products, setProducts] = useState([])
   const [recipes, setRecipes] = useState([])
   const [leftovers, setLeftovers] = useState([])
+  const [dailyMealsHistory, setDailyMealsHistory] = useState([])
   const [dailyMealsDate, setDailyMealsDate] = useState(today())
   const [dailyMealLines, setDailyMealLines] = useState([])
   const [dailyMealForm, setDailyMealForm] = useState({ product_id: '', quantity: '', unit_cost: '', expiration_date: '' })
@@ -171,6 +172,20 @@ export default function Kitchen() {
     ? leftovers.filter((w) => normalizeSearchText(w.product?.name).includes(q) || normalizeSearchText(w.remarks).includes(q))
     : leftovers
 
+  const searchedDailyMealsHistory = q
+    ? dailyMealsHistory.filter((b) => normalizeSearchText(b.product?.name).includes(q))
+    : dailyMealsHistory
+  const { sortKey: dmhSortKey, sortDir: dmhSortDir, toggleSort: toggleDmhSort } = useSort('received_date', 'desc')
+  function dmhSortAccessor(row, key) {
+    if (key === 'product') return row.product?.name
+    if (key === 'category') return row.product?.category
+    if (key === 'quantity') return Number(row.received_quantity ?? 0)
+    if (key === 'unit_cost') return Number(row.unit_cost ?? 0)
+    if (key === 'total_cost') return Number(row.received_quantity ?? 0) * Number(row.unit_cost ?? 0)
+    return row[key]
+  }
+  const sortedDailyMealsHistory = sortRows(searchedDailyMealsHistory, dmhSortKey, dmhSortDir, dmhSortAccessor)
+
   // Recipe builder panel
   const [recipePanelOpen, setRecipePanelOpen] = useState(false)
   const [editingRecipeId, setEditingRecipeId] = useState(null)
@@ -190,10 +205,30 @@ export default function Kitchen() {
   const [ingredientImportSkipped, setIngredientImportSkipped] = useState([])
   const [savingRecipe, setSavingRecipe] = useState(false)
 
+  async function loadDailyMealsHistory() {
+    const pageSize = 1000
+    let allRows = []
+    let from = 0
+    while (true) {
+      const { data, error } = await supabase
+        .from('batches')
+        .select('*, product:products(name, sku, unit, category)')
+        .eq('source_type', 'KitchenProduction')
+        .order('received_date', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, from + pageSize - 1)
+      if (error) return { data: null, error }
+      allRows = allRows.concat(data ?? [])
+      if (!data || data.length < pageSize) break
+      from += pageSize
+    }
+    return { data: allRows, error: null }
+  }
+
   async function loadAll() {
     setLoading(true)
     setErrorMsg('')
-    const [productsRes, recipesRes, leftoversRes] = await Promise.all([
+    const [productsRes, recipesRes, leftoversRes, dailyMealsHistoryRes] = await Promise.all([
       fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, selling_price, status, business_unit, category, product_type', 'name'),
       supabase
         .from('recipes')
@@ -201,13 +236,15 @@ export default function Kitchen() {
         .eq('status', 'active')
         .order('created_at', { ascending: false }),
       fetchAllRows('waste', '*, product:products(name, sku, unit, category)', 'waste_date', { ascending: false }),
+      loadDailyMealsHistory(),
     ])
 
-    if (productsRes.error || recipesRes.error || leftoversRes.error) {
+    if (productsRes.error || recipesRes.error || leftoversRes.error || dailyMealsHistoryRes.error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
       setLoading(false)
       return
     }
+    setDailyMealsHistory(dailyMealsHistoryRes.data ?? [])
     const allProducts = productsRes.data ?? []
     setProducts(allProducts.filter((p) => p.status === 'active'))
     setIngredientProducts(allProducts.filter((p) => p.product_type === 'RAW MATERIAL'))
@@ -1348,7 +1385,7 @@ export default function Kitchen() {
         </div>
       )}
 
-      {(tab === 'recipes' || tab === 'ingredients' || tab === 'leftovers') && (
+      {(tab === 'recipes' || tab === 'ingredients' || tab === 'leftovers' || tab === 'dailyMeals') && (
         <SearchBar
           value={search}
           onChange={setSearch}
@@ -1357,7 +1394,9 @@ export default function Kitchen() {
               ? 'Search recipes by finished product'
               : tab === 'ingredients'
                 ? 'Search ingredients by name or code'
-                : 'Search leftovers by product or notes'
+                : tab === 'leftovers'
+                  ? 'Search leftovers by product or notes'
+                  : 'Search daily meals history by product'
           }
         />
       )}
@@ -1705,6 +1744,46 @@ export default function Kitchen() {
             <Check size={15} />
             {dailyMealsSaving ? 'Saving…' : `Save ${dailyMealLines.length} meal${dailyMealLines.length === 1 ? '' : 's'} for ${dailyMealsDate}`}
           </button>
+
+          <div className="mt-6 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+            Daily Meals history
+          </div>
+          <p className="mb-2 mt-0.5 text-xs text-[var(--color-ink-soft)]">
+            Every batch ever added here — including ones the system topped up automatically when a sale exceeded
+            what was logged for that day.
+          </p>
+          <div className="max-h-96 overflow-auto rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <SortableTh label="Date" sortKey="received_date" activeKey={dmhSortKey} activeDir={dmhSortDir} onSort={toggleDmhSort} />
+                  <SortableTh label="Product" sortKey="product" activeKey={dmhSortKey} activeDir={dmhSortDir} onSort={toggleDmhSort} />
+                  <SortableTh label="Category" sortKey="category" activeKey={dmhSortKey} activeDir={dmhSortDir} onSort={toggleDmhSort} />
+                  <SortableTh label="Qty" sortKey="quantity" activeKey={dmhSortKey} activeDir={dmhSortDir} onSort={toggleDmhSort} />
+                  <SortableTh label="Unit cost" sortKey="unit_cost" activeKey={dmhSortKey} activeDir={dmhSortDir} onSort={toggleDmhSort} />
+                  <SortableTh label="Total cost" sortKey="total_cost" activeKey={dmhSortKey} activeDir={dmhSortDir} onSort={toggleDmhSort} />
+                </tr>
+              </thead>
+              <tbody>
+                {loading && (
+                  <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
+                )}
+                {!loading && sortedDailyMealsHistory.length === 0 && (
+                  <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No daily meals added yet.</td></tr>
+                )}
+                {sortedDailyMealsHistory.map((b) => (
+                  <tr key={b.id} className="border-b border-[var(--color-line)] last:border-0">
+                    <td className="px-4 py-3">{b.received_date}</td>
+                    <td className="px-4 py-3 font-medium">{b.product?.name}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{b.product?.category || '—'}</td>
+                    <td className="px-4 py-3">{b.received_quantity} {b.product?.unit}</td>
+                    <td className="px-4 py-3">{Number(b.unit_cost).toFixed(2)}</td>
+                    <td className="px-4 py-3 font-medium">{(Number(b.received_quantity) * Number(b.unit_cost)).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <div>
