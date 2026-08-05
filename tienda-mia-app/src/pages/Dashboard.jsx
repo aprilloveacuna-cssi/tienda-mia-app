@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
+import { downloadFile } from '../lib/csv'
 import StatusChip from '../components/StatusChip'
 import DisposeConfirm from '../components/DisposeConfirm'
 
@@ -62,6 +63,20 @@ export default function Dashboard() {
       .order('log_date', { ascending: false })
       .order('created_at', { ascending: false })
     setMealUnaccountedLog(log ?? [])
+  }
+
+  function exportExpiryAlertsCsv() {
+    const headers = ['Product', 'Unit', 'Batch', 'Remaining Qty', 'Expiration Date', 'Status']
+    const rows = expiryAlerts.map((row) => [
+      row.product?.name ?? '',
+      row.product?.unit ?? '',
+      row.batch?.batch_number ?? '',
+      row.remaining_quantity,
+      row.expiration_date,
+      daysUntil(row.expiration_date) < 0 ? 'expired' : expiryLabel(row.expiration_date),
+    ])
+    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile(`expiry-alerts_${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv;charset=utf-8;')
   }
 
   async function handleAddMealLogEntry(e) {
@@ -177,6 +192,14 @@ export default function Dashboard() {
         </Panel>
 
         <Panel title="Expiry alerts">
+          {expiryAlerts.length > 0 && (
+            <button
+              onClick={exportExpiryAlertsCsv}
+              className="mb-3 rounded-md border border-[var(--color-line)] px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-paper)]"
+            >
+              Export CSV
+            </button>
+          )}
           {expiryAlerts.length === 0 ? (
             <EmptyRow text="Nothing expired or expiring within 7 days — good shape." />
           ) : (
