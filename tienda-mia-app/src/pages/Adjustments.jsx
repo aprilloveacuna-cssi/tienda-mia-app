@@ -66,7 +66,11 @@ export default function Adjustments() {
   const countFileInputRef = useRef(null)
 
   async function loadInventoryCache() {
-    const { data } = await fetchAllRows('inventory_cache', 'product_id, current_stock')
+    const { data, error } = await fetchAllRows('inventory_cache', 'product_id, current_stock', null, { tiebreaker: 'product_id' })
+    if (error) {
+      setCountError('Could not load current stock levels — System Qty may show as 0 until this is fixed.')
+      return
+    }
     const map = {}
     for (const row of data ?? []) map[row.product_id] = Number(row.current_stock)
     setInventoryCacheMap(map)
