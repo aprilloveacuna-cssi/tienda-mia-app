@@ -231,9 +231,14 @@ export default function Inventory() {
                               >
                                 <div className="font-medium">{Number(b.remaining_quantity)} left</div>
                                 <div className="text-[var(--color-ink-soft)]">cost {Number(b.unit_cost).toFixed(2)}</div>
-                                <StatusChip tone={expiryTone(b.expiration_date)}>
-                                  {expiryLabel(b.expiration_date)}
-                                </StatusChip>
+                                <div className="mt-1 flex items-center gap-1.5">
+                                  <StatusChip tone={expiryTone(b.expiration_date)}>
+                                    {expiryLabel(b.expiration_date)}
+                                  </StatusChip>
+                                  {b.expiration_date && (
+                                    <span className="text-[var(--color-ink-soft)]">{b.expiration_date}</span>
+                                  )}
+                                </div>
                                 {b.expiration_date && (
                                   <button
                                     onClick={() => openDispose(b, r)}

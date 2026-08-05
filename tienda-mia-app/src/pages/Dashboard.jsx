@@ -193,6 +193,7 @@ export default function Dashboard() {
                     <StatusChip tone={daysUntil(row.expiration_date) < 0 ? 'critical' : 'attention'}>
                       {expiryLabel(row.expiration_date)}
                     </StatusChip>
+                    <span className="text-xs text-[var(--color-ink-soft)]">{row.expiration_date}</span>
                     <button
                       onClick={() => openDispose(row)}
                       className="rounded-md border border-[var(--color-rust)] px-2 py-1 text-xs font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
