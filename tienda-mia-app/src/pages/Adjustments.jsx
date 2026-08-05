@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Plus } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Plus, Upload, FileDown, Trash2, Check } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
@@ -9,9 +9,12 @@ import ProductPicker from '../components/ProductPicker'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { normalizeSearchText } from '../lib/search'
+import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
 export default function Adjustments() {
+  const [tab, setTab] = useState('adjustments') // 'adjustments' | 'physicalCount'
   const [adjustments, setAdjustments] = useState([])
+  const [inventoryCacheMap, setInventoryCacheMap] = useState({})
 
   const { sortKey: adjSortKey, sortDir: adjSortDir, toggleSort: toggleAdjSort } = useSort('adjustment_date', 'desc')
   function adjSortAccessor(row, key) {
@@ -52,6 +55,23 @@ export default function Adjustments() {
   const [remarks, setRemarks] = useState('')
   const [saving, setSaving] = useState(false)
 
+  // ---------- Physical Count ----------
+  const [countRows, setCountRows] = useState([])
+  const [countForm, setCountForm] = useState({ product_id: '', counted_qty: '' })
+  const [countReason, setCountReason] = useState('')
+  const [showOnlyMismatches, setShowOnlyMismatches] = useState(true)
+  const [countPosting, setCountPosting] = useState(false)
+  const [countError, setCountError] = useState('')
+  const [countImportSkipped, setCountImportSkipped] = useState([])
+  const countFileInputRef = useRef(null)
+
+  async function loadInventoryCache() {
+    const { data } = await fetchAllRows('inventory_cache', 'product_id, current_stock')
+    const map = {}
+    for (const row of data ?? []) map[row.product_id] = Number(row.current_stock)
+    setInventoryCacheMap(map)
+  }
+
   async function loadAdjustments() {
     setLoading(true)
     setErrorMsg('')
@@ -68,7 +88,7 @@ export default function Adjustments() {
   }
 
   async function loadProducts() {
-    const { data } = await fetchAllRows('products', 'id, sku, name, unit, barcode, status', 'name')
+    const { data } = await fetchAllRows('products', 'id, sku, name, unit, barcode, status, current_cost, category', 'name')
     setProducts((data ?? []).filter((p) => p.status === 'active'))
   }
 
@@ -86,6 +106,7 @@ export default function Adjustments() {
     loadAdjustments()
     loadProducts()
     loadAdjustmentTypes()
+    loadInventoryCache()
   }, [])
 
   function resetForm() {
@@ -182,6 +203,184 @@ export default function Adjustments() {
 
   const selectedProduct = products.find((p) => p.id === productId)
 
+  // ---------- Physical Count ----------
+  function addCountRow(e) {
+    e.preventDefault()
+    if (!countForm.product_id || countForm.counted_qty === '') return
+    const p = products.find((x) => x.id === countForm.product_id)
+    if (countRows.some((r) => r.product.id === p.id)) {
+      setCountError(`${p.name} is already in this list.`)
+      return
+    }
+    setCountRows([
+      ...countRows,
+      {
+        tempId: crypto.randomUUID(),
+        product: p,
+        systemQty: inventoryCacheMap[p.id] ?? 0,
+        countedQty: Number(countForm.counted_qty),
+        posted: false,
+      },
+    ])
+    setCountForm({ product_id: '', counted_qty: '' })
+    setCountError('')
+  }
+
+  function removeCountRow(tempId) {
+    setCountRows(countRows.filter((r) => r.tempId !== tempId))
+  }
+
+  function handleDownloadCountTemplate() {
+    const headers = ['Barcode', 'Counted Qty']
+    const example1 = ['4800123456789', '48']
+    const example2 = ['4800987654321', '0']
+    const csv = [headers, example1, example2]
+      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n')
+    downloadFile('physical-count-template.csv', csv, 'text/csv;charset=utf-8;')
+  }
+
+  function handleCountImportClick() {
+    countFileInputRef.current?.click()
+  }
+
+  function handleCountImportFileChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const rows = parseCsv(String(reader.result))
+        if (rows.length < 2) {
+          setCountError('That file has no data rows.')
+          return
+        }
+        const headerRow = rows[0].map((h) => h.trim())
+        const aliases = {
+          barcode: 'barcode', sku: 'sku',
+          countedqty: 'counted_qty', counted: 'counted_qty', qty: 'counted_qty', quantity: 'counted_qty', actualcount: 'counted_qty',
+        }
+        const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
+
+        const existingIds = new Set(countRows.map((r) => r.product.id))
+        const newRows = []
+        const skipped = []
+
+        rows.slice(1).forEach((r, idx) => {
+          const rowNum = idx + 2
+          if (r.length !== headerRow.length) {
+            skipped.push({ rowNum, reason: `Row has ${r.length} columns, expected ${headerRow.length} — likely a stray quote or comma` })
+            return
+          }
+          const obj = {}
+          canonicalKeys.forEach((key, i) => {
+            if (key) obj[key] = (r[i] ?? '').trim()
+          })
+
+          const product = obj.barcode
+            ? products.find((p) => normalizeSearchText(p.barcode) === normalizeSearchText(obj.barcode))
+            : obj.sku
+              ? products.find((p) => normalizeSearchText(p.sku) === normalizeSearchText(obj.sku))
+              : null
+
+          if (!product) {
+            skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+            return
+          }
+          if (existingIds.has(product.id)) {
+            skipped.push({ rowNum, reason: `${product.name} is already in this list` })
+            return
+          }
+          if (obj.counted_qty === '' || isNaN(Number(obj.counted_qty))) {
+            skipped.push({ rowNum, reason: 'Missing or invalid counted quantity' })
+            return
+          }
+
+          existingIds.add(product.id)
+          newRows.push({
+            tempId: crypto.randomUUID(),
+            product,
+            systemQty: inventoryCacheMap[product.id] ?? 0,
+            countedQty: Number(obj.counted_qty),
+            posted: false,
+          })
+        })
+
+        setCountRows([...countRows, ...newRows])
+        setCountImportSkipped(skipped)
+        setCountError('')
+      } catch {
+        setCountError('Could not read that file — make sure it is a CSV, not an .xlsx.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  async function postCountRow(row) {
+    if (!countReason.trim()) {
+      setCountError('Add a reason before posting — it applies to every adjustment this creates.')
+      return
+    }
+    const { error } = await supabase.from('adjustments').insert({
+      product_id: row.product.id,
+      batch_id: null,
+      adjustment_type: 'Count Correction',
+      reason: countReason.trim(),
+      old_value: row.systemQty,
+      new_value: row.countedQty,
+    })
+    if (error) {
+      setCountError(`${row.product.name}: ${error.message}`)
+      return
+    }
+    setCountRows(countRows.map((r) => (r.tempId === row.tempId ? { ...r, posted: true } : r)))
+  }
+
+  async function postAllCountVariances() {
+    if (!countReason.trim()) {
+      setCountError('Add a reason before posting — it applies to every adjustment this creates.')
+      return
+    }
+    setCountPosting(true)
+    setCountError('')
+    const toPost = countRows.filter((r) => !r.posted && r.countedQty !== r.systemQty)
+    const failed = []
+
+    for (const row of toPost) {
+      const { error } = await supabase.from('adjustments').insert({
+        product_id: row.product.id,
+        batch_id: null,
+        adjustment_type: 'Count Correction',
+        reason: countReason.trim(),
+        old_value: row.systemQty,
+        new_value: row.countedQty,
+      })
+      if (error) failed.push(row.product.name)
+    }
+
+    setCountRows(countRows.map((r) => (toPost.some((t) => t.tempId === r.tempId) && !failed.includes(r.product.name) ? { ...r, posted: true } : r)))
+    setCountPosting(false)
+    if (failed.length > 0) setCountError(`Posted the rest, but failed for: ${failed.join(', ')}`)
+    loadAdjustments()
+    loadInventoryCache()
+  }
+
+  const { sortKey: countSortKey, sortDir: countSortDir, toggleSort: toggleCountSort } = useSort('variance', 'desc')
+  function countSortAccessor(row, key) {
+    if (key === 'product') return row.product.name
+    if (key === 'category') return row.product.category
+    if (key === 'systemQty') return row.systemQty
+    if (key === 'countedQty') return row.countedQty
+    if (key === 'variance') return Math.abs(row.countedQty - row.systemQty)
+    if (key === 'valueImpact') return (row.countedQty - row.systemQty) * Number(row.product.current_cost ?? 0)
+    return row[key]
+  }
+  const visibleCountRows = showOnlyMismatches ? countRows.filter((r) => r.countedQty !== r.systemQty) : countRows
+  const sortedCountRows = sortRows(visibleCountRows, countSortKey, countSortDir, countSortAccessor)
+  const pendingVarianceCount = countRows.filter((r) => !r.posted && r.countedQty !== r.systemQty).length
+
   return (
     <div>
       <div className="mb-5 flex items-center justify-between">
@@ -191,21 +390,42 @@ export default function Adjustments() {
             Corrects a miscount without touching history — every adjustment writes its own ledger entry, nothing gets edited or deleted.
           </p>
         </div>
-        <button
-          onClick={openNew}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
-        >
-          <Plus size={16} />
-          New adjustment
-        </button>
+        {tab === 'adjustments' && (
+          <button
+            onClick={openNew}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+          >
+            <Plus size={16} />
+            New adjustment
+          </button>
+        )}
       </div>
 
-      {errorMsg && !panelOpen && (
+      <div className="mb-4 flex gap-1 border-b border-[var(--color-line)]">
+        {[
+          ['adjustments', 'Adjustments'],
+          ['physicalCount', 'Physical Count'],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={`px-3 py-2 text-sm font-medium ${
+              tab === key ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {errorMsg && !panelOpen && tab === 'adjustments' && (
         <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
           {errorMsg}
         </div>
       )}
 
+      {tab === 'adjustments' && (
+        <>
       <SearchBar value={search} onChange={setSearch} placeholder="Search by adjustment #, product, or reason" />
 
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
@@ -253,6 +473,174 @@ export default function Adjustments() {
           </tbody>
         </table>
       </div>
+        </>
+      )}
+
+      {tab === 'physicalCount' && (
+        <div>
+          <p className="mb-4 text-sm text-[var(--color-ink-soft)]">
+            Enter or import what was actually counted, and this compares it against what the system currently shows —
+            posting a row (or all of them) creates real adjustments, same as the form on the other tab, just for many
+            products at once.
+          </p>
+
+          {countError && (
+            <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+              {countError}
+            </div>
+          )}
+
+          <div className="mb-5 rounded-md border border-dashed border-[var(--color-line)] p-4">
+            <form onSubmit={addCountRow} className="mb-3 grid grid-cols-4 gap-3">
+              <div className="col-span-2">
+                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Product</span>
+                <ProductPicker products={products} value={countForm.product_id} onChange={(id) => setCountForm({ ...countForm, product_id: id })} />
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Counted qty</span>
+                <input
+                  type="number" step="0.001" min="0" required
+                  value={countForm.counted_qty}
+                  onChange={(e) => setCountForm({ ...countForm, counted_qty: e.target.value })}
+                  className="input"
+                />
+              </label>
+              <button type="submit" className="flex items-end justify-center gap-1.5 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white">
+                <Plus size={15} />
+                Add
+              </button>
+            </form>
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleDownloadCountTemplate}
+                className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+              >
+                <FileDown size={16} />
+                Template
+              </button>
+              <button
+                onClick={handleCountImportClick}
+                className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)]"
+              >
+                <Upload size={16} />
+                Import CSV
+              </button>
+              <input ref={countFileInputRef} type="file" accept=".csv" onChange={handleCountImportFileChange} className="hidden" />
+            </div>
+          </div>
+
+          {countImportSkipped.length > 0 && (
+            <div className="mb-4">
+              <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+                {countImportSkipped.length} row{countImportSkipped.length === 1 ? '' : 's'} skipped from last import
+              </div>
+              <div className="max-h-32 space-y-1 overflow-y-auto">
+                {countImportSkipped.map((s, i) => (
+                  <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                    Row {s.rowNum}: {s.reason}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {countRows.length > 0 && (
+            <>
+              <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+                <label className="flex-1 block">
+                  <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">
+                    Reason (applies to every adjustment posted below)
+                  </span>
+                  <input
+                    value={countReason}
+                    onChange={(e) => setCountReason(e.target.value)}
+                    placeholder="e.g. End of July 2026 physical count"
+                    className="input"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5 whitespace-nowrap pb-2 text-xs">
+                  <input type="checkbox" checked={showOnlyMismatches} onChange={(e) => setShowOnlyMismatches(e.target.checked)} />
+                  Show only mismatches
+                </label>
+                <button
+                  onClick={postAllCountVariances}
+                  disabled={countPosting || pendingVarianceCount === 0}
+                  className="whitespace-nowrap rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white disabled:opacity-60"
+                >
+                  {countPosting ? 'Posting…' : `Post all ${pendingVarianceCount} variance${pendingVarianceCount === 1 ? '' : 's'}`}
+                </button>
+              </div>
+
+              <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                    <tr>
+                      <SortableTh label="Product" sortKey="product" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="System Qty" sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Variance" sortKey="variance" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Value Impact" sortKey="valueImpact" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <th className="px-4 py-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedCountRows.length === 0 && (
+                      <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                        {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing added yet.'}
+                      </td></tr>
+                    )}
+                    {sortedCountRows.map((row) => {
+                      const variance = row.countedQty - row.systemQty
+                      const valueImpact = variance * Number(row.product.current_cost ?? 0)
+                      return (
+                        <tr key={row.tempId} className="border-b border-[var(--color-line)] last:border-0">
+                          <td className="px-4 py-3 font-medium">{row.product.name}</td>
+                          <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product.category || '—'}</td>
+                          <td className="px-4 py-3">{row.systemQty} {row.product.unit}</td>
+                          <td className="px-4 py-3">{row.countedQty} {row.product.unit}</td>
+                          <td className="px-4 py-3">
+                            {variance === 0 ? (
+                              <StatusChip tone="ok">matches</StatusChip>
+                            ) : (
+                              <StatusChip tone={variance < 0 ? 'critical' : 'attention'}>
+                                {variance > 0 ? '+' : ''}{variance} {row.product.unit}
+                              </StatusChip>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">{valueImpact.toFixed(2)}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex gap-1">
+                              {row.posted ? (
+                                <span className="flex items-center gap-1 text-xs text-[var(--color-herb)]"><Check size={13} /> posted</span>
+                              ) : variance !== 0 ? (
+                                <button
+                                  onClick={() => postCountRow(row)}
+                                  className="rounded-md border border-[var(--color-ink)] px-2 py-1 text-xs font-medium"
+                                >
+                                  Post
+                                </button>
+                              ) : null}
+                              <button
+                                onClick={() => removeCountRow(row.tempId)}
+                                aria-label="Remove"
+                                className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <SlidePanel open={panelOpen} title="New adjustment" onClose={() => setPanelOpen(false)}>
         {errorMsg && (
