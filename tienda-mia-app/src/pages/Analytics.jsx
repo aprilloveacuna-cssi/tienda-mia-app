@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
+import SortableTh from '../components/SortableTh'
+import TypeCategoryFilter from '../components/TypeCategoryFilter'
+import { productTypeGroup } from '../lib/productType'
+import { useSort, sortRows } from '../lib/sort'
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
@@ -31,6 +35,8 @@ export default function Analytics() {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [analytics, setAnalytics] = useState(null)
+  const [selectedTypes, setSelectedTypes] = useState([])
+  const [selectedCategories, setSelectedCategories] = useState([])
 
   useEffect(() => {
     async function load() {
@@ -41,7 +47,7 @@ export default function Analytics() {
           supabase.from('settings').select('key, value'),
           fetchAllRows(
             'products',
-            'id, sku, name, category, unit, current_cost, selling_price, reorder_point, status, inventory_cache(current_stock, inventory_value)'
+            'id, sku, name, category, business_unit, product_type, unit, current_cost, selling_price, reorder_point, status, inventory_cache(current_stock, inventory_value)'
           ),
           fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date)'),
         ])
@@ -96,14 +102,21 @@ export default function Analytics() {
 
           const daysOfStockRemaining = avgDailyDemand > 0 ? currentStock / avgDailyDemand : null
 
+          const revenue = sold?.revenue ?? 0
+          const fifoCost = sold?.cost ?? 0
+          const grossProfit = revenue - fifoCost
+          const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : null
+
           return {
             ...p,
             currentStock,
             inventoryValue,
             hasSales,
             qtySold: sold?.qty ?? 0,
-            revenue: sold?.revenue ?? 0,
-            fifoCost: sold?.cost ?? 0,
+            revenue,
+            fifoCost,
+            grossProfit,
+            marginPct,
             avgDailyDemand,
             weeklyDemand,
             monthlyDemand,
@@ -164,6 +177,12 @@ export default function Analytics() {
 
   const { products, windowDays, leadTimeDays, purchasingDay, nextPurchasingDate, productsWithSales, totalProducts } = analytics
 
+  const filteredProducts = products.filter(
+    (p) =>
+      (selectedTypes.length === 0 || selectedTypes.includes(productTypeGroup(p))) &&
+      (selectedCategories.length === 0 || selectedCategories.includes(p.category || '(none)'))
+  )
+
   return (
     <div>
       <div className="mb-2">
@@ -181,7 +200,15 @@ export default function Analytics() {
         </div>
       )}
 
-      <div className="mb-4 mt-4 flex flex-wrap gap-1 border-b border-[var(--color-line)]">
+      <TypeCategoryFilter
+        products={products}
+        selectedTypes={selectedTypes}
+        setSelectedTypes={setSelectedTypes}
+        selectedCategories={selectedCategories}
+        setSelectedCategories={setSelectedCategories}
+      />
+
+      <div className="mb-4 flex flex-wrap gap-1 border-b border-[var(--color-line)]">
         {[
           ['velocity', 'Velocity & ABC'],
           ['inventory', 'Inventory Health'],
@@ -201,33 +228,40 @@ export default function Analytics() {
         ))}
       </div>
 
-      {tab === 'velocity' && <VelocityTab products={products} />}
-      {tab === 'inventory' && <InventoryHealthTab products={products} />}
-      {tab === 'eoq' && <EoqTab products={products} leadTimeDays={leadTimeDays} />}
+      {tab === 'velocity' && <VelocityTab products={filteredProducts} />}
+      {tab === 'inventory' && <InventoryHealthTab products={filteredProducts} />}
+      {tab === 'eoq' && <EoqTab products={filteredProducts} leadTimeDays={leadTimeDays} />}
       {tab === 'purchasing' && (
-        <PurchasingTab products={products} purchasingDay={purchasingDay} nextPurchasingDate={nextPurchasingDate} leadTimeDays={leadTimeDays} />
+        <PurchasingTab products={filteredProducts} purchasingDay={purchasingDay} nextPurchasingDate={nextPurchasingDate} leadTimeDays={leadTimeDays} />
       )}
-      {tab === 'forecast' && <ForecastTab products={products} />}
+      {tab === 'forecast' && <ForecastTab products={filteredProducts} />}
     </div>
   )
 }
 
-function Table({ columns, rows, emptyText }) {
+function Table({ columns, rows, emptyText, defaultSortKey, defaultSortDir = 'desc' }) {
+  const { sortKey, sortDir, toggleSort } = useSort(defaultSortKey ?? columns[0]?.key ?? null, defaultSortDir)
+  function accessor(row, key) {
+    const col = columns.find((c) => c.key === key)
+    return col?.sortValue ? col.sortValue(row) : col?.render(row)
+  }
+  const sortedRows = sortKey ? sortRows(rows, sortKey, sortDir, accessor) : rows
+
   return (
     <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
       <table className="w-full text-left text-sm">
         <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
           <tr>
             {columns.map((c) => (
-              <th key={c.key} className="px-4 py-3">{c.label}</th>
+              <SortableTh key={c.key} label={c.label} sortKey={c.key} activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
             ))}
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 && (
+          {sortedRows.length === 0 && (
             <tr><td colSpan={columns.length} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">{emptyText}</td></tr>
           )}
-          {rows.map((row, i) => (
+          {sortedRows.map((row, i) => (
             <tr key={row.id ?? i} className="border-b border-[var(--color-line)] last:border-0">
               {columns.map((c) => (
                 <td key={c.key} className="px-4 py-3">{c.render(row)}</td>
@@ -241,22 +275,35 @@ function Table({ columns, rows, emptyText }) {
 }
 
 function VelocityTab({ products }) {
-  const withSales = products.filter((p) => p.hasSales).sort((a, b) => b.qtySold - a.qtySold)
+  const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
-    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
-    { key: 'abc', label: 'ABC class', render: (p) => <StatusChip tone={p.abcClass === 'A' ? 'ok' : p.abcClass === 'B' ? 'attention' : 'neutral'}>{p.abcClass}</StatusChip> },
-    { key: 'qty', label: 'Qty sold', render: (p) => `${p.qtySold} ${p.unit}` },
-    { key: 'revenue', label: 'Revenue', render: (p) => p.revenue.toFixed(2) },
-    { key: 'daily', label: 'Avg / day', render: (p) => p.avgDailyDemand.toFixed(2) },
-    { key: 'movement', label: 'Movement', render: (p) => <StatusChip tone={p.movement === 'Fast Moving' ? 'ok' : 'neutral'}>{p.movement}</StatusChip> },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—', sortValue: (p) => p.category || '' },
+    {
+      key: 'abc',
+      label: 'ABC class',
+      render: (p) => <StatusChip tone={p.abcClass === 'A' ? 'ok' : p.abcClass === 'B' ? 'attention' : 'neutral'}>{p.abcClass}</StatusChip>,
+      sortValue: (p) => p.abcClass ?? 'Z',
+    },
+    { key: 'qty', label: 'Qty sold', render: (p) => `${p.qtySold} ${p.unit}`, sortValue: (p) => p.qtySold },
+    { key: 'revenue', label: 'Revenue', render: (p) => p.revenue.toFixed(2), sortValue: (p) => p.revenue },
+    { key: 'profit', label: 'Gross profit', render: (p) => p.grossProfit.toFixed(2), sortValue: (p) => p.grossProfit },
+    { key: 'margin', label: 'Margin %', render: (p) => (p.marginPct !== null ? `${p.marginPct.toFixed(1)}%` : '—'), sortValue: (p) => p.marginPct ?? -Infinity },
+    { key: 'daily', label: 'Avg / day', render: (p) => p.avgDailyDemand.toFixed(2), sortValue: (p) => p.avgDailyDemand },
+    {
+      key: 'movement',
+      label: 'Movement',
+      render: (p) => <StatusChip tone={p.movement === 'Fast Moving' ? 'ok' : 'neutral'}>{p.movement}</StatusChip>,
+      sortValue: (p) => p.movement,
+    },
   ]
   return (
     <div>
       <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
         Class A = top 80% of revenue, B = next 15%, C = the long tail — the classic Pareto cut, computed from products with any sales in the window.
+        Click any column to sort — Revenue or Qty sold for best-sellers, Gross profit or Margin % (ascending) for the least profitable.
       </p>
-      <Table columns={columns} rows={withSales} emptyText="No sales yet to rank." />
+      <Table columns={columns} rows={withSales} emptyText="No sales yet to rank." defaultSortKey="revenue" />
     </div>
   )
 }
@@ -265,9 +312,9 @@ function InventoryHealthTab({ products }) {
   const deadStock = products.filter((p) => !p.hasSales && p.currentStock > 0)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
-    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
-    { key: 'stock', label: 'Stock', render: (p) => `${p.currentStock} ${p.unit}` },
-    { key: 'value', label: 'Capital tied up', render: (p) => p.inventoryValue.toFixed(2) },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—', sortValue: (p) => p.category || '' },
+    { key: 'stock', label: 'Stock', render: (p) => `${p.currentStock} ${p.unit}`, sortValue: (p) => p.currentStock },
+    { key: 'value', label: 'Capital tied up', render: (p) => p.inventoryValue.toFixed(2), sortValue: (p) => p.inventoryValue },
   ]
   return (
     <div>
@@ -283,12 +330,17 @@ function EoqTab({ products, leadTimeDays }) {
   const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
-    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
-    { key: 'weekly', label: 'Weekly demand', render: (p) => p.weeklyDemand.toFixed(1) },
-    { key: 'safety', label: 'Safety stock', render: (p) => p.safetyStock.toFixed(1) },
-    { key: 'reorder', label: 'Reorder point', render: (p) => p.reorderPoint.toFixed(1) },
-    { key: 'eoq', label: 'EOQ', render: (p) => (p.eoq ? p.eoq.toFixed(0) : '—') },
-    { key: 'coverage', label: 'Stock coverage', render: (p) => (p.daysOfStockRemaining !== null ? `${p.daysOfStockRemaining.toFixed(0)}d` : '—') },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—', sortValue: (p) => p.category || '' },
+    { key: 'weekly', label: 'Weekly demand', render: (p) => p.weeklyDemand.toFixed(1), sortValue: (p) => p.weeklyDemand },
+    { key: 'safety', label: 'Safety stock', render: (p) => p.safetyStock.toFixed(1), sortValue: (p) => p.safetyStock },
+    { key: 'reorder', label: 'Reorder point', render: (p) => p.reorderPoint.toFixed(1), sortValue: (p) => p.reorderPoint },
+    { key: 'eoq', label: 'EOQ', render: (p) => (p.eoq ? p.eoq.toFixed(0) : '—'), sortValue: (p) => p.eoq ?? -Infinity },
+    {
+      key: 'coverage',
+      label: 'Stock coverage',
+      render: (p) => (p.daysOfStockRemaining !== null ? `${p.daysOfStockRemaining.toFixed(0)}d` : '—'),
+      sortValue: (p) => p.daysOfStockRemaining ?? Infinity,
+    },
   ]
   return (
     <div>
@@ -367,9 +419,9 @@ function ForecastTab({ products }) {
   const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
-    { key: 'category', label: 'Category', render: (p) => p.category || '—' },
-    { key: 'nextWeek', label: 'Next week (est.)', render: (p) => `${p.weeklyDemand.toFixed(1)} ${p.unit}` },
-    { key: 'nextMonth', label: 'Next month (est.)', render: (p) => `${p.monthlyDemand.toFixed(1)} ${p.unit}` },
+    { key: 'category', label: 'Category', render: (p) => p.category || '—', sortValue: (p) => p.category || '' },
+    { key: 'nextWeek', label: 'Next week (est.)', render: (p) => `${p.weeklyDemand.toFixed(1)} ${p.unit}`, sortValue: (p) => p.weeklyDemand },
+    { key: 'nextMonth', label: 'Next month (est.)', render: (p) => `${p.monthlyDemand.toFixed(1)} ${p.unit}`, sortValue: (p) => p.monthlyDemand },
     {
       key: 'stockout',
       label: 'Estimated stockout',
@@ -378,6 +430,7 @@ function ForecastTab({ products }) {
         const d = new Date(Date.now() + p.daysOfStockRemaining * 86400000)
         return fmtDate(d)
       },
+      sortValue: (p) => p.daysOfStockRemaining ?? Infinity,
     },
   ]
   return (

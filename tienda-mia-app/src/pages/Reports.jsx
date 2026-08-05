@@ -3,6 +3,8 @@ import { Printer, Download } from 'lucide-react'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
+import TypeCategoryFilter from '../components/TypeCategoryFilter'
+import { productTypeGroup } from '../lib/productType'
 import { useSort, sortRows } from '../lib/sort'
 
 function daysUntil(dateStr) {
@@ -579,6 +581,8 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [matrix, setMatrix] = useState(null) // { days, terminals, productRows }
+  const [selectedTypes, setSelectedTypes] = useState([])
+  const [selectedCategories, setSelectedCategories] = useState([])
 
   useEffect(() => {
     let cancelled = false
@@ -591,7 +595,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         const [productsRes, saleLinesRes, wasteRes] = await Promise.all([
           fetchAllRows(
             'products',
-            'id, sku, name, unit, current_cost, selling_price, reorder_point, status, category, inventory_cache(current_stock)',
+            'id, sku, name, unit, current_cost, selling_price, reorder_point, status, category, business_unit, product_type, inventory_cache(current_stock)',
             'name'
           ),
           fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)'),
@@ -681,9 +685,18 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     return () => { cancelled = true }
   }, [dateFrom, dateTo])
 
+  const filteredProductRows = matrix
+    ? matrix.productRows.filter(
+        (pr) =>
+          (selectedTypes.length === 0 || selectedTypes.includes(productTypeGroup(pr.product))) &&
+          (selectedCategories.length === 0 || selectedCategories.includes(pr.product.category || '(none)'))
+      )
+    : []
+
   function exportMatrixCsv() {
     if (!matrix) return
-    const { days, terminals, productRows } = matrix
+    const { days, terminals } = matrix
+    const productRows = filteredProductRows
     const dayHeader1 = ['', '', '', '', ''].concat(
       days.flatMap((d) => [d, ''])
     ).concat(['', '', '', '', '', '', '', ''])
@@ -759,6 +772,16 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       {loading && <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">Building the matrix…</div>}
 
       {!loading && matrix && (
+        <TypeCategoryFilter
+          products={matrix.productRows.map((pr) => pr.product)}
+          selectedTypes={selectedTypes}
+          setSelectedTypes={setSelectedTypes}
+          selectedCategories={selectedCategories}
+          setSelectedCategories={setSelectedCategories}
+        />
+      )}
+
+      {!loading && matrix && (
         <div id="printable-report">
           <div className="mb-3">
             <div className="font-display text-lg font-semibold">Daily Sales Matrix</div>
@@ -799,10 +822,10 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                 </tr>
               </thead>
               <tbody>
-                {matrix.productRows.length === 0 && (
-                  <tr><td colSpan={5 + matrix.days.length * 2 + 9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No active products.</td></tr>
+                {filteredProductRows.length === 0 && (
+                  <tr><td colSpan={5 + matrix.days.length * 2 + 9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No products match this filter.</td></tr>
                 )}
-                {matrix.productRows.map((pr) => (
+                {filteredProductRows.map((pr) => (
                   <tr key={pr.product.id} className="border-b border-[var(--color-line)] last:border-0">
                     <td className="font-mono px-2 py-1.5">{pr.product.sku}</td>
                     <td className="px-2 py-1.5">{pr.product.name}</td>
