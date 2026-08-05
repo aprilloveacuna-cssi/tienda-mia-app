@@ -24,6 +24,8 @@ export default function Dashboard() {
   const [hasAnyStock, setHasAnyStock] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [disposeBatch, setDisposeBatch] = useState(null)
+  const [editingExpiryBatchId, setEditingExpiryBatchId] = useState(null)
+  const [expiryDraft, setExpiryDraft] = useState('')
 
   const [mealProduct, setMealProduct] = useState(null)
   const [mealTotalSold, setMealTotalSold] = useState(0)
@@ -146,6 +148,28 @@ export default function Dashboard() {
     })
   }
 
+  function startEditExpiry(row) {
+    setEditingExpiryBatchId(row.batch_id)
+    setExpiryDraft(row.expiration_date ?? '')
+  }
+
+  function cancelEditExpiry() {
+    setEditingExpiryBatchId(null)
+    setExpiryDraft('')
+  }
+
+  async function saveExpiryEdit(row) {
+    const { error } = await supabase
+      .from('batches')
+      .update({ expiration_date: expiryDraft || null })
+      .eq('id', row.batch_id)
+    if (!error) {
+      await loadExpiryAlerts()
+      setEditingExpiryBatchId(null)
+      setExpiryDraft('')
+    }
+  }
+
   return (
     <div>
       <h1 className="font-display text-2xl font-semibold">Dashboard</h1>
@@ -212,18 +236,47 @@ export default function Dashboard() {
                       {row.remaining_quantity} {row.product?.unit} · {row.batch?.batch_number}
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <StatusChip tone={daysUntil(row.expiration_date) < 0 ? 'critical' : 'attention'}>
-                      {expiryLabel(row.expiration_date)}
-                    </StatusChip>
-                    <span className="text-xs text-[var(--color-ink-soft)]">{row.expiration_date}</span>
-                    <button
-                      onClick={() => openDispose(row)}
-                      className="rounded-md border border-[var(--color-rust)] px-2 py-1 text-xs font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
-                    >
-                      Dispose
-                    </button>
-                  </div>
+                  {editingExpiryBatchId === row.batch_id ? (
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <input
+                        type="date"
+                        value={expiryDraft}
+                        onChange={(e) => setExpiryDraft(e.target.value)}
+                        className="input py-1 text-xs"
+                      />
+                      <button
+                        onClick={() => saveExpiryEdit(row)}
+                        className="rounded-md bg-[var(--color-ink)] px-2 py-1 text-xs font-medium text-white"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={cancelEditExpiry}
+                        className="rounded-md border border-[var(--color-line)] px-2 py-1 text-xs font-medium"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <StatusChip tone={daysUntil(row.expiration_date) < 0 ? 'critical' : 'attention'}>
+                        {expiryLabel(row.expiration_date)}
+                      </StatusChip>
+                      <span className="text-xs text-[var(--color-ink-soft)]">{row.expiration_date}</span>
+                      <button
+                        onClick={() => startEditExpiry(row)}
+                        className="rounded-md border border-[var(--color-line)] px-2 py-1 text-xs font-medium text-[var(--color-ink-soft)] hover:bg-[var(--color-paper)]"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => openDispose(row)}
+                        className="rounded-md border border-[var(--color-rust)] px-2 py-1 text-xs font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
+                      >
+                        Dispose
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

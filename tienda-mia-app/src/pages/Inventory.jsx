@@ -43,6 +43,8 @@ export default function Inventory() {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [disposeBatch, setDisposeBatch] = useState(null)
+  const [editingExpiryBatchId, setEditingExpiryBatchId] = useState(null)
+  const [expiryDraft, setExpiryDraft] = useState('')
 
   const { sortKey, sortDir, toggleSort } = useSort('name')
   function sortAccessor(row, key) {
@@ -121,6 +123,30 @@ export default function Inventory() {
       unit_cost: Number(batch.unit_cost),
       expiration_date: batch.expiration_date,
     })
+  }
+
+  function startEditExpiry(batch) {
+    setEditingExpiryBatchId(batch.batch_id)
+    setExpiryDraft(batch.expiration_date ?? '')
+  }
+
+  function cancelEditExpiry() {
+    setEditingExpiryBatchId(null)
+    setExpiryDraft('')
+  }
+
+  async function saveExpiryEdit(batch, productId) {
+    const { error } = await supabase
+      .from('batches')
+      .update({ expiration_date: expiryDraft || null })
+      .eq('id', batch.batch_id)
+    if (!error) {
+      await fetchBatches(productId)
+      setEditingExpiryBatchId(null)
+      setExpiryDraft('')
+    } else {
+      setErrorMsg(error.message)
+    }
   }
 
   async function handleDisposed(productId) {
@@ -231,21 +257,57 @@ export default function Inventory() {
                               >
                                 <div className="font-medium">{Number(b.remaining_quantity)} left</div>
                                 <div className="text-[var(--color-ink-soft)]">cost {Number(b.unit_cost).toFixed(2)}</div>
-                                <div className="mt-1 flex items-center gap-1.5">
-                                  <StatusChip tone={expiryTone(b.expiration_date)}>
-                                    {expiryLabel(b.expiration_date)}
-                                  </StatusChip>
-                                  {b.expiration_date && (
-                                    <span className="text-[var(--color-ink-soft)]">{b.expiration_date}</span>
-                                  )}
-                                </div>
-                                {b.expiration_date && (
-                                  <button
-                                    onClick={() => openDispose(b, r)}
-                                    className="mt-1.5 block w-full rounded-md border border-[var(--color-rust)] px-1.5 py-1 text-center text-[10px] font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
-                                  >
-                                    Dispose
-                                  </button>
+
+                                {editingExpiryBatchId === b.batch_id ? (
+                                  <div className="mt-1.5 space-y-1.5">
+                                    <input
+                                      type="date"
+                                      value={expiryDraft}
+                                      onChange={(e) => setExpiryDraft(e.target.value)}
+                                      className="input w-full py-1 text-xs"
+                                    />
+                                    <div className="flex gap-1">
+                                      <button
+                                        onClick={() => saveExpiryEdit(b, r.product_id)}
+                                        className="flex-1 rounded-md bg-[var(--color-ink)] py-1 text-center text-[10px] font-medium text-white"
+                                      >
+                                        Save
+                                      </button>
+                                      <button
+                                        onClick={cancelEditExpiry}
+                                        className="flex-1 rounded-md border border-[var(--color-line)] py-1 text-center text-[10px] font-medium"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="mt-1 flex items-center gap-1.5">
+                                      <StatusChip tone={expiryTone(b.expiration_date)}>
+                                        {expiryLabel(b.expiration_date)}
+                                      </StatusChip>
+                                      {b.expiration_date && (
+                                        <span className="text-[var(--color-ink-soft)]">{b.expiration_date}</span>
+                                      )}
+                                    </div>
+                                    <div className="mt-1.5 flex gap-1">
+                                      <button
+                                        onClick={() => startEditExpiry(b)}
+                                        className="flex-1 rounded-md border border-[var(--color-line)] py-1 text-center text-[10px] font-medium text-[var(--color-ink-soft)] hover:bg-[var(--color-paper)]"
+                                      >
+                                        Edit date
+                                      </button>
+                                      {b.expiration_date && (
+                                        <button
+                                          onClick={() => openDispose(b, r)}
+                                          className="flex-1 rounded-md border border-[var(--color-rust)] py-1 text-center text-[10px] font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
+                                        >
+                                          Dispose
+                                        </button>
+                                      )}
+                                    </div>
+                                  </>
                                 )}
                               </div>
                             ))}
