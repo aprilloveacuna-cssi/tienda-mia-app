@@ -136,17 +136,19 @@ export default function Inventory() {
   }
 
   async function saveExpiryEdit(batch, productId) {
-    const { error } = await supabase
-      .from('batches')
-      .update({ expiration_date: expiryDraft || null })
-      .eq('id', batch.batch_id)
-    if (!error) {
-      await fetchBatches(productId)
-      setEditingExpiryBatchId(null)
-      setExpiryDraft('')
-    } else {
+    const newDate = expiryDraft || null
+    const { error } = await supabase.from('batches').update({ expiration_date: newDate }).eq('id', batch.batch_id)
+    if (error) {
       setErrorMsg(error.message)
+      return
     }
+    // batch_cache is a snapshot that only refreshes when a ledger row is
+    // written — a direct edit to batches doesn't trigger that, so it has to
+    // be updated here too or the screen just keeps showing the old date.
+    await supabase.from('batch_cache').update({ expiration_date: newDate }).eq('batch_id', batch.batch_id)
+    await fetchBatches(productId)
+    setEditingExpiryBatchId(null)
+    setExpiryDraft('')
   }
 
   async function handleDisposed(productId) {
