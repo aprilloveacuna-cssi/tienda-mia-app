@@ -710,7 +710,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       const row = [pr.product.sku, pr.product.name, pr.product.category ?? '', Number(pr.product.current_cost).toFixed(2), Number(pr.product.selling_price).toFixed(2)]
       for (const d of days) {
         const cell = pr.byDay[d] ?? [0, 0]
-        row.push(cell[0], cell[1])
+        row.push(cell[0] || '', cell[1] || '')
       }
       row.push(
         pr.totalQtySold,
@@ -720,7 +720,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         pr.percent.toFixed(2) + '%',
         pr.avgDailySales.toFixed(2),
         pr.movement,
-        pr.waste,
+        pr.waste || '',
         pr.suggestedPurchase
       )
       lines.push(row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
