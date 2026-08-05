@@ -56,14 +56,80 @@ export default function Adjustments() {
   const [saving, setSaving] = useState(false)
 
   // ---------- Physical Count ----------
-  const [countRows, setCountRows] = useState([])
+  const [physicalCounts, setPhysicalCounts] = useState([])
+  const [selectedCount, setSelectedCount] = useState(null) // the open physical_counts row, or null = list view
+  const [countLines, setCountLines] = useState([]) // persisted lines for the selected count, joined to products
+  const [labelDraft, setLabelDraft] = useState('')
   const [countForm, setCountForm] = useState({ product_id: '', counted_qty: '' })
   const [countReason, setCountReason] = useState('')
   const [showOnlyMismatches, setShowOnlyMismatches] = useState(true)
   const [countPosting, setCountPosting] = useState(false)
   const [countError, setCountError] = useState('')
   const [countImportSkipped, setCountImportSkipped] = useState([])
+  const [countSearch, setCountSearch] = useState('')
   const countFileInputRef = useRef(null)
+
+  async function loadPhysicalCounts() {
+    const { data, error } = await fetchAllRows('physical_counts', '*, physical_count_lines(id, posted)', 'updated_at', { ascending: false })
+    if (!error) setPhysicalCounts(data ?? [])
+  }
+
+  async function loadCountLines(countId) {
+    const { data, error } = await supabase
+      .from('physical_count_lines')
+      .select('*, product:products(name, sku, unit, category, current_cost)')
+      .eq('physical_count_id', countId)
+      .order('created_at')
+    if (!error) setCountLines(data ?? [])
+  }
+
+  async function openNewCount() {
+    setCountError('')
+    const { data, error } = await supabase.from('physical_counts').insert({}).select().single()
+    if (error) {
+      setCountError(error.message)
+      return
+    }
+    setSelectedCount(data)
+    setLabelDraft('')
+    setCountLines([])
+    setCountReason('')
+    loadPhysicalCounts()
+  }
+
+  async function openExistingCount(count) {
+    setSelectedCount(count)
+    setLabelDraft(count.label ?? '')
+    setCountReason('')
+    setCountError('')
+    await loadCountLines(count.id)
+  }
+
+  async function saveCountLabel() {
+    if (!selectedCount) return
+    await supabase.from('physical_counts').update({ label: labelDraft.trim() || null }).eq('id', selectedCount.id)
+    loadPhysicalCounts()
+  }
+
+  async function markCountCompleted() {
+    if (!selectedCount) return
+    await supabase.from('physical_counts').update({ status: 'completed' }).eq('id', selectedCount.id)
+    setSelectedCount({ ...selectedCount, status: 'completed' })
+    loadPhysicalCounts()
+  }
+
+  async function touchCountUpdatedAt() {
+    if (!selectedCount) return
+    await supabase.from('physical_counts').update({ updated_at: new Date().toISOString() }).eq('id', selectedCount.id)
+  }
+
+  async function deleteCount(count, e) {
+    e.stopPropagation()
+    if (!confirm(`Delete ${count.count_number}${count.label ? ` (${count.label})` : ''}? This can't be undone.`)) return
+    await supabase.from('physical_counts').delete().eq('id', count.id)
+    if (selectedCount?.id === count.id) setSelectedCount(null)
+    loadPhysicalCounts()
+  }
 
   async function loadInventoryCache() {
     const { data, error } = await fetchAllRows('inventory_cache', 'product_id, current_stock', null, { tiebreaker: 'product_id' })
@@ -111,6 +177,7 @@ export default function Adjustments() {
     loadProducts()
     loadAdjustmentTypes()
     loadInventoryCache()
+    loadPhysicalCounts()
   }, [])
 
   function resetForm() {
@@ -208,30 +275,35 @@ export default function Adjustments() {
   const selectedProduct = products.find((p) => p.id === productId)
 
   // ---------- Physical Count ----------
-  function addCountRow(e) {
+  async function addCountRow(e) {
     e.preventDefault()
-    if (!countForm.product_id || countForm.counted_qty === '') return
+    if (!selectedCount || !countForm.product_id || countForm.counted_qty === '') return
     const p = products.find((x) => x.id === countForm.product_id)
-    if (countRows.some((r) => r.product.id === p.id)) {
+    if (countLines.some((r) => r.product_id === p.id)) {
       setCountError(`${p.name} is already in this list.`)
       return
     }
-    setCountRows([
-      ...countRows,
-      {
-        tempId: crypto.randomUUID(),
-        product: p,
-        systemQty: inventoryCacheMap[p.id] ?? 0,
-        countedQty: Number(countForm.counted_qty),
-        posted: false,
-      },
-    ])
+    const { error } = await supabase.from('physical_count_lines').insert({
+      physical_count_id: selectedCount.id,
+      product_id: p.id,
+      counted_qty: Number(countForm.counted_qty),
+    })
+    if (error) {
+      setCountError(error.message)
+      return
+    }
     setCountForm({ product_id: '', counted_qty: '' })
     setCountError('')
+    await loadCountLines(selectedCount.id)
+    touchCountUpdatedAt()
+    loadPhysicalCounts()
   }
 
-  function removeCountRow(tempId) {
-    setCountRows(countRows.filter((r) => r.tempId !== tempId))
+  async function removeCountRow(lineId) {
+    await supabase.from('physical_count_lines').delete().eq('id', lineId)
+    await loadCountLines(selectedCount.id)
+    touchCountUpdatedAt()
+    loadPhysicalCounts()
   }
 
   function handleDownloadCountTemplate() {
@@ -251,10 +323,10 @@ export default function Adjustments() {
   function handleCountImportFileChange(e) {
     const file = e.target.files?.[0]
     e.target.value = ''
-    if (!file) return
+    if (!file || !selectedCount) return
 
     const reader = new FileReader()
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const rows = parseCsv(String(reader.result))
         if (rows.length < 2) {
@@ -268,8 +340,8 @@ export default function Adjustments() {
         }
         const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
 
-        const existingIds = new Set(countRows.map((r) => r.product.id))
-        const newRows = []
+        const existingIds = new Set(countLines.map((r) => r.product_id))
+        const newLines = []
         const skipped = []
 
         rows.slice(1).forEach((r, idx) => {
@@ -303,18 +375,22 @@ export default function Adjustments() {
           }
 
           existingIds.add(product.id)
-          newRows.push({
-            tempId: crypto.randomUUID(),
-            product,
-            systemQty: inventoryCacheMap[product.id] ?? 0,
-            countedQty: Number(obj.counted_qty),
-            posted: false,
-          })
+          newLines.push({ physical_count_id: selectedCount.id, product_id: product.id, counted_qty: Number(obj.counted_qty) })
         })
 
-        setCountRows([...countRows, ...newRows])
+        if (newLines.length > 0) {
+          const { error } = await supabase.from('physical_count_lines').insert(newLines)
+          if (error) {
+            setCountError(error.message)
+            return
+          }
+        }
+
         setCountImportSkipped(skipped)
         setCountError('')
+        await loadCountLines(selectedCount.id)
+        touchCountUpdatedAt()
+        loadPhysicalCounts()
       } catch {
         setCountError('Could not read that file — make sure it is a CSV, not an .xlsx.')
       }
@@ -322,24 +398,27 @@ export default function Adjustments() {
     reader.readAsText(file)
   }
 
-  async function postCountRow(row) {
+  async function postCountLine(line) {
     if (!countReason.trim()) {
       setCountError('Add a reason before posting — it applies to every adjustment this creates.')
       return
     }
+    const systemQty = inventoryCacheMap[line.product_id] ?? 0
     const { error } = await supabase.from('adjustments').insert({
-      product_id: row.product.id,
+      product_id: line.product_id,
       batch_id: null,
       adjustment_type: 'Count Correction',
       reason: countReason.trim(),
-      old_value: row.systemQty,
-      new_value: row.countedQty,
+      old_value: systemQty,
+      new_value: line.counted_qty,
     })
     if (error) {
-      setCountError(`${row.product.name}: ${error.message}`)
+      setCountError(`${line.product?.name}: ${error.message}`)
       return
     }
-    setCountRows(countRows.map((r) => (r.tempId === row.tempId ? { ...r, posted: true } : r)))
+    await supabase.from('physical_count_lines').update({ posted: true }).eq('id', line.id)
+    await loadCountLines(selectedCount.id)
+    loadInventoryCache()
   }
 
   async function postAllCountVariances() {
@@ -349,41 +428,52 @@ export default function Adjustments() {
     }
     setCountPosting(true)
     setCountError('')
-    const toPost = countRows.filter((r) => !r.posted && r.countedQty !== r.systemQty)
+    const toPost = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0))
     const failed = []
 
-    for (const row of toPost) {
+    for (const line of toPost) {
+      const systemQty = inventoryCacheMap[line.product_id] ?? 0
       const { error } = await supabase.from('adjustments').insert({
-        product_id: row.product.id,
+        product_id: line.product_id,
         batch_id: null,
         adjustment_type: 'Count Correction',
         reason: countReason.trim(),
-        old_value: row.systemQty,
-        new_value: row.countedQty,
+        old_value: systemQty,
+        new_value: line.counted_qty,
       })
-      if (error) failed.push(row.product.name)
+      if (error) {
+        failed.push(line.product?.name)
+      } else {
+        await supabase.from('physical_count_lines').update({ posted: true }).eq('id', line.id)
+      }
     }
 
-    setCountRows(countRows.map((r) => (toPost.some((t) => t.tempId === r.tempId) && !failed.includes(r.product.name) ? { ...r, posted: true } : r)))
     setCountPosting(false)
     if (failed.length > 0) setCountError(`Posted the rest, but failed for: ${failed.join(', ')}`)
+    await loadCountLines(selectedCount.id)
     loadAdjustments()
     loadInventoryCache()
   }
 
   const { sortKey: countSortKey, sortDir: countSortDir, toggleSort: toggleCountSort } = useSort('variance', 'desc')
   function countSortAccessor(row, key) {
-    if (key === 'product') return row.product.name
-    if (key === 'category') return row.product.category
-    if (key === 'systemQty') return row.systemQty
-    if (key === 'countedQty') return row.countedQty
-    if (key === 'variance') return Math.abs(row.countedQty - row.systemQty)
-    if (key === 'valueImpact') return (row.countedQty - row.systemQty) * Number(row.product.current_cost ?? 0)
+    const systemQty = inventoryCacheMap[row.product_id] ?? 0
+    if (key === 'product') return row.product?.name
+    if (key === 'category') return row.product?.category
+    if (key === 'systemQty') return systemQty
+    if (key === 'countedQty') return row.counted_qty
+    if (key === 'variance') return Math.abs(row.counted_qty - systemQty)
+    if (key === 'valueImpact') return (row.counted_qty - systemQty) * Number(row.product?.current_cost ?? 0)
     return row[key]
   }
-  const visibleCountRows = showOnlyMismatches ? countRows.filter((r) => r.countedQty !== r.systemQty) : countRows
+  const countSearchFiltered = countSearch.trim()
+    ? countLines.filter((r) => normalizeSearchText(r.product?.name).includes(normalizeSearchText(countSearch)))
+    : countLines
+  const visibleCountRows = showOnlyMismatches
+    ? countSearchFiltered.filter((r) => r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0))
+    : countSearchFiltered
   const sortedCountRows = sortRows(visibleCountRows, countSortKey, countSortDir, countSortAccessor)
-  const pendingVarianceCount = countRows.filter((r) => !r.posted && r.countedQty !== r.systemQty).length
+  const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
   return (
     <div>
@@ -480,13 +570,107 @@ export default function Adjustments() {
         </>
       )}
 
-      {tab === 'physicalCount' && (
+      {tab === 'physicalCount' && !selectedCount && (
         <div>
-          <p className="mb-4 text-sm text-[var(--color-ink-soft)]">
-            Enter or import what was actually counted, and this compares it against what the system currently shows —
-            posting a row (or all of them) creates real adjustments, same as the form on the other tab, just for many
-            products at once.
-          </p>
+          <div className="mb-4 flex items-center justify-between">
+            <p className="text-sm text-[var(--color-ink-soft)]">
+              Each count is saved as you go, so it's safe to leave and come back — a full store count can take days.
+            </p>
+            <button
+              onClick={openNewCount}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              <Plus size={16} />
+              New count
+            </button>
+          </div>
+
+          {countError && (
+            <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+              {countError}
+            </div>
+          )}
+
+          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <th className="px-4 py-3">Count #</th>
+                  <th className="px-4 py-3">Label</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Items</th>
+                  <th className="px-4 py-3">Posted</th>
+                  <th className="px-4 py-3">Last updated</th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody>
+                {physicalCounts.length === 0 && (
+                  <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No physical counts yet — start one when you're ready.</td></tr>
+                )}
+                {physicalCounts.map((c) => (
+                  <tr
+                    key={c.id}
+                    onClick={() => openExistingCount(c)}
+                    className="cursor-pointer border-b border-[var(--color-line)] last:border-0 hover:bg-[var(--color-paper)]"
+                  >
+                    <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{c.count_number}</td>
+                    <td className="px-4 py-3 font-medium">{c.label || '—'}</td>
+                    <td className="px-4 py-3"><StatusChip tone={c.status === 'completed' ? 'ok' : 'attention'}>{c.status}</StatusChip></td>
+                    <td className="px-4 py-3">{(c.physical_count_lines ?? []).length}</td>
+                    <td className="px-4 py-3">{(c.physical_count_lines ?? []).filter((l) => l.posted).length}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{new Date(c.updated_at).toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={(e) => deleteCount(c, e)}
+                        aria-label="Delete count"
+                        className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'physicalCount' && selectedCount && (
+        <div>
+          <button
+            onClick={() => setSelectedCount(null)}
+            className="mb-4 flex items-center gap-1.5 text-sm font-medium text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]"
+          >
+            ← Back to all counts
+          </button>
+
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h2 className="font-display text-lg font-semibold">{selectedCount.count_number}</h2>
+              <StatusChip tone={selectedCount.status === 'completed' ? 'ok' : 'attention'}>{selectedCount.status}</StatusChip>
+            </div>
+            {selectedCount.status !== 'completed' && (
+              <button
+                onClick={markCountCompleted}
+                className="rounded-md border border-[var(--color-ink)] px-3 py-1.5 text-sm font-medium"
+              >
+                Mark completed
+              </button>
+            )}
+          </div>
+
+          <label className="mb-4 block">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Label (optional)</span>
+            <input
+              value={labelDraft}
+              onChange={(e) => setLabelDraft(e.target.value)}
+              onBlur={saveCountLabel}
+              placeholder="e.g. End of July 2026 count"
+              className="input max-w-sm"
+            />
+          </label>
 
           {countError && (
             <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
@@ -549,8 +733,10 @@ export default function Adjustments() {
             </div>
           )}
 
-          {countRows.length > 0 && (
+          {countLines.length > 0 && (
             <>
+              <SearchBar value={countSearch} onChange={setCountSearch} placeholder="Search this count by product name" />
+
               <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
                 <label className="flex-1 block">
                   <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">
@@ -592,24 +778,25 @@ export default function Adjustments() {
                   <tbody>
                     {sortedCountRows.length === 0 && (
                       <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
-                        {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing added yet.'}
+                        {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing matches this search.'}
                       </td></tr>
                     )}
                     {sortedCountRows.map((row) => {
-                      const variance = row.countedQty - row.systemQty
-                      const valueImpact = variance * Number(row.product.current_cost ?? 0)
+                      const systemQty = inventoryCacheMap[row.product_id] ?? 0
+                      const variance = row.counted_qty - systemQty
+                      const valueImpact = variance * Number(row.product?.current_cost ?? 0)
                       return (
-                        <tr key={row.tempId} className="border-b border-[var(--color-line)] last:border-0">
-                          <td className="px-4 py-3 font-medium">{row.product.name}</td>
-                          <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product.category || '—'}</td>
-                          <td className="px-4 py-3">{row.systemQty} {row.product.unit}</td>
-                          <td className="px-4 py-3">{row.countedQty} {row.product.unit}</td>
+                        <tr key={row.id} className="border-b border-[var(--color-line)] last:border-0">
+                          <td className="px-4 py-3 font-medium">{row.product?.name}</td>
+                          <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product?.category || '—'}</td>
+                          <td className="px-4 py-3">{systemQty} {row.product?.unit}</td>
+                          <td className="px-4 py-3">{row.counted_qty} {row.product?.unit}</td>
                           <td className="px-4 py-3">
                             {variance === 0 ? (
                               <StatusChip tone="ok">matches</StatusChip>
                             ) : (
                               <StatusChip tone={variance < 0 ? 'critical' : 'attention'}>
-                                {variance > 0 ? '+' : ''}{variance} {row.product.unit}
+                                {variance > 0 ? '+' : ''}{variance} {row.product?.unit}
                               </StatusChip>
                             )}
                           </td>
@@ -620,14 +807,14 @@ export default function Adjustments() {
                                 <span className="flex items-center gap-1 text-xs text-[var(--color-herb)]"><Check size={13} /> posted</span>
                               ) : variance !== 0 ? (
                                 <button
-                                  onClick={() => postCountRow(row)}
+                                  onClick={() => postCountLine(row)}
                                   className="rounded-md border border-[var(--color-ink)] px-2 py-1 text-xs font-medium"
                                 >
                                   Post
                                 </button>
                               ) : null}
                               <button
-                                onClick={() => removeCountRow(row.tempId)}
+                                onClick={() => removeCountRow(row.id)}
                                 aria-label="Remove"
                                 className="rounded-md p-1 text-[var(--color-ink-soft)] hover:bg-[var(--color-line)]"
                               >
