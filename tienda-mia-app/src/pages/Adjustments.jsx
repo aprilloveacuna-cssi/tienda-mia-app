@@ -77,7 +77,7 @@ export default function Adjustments() {
   async function loadCountLines(countId) {
     const { data, error } = await supabase
       .from('physical_count_lines')
-      .select('*, product:products(name, sku, unit, category, current_cost)')
+      .select('*, product:products(name, sku, barcode, unit, category, current_cost)')
       .eq('physical_count_id', countId)
       .order('created_at')
     if (!error) setCountLines(data ?? [])
@@ -475,6 +475,29 @@ export default function Adjustments() {
   const sortedCountRows = sortRows(visibleCountRows, countSortKey, countSortDir, countSortAccessor)
   const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
+  function exportCountCsv() {
+    const headers = ['Barcode', 'Product', 'Category', 'System Qty', 'Counted Qty', 'Variance', 'Value Impact', 'Status']
+    const rows = sortedCountRows.map((row) => {
+      const systemQty = inventoryCacheMap[row.product_id] ?? 0
+      const variance = row.counted_qty - systemQty
+      const valueImpact = variance * Number(row.product?.current_cost ?? 0)
+      return [
+        row.product?.barcode ?? '',
+        row.product?.name ?? '',
+        row.product?.category ?? '',
+        systemQty,
+        row.counted_qty,
+        variance,
+        valueImpact.toFixed(2),
+        row.posted ? 'posted' : variance === 0 ? 'matches' : 'pending',
+      ]
+    })
+    const csv = [headers, ...rows]
+      .map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+      .join('\n')
+    downloadFile(`${selectedCount.count_number}-variance.csv`, csv, 'text/csv;charset=utf-8;')
+  }
+
   return (
     <div>
       <div className="mb-5 flex items-center justify-between">
@@ -753,6 +776,14 @@ export default function Adjustments() {
                   <input type="checkbox" checked={showOnlyMismatches} onChange={(e) => setShowOnlyMismatches(e.target.checked)} />
                   Show only mismatches
                 </label>
+                <button
+                  onClick={exportCountCsv}
+                  disabled={sortedCountRows.length === 0}
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-50"
+                >
+                  <FileDown size={16} />
+                  Export CSV
+                </button>
                 <button
                   onClick={postAllCountVariances}
                   disabled={countPosting || pendingVarianceCount === 0}
