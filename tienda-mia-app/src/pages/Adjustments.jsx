@@ -455,9 +455,10 @@ export default function Adjustments() {
     loadInventoryCache()
   }
 
-  const { sortKey: countSortKey, sortDir: countSortDir, toggleSort: toggleCountSort } = useSort('variance', 'desc')
+  const { sortKey: countSortKey, sortDir: countSortDir, toggleSort: toggleCountSort } = useSort('added', 'desc')
   function countSortAccessor(row, key) {
     const systemQty = inventoryCacheMap[row.product_id] ?? 0
+    if (key === 'added') return new Date(row.created_at).getTime()
     if (key === 'product') return row.product?.name
     if (key === 'category') return row.product?.category
     if (key === 'systemQty') return systemQty
@@ -476,12 +477,13 @@ export default function Adjustments() {
   const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
   function exportCountCsv() {
-    const headers = ['Barcode', 'Product', 'Category', 'System Qty', 'Counted Qty', 'Variance', 'Value Impact', 'Status']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', 'System Qty', 'Counted Qty', 'Variance', 'Value Impact', 'Status']
     const rows = sortedCountRows.map((row) => {
       const systemQty = inventoryCacheMap[row.product_id] ?? 0
       const variance = row.counted_qty - systemQty
       const valueImpact = variance * Number(row.product?.current_cost ?? 0)
       return [
+        new Date(row.created_at).toLocaleString(),
         row.product?.barcode ?? '',
         row.product?.name ?? '',
         row.product?.category ?? '',
@@ -797,6 +799,7 @@ export default function Adjustments() {
                 <table className="w-full text-left text-sm">
                   <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
                     <tr>
+                      <SortableTh label="Added" sortKey="added" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Product" sortKey="product" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="System Qty" sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
@@ -808,7 +811,7 @@ export default function Adjustments() {
                   </thead>
                   <tbody>
                     {sortedCountRows.length === 0 && (
-                      <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                      <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                         {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing matches this search.'}
                       </td></tr>
                     )}
@@ -818,6 +821,7 @@ export default function Adjustments() {
                       const valueImpact = variance * Number(row.product?.current_cost ?? 0)
                       return (
                         <tr key={row.id} className="border-b border-[var(--color-line)] last:border-0">
+                          <td className="px-4 py-3 text-[var(--color-ink-soft)]">{new Date(row.created_at).toLocaleString()}</td>
                           <td className="px-4 py-3 font-medium">{row.product?.name}</td>
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product?.category || '—'}</td>
                           <td className="px-4 py-3">{systemQty} {row.product?.unit}</td>
