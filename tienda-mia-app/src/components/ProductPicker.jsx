@@ -95,7 +95,7 @@ export default function ProductPicker({ products, value, onChange, placeholder =
         <Search size={14} className="shrink-0 text-[var(--color-ink-soft)]" />
         <input
           type="text"
-          value={open ? query : selected ? `${selected.sku} — ${selected.name}` : ''}
+          value={open ? query : selected ? `${selected.barcode} — ${selected.name}` : ''}
           onChange={(e) => {
             setQuery(e.target.value)
             setOpen(true)
@@ -146,7 +146,7 @@ export default function ProductPicker({ products, value, onChange, placeholder =
                 }`}
               >
                 <span>{p.name}</span>
-                <span className="font-mono text-xs text-[var(--color-ink-soft)]">{p.sku}</span>
+                <span className="font-mono text-xs text-[var(--color-ink-soft)]">{p.barcode}</span>
               </button>
             ))
           )}
