@@ -400,6 +400,7 @@ export default function Reports() {
 
   const isMatrix = reportKey === 'dailyMatrix'
   const isMealRice = reportKey === 'mealRice'
+  const isBestSellers = reportKey === 'bestSellers'
   const report = isMatrix ? null : REPORTS[reportKey]
 
   const { sortKey, sortDir, toggleSort } = useSort(null)
@@ -419,7 +420,7 @@ export default function Reports() {
   }
 
   useEffect(() => {
-    if (isMatrix || isMealRice) return
+    if (isMatrix || isMealRice || isBestSellers) return
     let cancelled = false
     async function load() {
       setLoading(true)
@@ -483,7 +484,7 @@ export default function Reports() {
             Every export reflects real transaction data, computed the same way the rest of the app sees it.
           </p>
         </div>
-        {!isMatrix && !isMealRice && (
+        {!isMatrix && !isMealRice && !isBestSellers && (
           <div className="flex gap-2">
             <button
               onClick={exportCsv}
@@ -533,9 +534,17 @@ export default function Reports() {
         >
           Meal / Rice Summary
         </button>
+        <button
+          onClick={() => selectReport('bestSellers')}
+          className={`px-3 py-2 text-sm font-medium ${
+            isBestSellers ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
+          }`}
+        >
+          Best Sellers by Category
+        </button>
       </div>
 
-      {!isMatrix && !isMealRice && (
+      {!isMatrix && !isMealRice && !isBestSellers && (
         <div className="no-print mb-4 flex flex-wrap items-end gap-3">
           <label className="text-sm">
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
@@ -571,6 +580,8 @@ export default function Reports() {
         <DailySalesMatrix dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
       ) : isMealRice ? (
         <MealRiceSummary dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
+      ) : isBestSellers ? (
+        <BestSellersByCategory dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
       ) : (
         <div id="printable-report">
           <div className="mb-3">
@@ -1148,6 +1159,205 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------- Best Sellers by Category ----------
+// Groups every sale within the date range by product category, ranks items
+// within each category by quantity sold, and rolls up a total per category.
+// Ingredients are excluded entirely — they're never sold on their own, so
+// they'd only clutter a "best sellers" view.
+function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
+  const [loading, setLoading] = useState(true)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [categoryGroups, setCategoryGroups] = useState([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      setErrorMsg('')
+      try {
+        const [productsRes, saleLinesRes] = await Promise.all([
+          fetchAllRows('products', 'id, name, unit, category, business_unit, product_type, status'),
+          fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, status)'),
+        ])
+        if (productsRes.error) throw productsRes.error
+        if (saleLinesRes.error) throw saleLinesRes.error
+
+        // Ingredients aren't sold on their own — excluded outright, not just filtered.
+        const products = (productsRes.data ?? []).filter((p) => p.product_type !== 'RAW MATERIAL')
+        const productsById = Object.fromEntries(products.map((p) => [p.id, p]))
+
+        const lines = (saleLinesRes.data ?? []).filter(
+          (l) => l.sale?.status !== 'voided' && withinRange(l.sale?.sale_date, dateFrom, dateTo) && productsById[l.product_id]
+        )
+
+        const byProduct = {}
+        for (const l of lines) {
+          const p = productsById[l.product_id]
+          byProduct[p.id] = byProduct[p.id] ?? { product: p, qty: 0, revenue: 0, cost: 0 }
+          byProduct[p.id].qty += Number(l.quantity)
+          byProduct[p.id].revenue += Number(l.quantity) * Number(l.unit_price)
+          byProduct[p.id].cost += Number(l.fifo_cost)
+        }
+
+        const byCategory = {}
+        for (const item of Object.values(byProduct)) {
+          const cat = item.product.category || '(none)'
+          byCategory[cat] = byCategory[cat] ?? { category: cat, items: [], totalQty: 0, totalRevenue: 0, totalProfit: 0 }
+          const profit = item.revenue - item.cost
+          byCategory[cat].items.push({ ...item, profit })
+          byCategory[cat].totalQty += item.qty
+          byCategory[cat].totalRevenue += item.revenue
+          byCategory[cat].totalProfit += profit
+        }
+
+        // Categories ordered by revenue (biggest first); items within each
+        // category ordered by quantity sold — the actual "best sellers" rank.
+        const groups = Object.values(byCategory)
+          .map((g) => ({ ...g, items: g.items.sort((a, b) => b.qty - a.qty) }))
+          .sort((a, b) => b.totalRevenue - a.totalRevenue)
+
+        if (!cancelled) setCategoryGroups(groups)
+      } catch (err) {
+        if (!cancelled) setErrorMsg(err.message ?? 'Could not load this report.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [dateFrom, dateTo])
+
+  const grandTotalQty = categoryGroups.reduce((s, g) => s + g.totalQty, 0)
+  const grandTotalRevenue = categoryGroups.reduce((s, g) => s + g.totalRevenue, 0)
+  const grandTotalProfit = categoryGroups.reduce((s, g) => s + g.totalProfit, 0)
+
+  function exportCsv() {
+    const rows = [['Category', 'Product', 'Type', 'Qty Sold', 'Revenue', 'Profit']]
+    for (const g of categoryGroups) {
+      rows.push([g.category, `TOTAL (${g.items.length} item${g.items.length === 1 ? '' : 's'})`, '', g.totalQty, g.totalRevenue.toFixed(2), g.totalProfit.toFixed(2)])
+      for (const item of g.items) {
+        rows.push(['', item.product.name, productTypeGroup(item.product), item.qty, item.revenue.toFixed(2), item.profit.toFixed(2)])
+      }
+    }
+    rows.push(['', 'GRAND TOTAL', '', grandTotalQty, grandTotalRevenue.toFixed(2), grandTotalProfit.toFixed(2)])
+    const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile(`best-sellers-by-category_${dateFrom}_to_${dateTo}.csv`, csv, 'text/csv;charset=utf-8;')
+  }
+
+  return (
+    <div>
+      <div className="no-print mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
+            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="input" />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">To</span>
+            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
+          </label>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={exportCsv}
+            disabled={loading || categoryGroups.length === 0}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            <Download size={15} />
+            Export CSV
+          </button>
+          <button
+            onClick={() => window.print()}
+            disabled={loading || categoryGroups.length === 0}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            <Printer size={15} />
+            Print / Save PDF
+          </button>
+        </div>
+      </div>
+
+      {errorMsg && (
+        <div className="no-print mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+          {errorMsg}
+        </div>
+      )}
+
+      <div id="printable-report">
+        <div className="mb-4">
+          <div className="font-display text-lg font-semibold">Best Sellers by Category</div>
+          <div className="text-xs text-[var(--color-ink-soft)]">
+            {dateFrom} to {dateTo} · Retail and Kitchen combined · ingredients excluded
+          </div>
+        </div>
+
+        {loading && <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">Loading…</div>}
+
+        {!loading && categoryGroups.length === 0 && (
+          <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">No sales in this date range.</div>
+        )}
+
+        {!loading &&
+          categoryGroups.map((g) => (
+            <div key={g.category} className="mb-6">
+              <div className="mb-2 flex items-center justify-between rounded-md bg-[var(--color-paper)] px-4 py-2.5">
+                <div className="font-display text-sm font-semibold">{g.category}</div>
+                <div className="flex gap-4 text-xs text-[var(--color-ink-soft)]">
+                  <span>{g.totalQty.toFixed(0)} units sold</span>
+                  <span>Revenue {g.totalRevenue.toFixed(2)}</span>
+                  <span>Profit {g.totalProfit.toFixed(2)}</span>
+                </div>
+              </div>
+              <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                    <tr>
+                      <th className="px-4 py-2">Product</th>
+                      <th className="px-4 py-2">Type</th>
+                      <th className="px-4 py-2">Qty Sold</th>
+                      <th className="px-4 py-2">Revenue</th>
+                      <th className="px-4 py-2">Profit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.items.map((item) => (
+                      <tr key={item.product.id} className="border-b border-[var(--color-line)] last:border-0">
+                        <td className="px-4 py-2 font-medium">{item.product.name}</td>
+                        <td className="px-4 py-2">
+                          <StatusChip tone={productTypeGroup(item.product) === 'KITCHEN' ? 'attention' : 'neutral'}>
+                            {productTypeGroup(item.product).toLowerCase()}
+                          </StatusChip>
+                        </td>
+                        <td className="px-4 py-2">{item.qty} {item.product.unit}</td>
+                        <td className="px-4 py-2">{item.revenue.toFixed(2)}</td>
+                        <td className="px-4 py-2">{item.profit.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+
+        {!loading && categoryGroups.length > 0 && (
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] px-4 py-3">
+            <div className="flex justify-between text-sm font-medium">
+              <span>Grand total</span>
+              <div className="flex gap-4">
+                <span>{grandTotalQty.toFixed(0)} units</span>
+                <span>Revenue {grandTotalRevenue.toFixed(2)}</span>
+                <span>Profit {grandTotalProfit.toFixed(2)}</span>
+              </div>
+            </div>
           </div>
         )}
       </div>
