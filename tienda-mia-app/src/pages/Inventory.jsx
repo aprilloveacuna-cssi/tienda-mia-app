@@ -1,13 +1,16 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Plus, Trash2, Download } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import DisposeConfirm from '../components/DisposeConfirm'
 import SearchBar from '../components/SearchBar'
 import SlidePanel from '../components/SlidePanel'
+import TypeCategoryFilter from '../components/TypeCategoryFilter'
 import { useSort, sortRows } from '../lib/sort'
 import { normalizeSearchText } from '../lib/search'
+import { productTypeGroup } from '../lib/productType'
+import { downloadFile } from '../lib/csv'
 
 function stockTone(stock, reorderPoint) {
   if (stock <= 0) return 'critical'
@@ -65,19 +68,45 @@ export default function Inventory() {
   const sortedRows = sortRows(rows, sortKey, sortDir, sortAccessor)
 
   const [search, setSearch] = useState('')
+  const [selectedTypes, setSelectedTypes] = useState([])
+  const [selectedCategories, setSelectedCategories] = useState([])
+
   const searchedRows = search.trim()
     ? sortedRows.filter((r) => {
         const q = normalizeSearchText(search)
         return normalizeSearchText(r.product?.name).includes(q) || normalizeSearchText(r.product?.sku).includes(q)
       })
     : sortedRows
+  const filteredRows = searchedRows.filter(
+    (r) =>
+      (selectedTypes.length === 0 || selectedTypes.includes(productTypeGroup(r.product ?? {}))) &&
+      (selectedCategories.length === 0 || selectedCategories.includes(r.product?.category || '(none)'))
+  )
+
+  function exportInventoryCsv() {
+    const headers = ['SKU', 'Barcode', 'Product', 'Category', 'Stock', 'Unit', 'Value', 'Status']
+    const rows = filteredRows.map((r) => [
+      r.product?.sku ?? '',
+      r.product?.barcode ?? '',
+      r.product?.name ?? '',
+      r.product?.category ?? '',
+      Number(r.current_stock ?? 0),
+      r.product?.unit ?? '',
+      Number(r.inventory_value ?? 0).toFixed(2),
+      stockLabel(r.current_stock, r.product?.reorder_point),
+    ])
+    const csv = [headers, ...rows]
+      .map((row) => row.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+      .join('\n')
+    downloadFile(`inventory_${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv;charset=utf-8;')
+  }
 
   async function load() {
     setLoading(true)
     setErrorMsg('')
     const { data, error } = await supabase
       .from('inventory_cache')
-      .select('*, product:products(name, sku, unit, reorder_point, category)')
+      .select('*, product:products(name, sku, barcode, unit, reorder_point, category, business_unit, product_type)')
 
     if (error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
@@ -280,17 +309,27 @@ export default function Inventory() {
   }
 
   const totalValue = useMemo(
-    () => rows.reduce((sum, r) => sum + Number(r.inventory_value ?? 0), 0),
-    [rows]
+    () => filteredRows.reduce((sum, r) => sum + Number(r.inventory_value ?? 0), 0),
+    [filteredRows]
   )
 
   return (
     <div>
-      <div className="mb-5">
-        <h1 className="font-display text-2xl font-semibold">Inventory</h1>
-        <p className="mt-0.5 text-sm text-[var(--color-ink-soft)]">
-          Read-only — computed from every posted purchase, sale, and adjustment. Nothing here is hand-edited.
-        </p>
+      <div className="mb-5 flex items-center justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-semibold">Inventory</h1>
+          <p className="mt-0.5 text-sm text-[var(--color-ink-soft)]">
+            Read-only — computed from every posted purchase, sale, and adjustment. Nothing here is hand-edited.
+          </p>
+        </div>
+        <button
+          onClick={exportInventoryCsv}
+          disabled={filteredRows.length === 0}
+          className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-50"
+        >
+          <Download size={16} />
+          Export CSV
+        </button>
       </div>
 
       {errorMsg && (
@@ -305,6 +344,14 @@ export default function Inventory() {
           <div className="font-display mt-1 text-2xl font-semibold">{totalValue.toFixed(2)}</div>
         </div>
       )}
+
+      <TypeCategoryFilter
+        products={rows.map((r) => r.product ?? {})}
+        selectedTypes={selectedTypes}
+        setSelectedTypes={setSelectedTypes}
+        selectedCategories={selectedCategories}
+        setSelectedCategories={setSelectedCategories}
+      />
 
       <SearchBar value={search} onChange={setSearch} placeholder="Search by name or SKU" />
 
@@ -330,7 +377,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {!loading && searchedRows.length === 0 && (
+            {!loading && filteredRows.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No stock movements yet — post a purchase to see inventory appear here.
@@ -338,7 +385,7 @@ export default function Inventory() {
               </tr>
             )}
 
-            {searchedRows.map((r) => (
+            {filteredRows.map((r) => (
               <Fragment key={r.product_id}>
                 <tr
                   onClick={() => toggleExpand(r.product_id)}

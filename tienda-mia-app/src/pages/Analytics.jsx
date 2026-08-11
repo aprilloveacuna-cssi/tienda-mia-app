@@ -9,12 +9,6 @@ import { useSort, sortRows } from '../lib/sort'
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
-// These two aren't in Settings yet — reasonable defaults for EOQ until the
-// business wants to tune them (ordering cost per PO, holding cost as a % of
-// unit cost per year). Flagged in the UI, not hidden.
-const ASSUMED_ORDERING_COST = 50
-const ASSUMED_HOLDING_COST_RATE = 0.2
-
 function nextOccurrenceOf(dayName) {
   const targetIdx = WEEKDAYS.indexOf(dayName)
   if (targetIdx === -1) return null
@@ -65,6 +59,8 @@ export default function Analytics() {
         const leadTimeDays = Number(settingsMap.DEFAULT_LEAD_TIME_DAYS ?? 3)
         const safetyStockPct = Number(settingsMap.DEFAULT_SAFETY_STOCK_PCT ?? 20)
         const purchasingDay = settingsMap.PURCHASING_DAY ?? 'Thursday'
+        const orderingCost = Number(settingsMap.EOQ_ORDERING_COST ?? 50)
+        const holdingCostRate = Number(settingsMap.EOQ_HOLDING_COST_PCT ?? 20) / 100
         const windowDays = forecastWeeks * 7
         const windowStart = new Date(Date.now() - windowDays * 86400000)
 
@@ -97,7 +93,7 @@ export default function Analytics() {
           const unitCost = Number(p.current_cost) || 0
           const eoq =
             hasSales && unitCost > 0
-              ? Math.sqrt((2 * annualDemand * ASSUMED_ORDERING_COST) / (ASSUMED_HOLDING_COST_RATE * unitCost))
+              ? Math.sqrt((2 * annualDemand * orderingCost) / (holdingCostRate * unitCost))
               : null
 
           const daysOfStockRemaining = avgDailyDemand > 0 ? currentStock / avgDailyDemand : null
@@ -155,6 +151,8 @@ export default function Analytics() {
           leadTimeDays,
           safetyStockPct,
           purchasingDay,
+          orderingCost,
+          holdingCostRate,
           nextPurchasingDate: nextOccurrenceOf(purchasingDay),
           productsWithSales: withSales.length,
           totalProducts: products.length,
@@ -175,7 +173,7 @@ export default function Analytics() {
     return <div className="rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">{errorMsg}</div>
   }
 
-  const { products, windowDays, leadTimeDays, purchasingDay, nextPurchasingDate, productsWithSales, totalProducts } = analytics
+  const { products, windowDays, leadTimeDays, purchasingDay, orderingCost, holdingCostRate, nextPurchasingDate, productsWithSales, totalProducts } = analytics
 
   const filteredProducts = products.filter(
     (p) =>
@@ -230,7 +228,7 @@ export default function Analytics() {
 
       {tab === 'velocity' && <VelocityTab products={filteredProducts} />}
       {tab === 'inventory' && <InventoryHealthTab products={filteredProducts} />}
-      {tab === 'eoq' && <EoqTab products={filteredProducts} leadTimeDays={leadTimeDays} />}
+      {tab === 'eoq' && <EoqTab products={filteredProducts} leadTimeDays={leadTimeDays} orderingCost={orderingCost} holdingCostRate={holdingCostRate} />}
       {tab === 'purchasing' && (
         <PurchasingTab products={filteredProducts} purchasingDay={purchasingDay} nextPurchasingDate={nextPurchasingDate} leadTimeDays={leadTimeDays} />
       )}
@@ -326,7 +324,7 @@ function InventoryHealthTab({ products }) {
   )
 }
 
-function EoqTab({ products, leadTimeDays }) {
+function EoqTab({ products, leadTimeDays, orderingCost, holdingCostRate }) {
   const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
@@ -345,9 +343,9 @@ function EoqTab({ products, leadTimeDays }) {
   return (
     <div>
       <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
-        Lead time assumed at {leadTimeDays} days (from Settings). EOQ uses placeholder ordering/holding-cost assumptions
-        (₱{ASSUMED_ORDERING_COST}/order, {(ASSUMED_HOLDING_COST_RATE * 100).toFixed(0)}% holding rate) until those become
-        configurable — treat the EOQ number as a rough order-quantity guide, not gospel.
+        Lead time assumed at {leadTimeDays} days, ordering cost ₱{orderingCost}/PO, holding cost {(holdingCostRate * 100).toFixed(0)}% of
+        unit cost per year — all three adjustable in Settings. EOQ is the classic order-quantity formula, worth treating as
+        a starting guide rather than an exact instruction.
       </p>
       <Table columns={columns} rows={withSales} emptyText="Needs sales history before reorder math means anything." />
     </div>

@@ -33,6 +33,16 @@ const FIELD_META = {
     type: 'number',
     suffix: '% off — applied identically to both, since they compute the same',
   },
+  EOQ_ORDERING_COST: {
+    label: 'EOQ ordering cost',
+    type: 'number',
+    suffix: '₱ per purchase order — used to compute Economic Order Quantity in Analytics',
+  },
+  EOQ_HOLDING_COST_PCT: {
+    label: 'EOQ holding cost',
+    type: 'number',
+    suffix: '% of unit cost per year — the cost of tying up capital and shelf space in stock',
+  },
 }
 
 function prettifyKey(key) {

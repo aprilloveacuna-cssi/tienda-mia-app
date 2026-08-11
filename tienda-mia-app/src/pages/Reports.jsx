@@ -148,10 +148,11 @@ const REPORTS = {
   inventory: {
     label: 'Inventory',
     description: 'Current stock and value for every active product.',
+    productFilterable: true,
     async fetch() {
       const { data, error } = await fetchAllRows(
         'products',
-        'sku, name, category, unit, reorder_point, status, inventory_cache(current_stock, inventory_value)',
+        'sku, name, category, business_unit, product_type, unit, reorder_point, status, inventory_cache(current_stock, inventory_value)',
         'name'
       )
       if (error) throw error
@@ -163,6 +164,8 @@ const REPORTS = {
           sku: p.sku,
           name: p.name,
           category: p.category ?? '—',
+          business_unit: p.business_unit,
+          product_type: p.product_type,
           unit: p.unit,
           stock: Number(cache?.current_stock ?? 0),
           value: Number(cache?.inventory_value ?? 0),
@@ -215,12 +218,13 @@ const REPORTS = {
 
   batches: {
     label: 'Batches',
+    productFilterable: true,
     description: 'Every batch ever received, oldest first within each product.',
     dateField: (r) => r.received_date,
     async fetch() {
       const { data, error } = await fetchAllRows(
         'batches',
-        'batch_number, received_date, expiration_date, unit_cost, status, product:products(name, sku, unit, category), cache:batch_cache(remaining_quantity)',
+        'batch_number, received_date, expiration_date, unit_cost, status, product:products(name, sku, unit, category, business_unit, product_type), cache:batch_cache(remaining_quantity)',
         'received_date',
         { ascending: false }
       )
@@ -240,12 +244,13 @@ const REPORTS = {
 
   expiryWaste: {
     label: 'Expiry & Waste',
+    productFilterable: true,
     description: 'Every batch nearing/past expiration, plus every waste event — one combined timeline.',
     dateField: (r) => r.date,
     async fetch() {
       const [batchesRes, wasteRes] = await Promise.all([
-        fetchAllRows('batches', 'batch_number, expiration_date, product:products(name, sku, unit, category), cache:batch_cache(remaining_quantity)'),
-        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit, category), batch:batches(batch_number)'),
+        fetchAllRows('batches', 'batch_number, expiration_date, product:products(name, sku, unit, category, business_unit, product_type), cache:batch_cache(remaining_quantity)'),
+        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit, category, business_unit, product_type), batch:batches(batch_number)'),
       ])
       if (batchesRes.error) throw batchesRes.error
       if (wasteRes.error) throw wasteRes.error
@@ -313,12 +318,13 @@ const REPORTS = {
 
   sales: {
     label: 'Sales',
+    productFilterable: true,
     description: 'Every sale line, with FIFO cost and gross profit.',
     dateField: (r) => r.sale?.sale_date,
     async fetch() {
       const { data, error } = await fetchAllRows(
         'sale_lines',
-        'quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_number, sale_date, status), product:products(name, sku, unit, category)'
+        'quantity, unit_price, fifo_cost, gross_profit, sale:sales(sale_number, sale_date, status), product:products(name, sku, unit, category, business_unit, product_type)'
       )
       if (error) throw error
       return (data ?? []).sort((a, b) => (a.sale?.sale_date < b.sale?.sale_date ? 1 : -1))
@@ -337,12 +343,13 @@ const REPORTS = {
 
   kitchen: {
     label: 'Kitchen Production',
+    productFilterable: true,
     description: 'Every production run, with actual (not theoretical) cost.',
     dateField: (r) => r.production_date,
     async fetch() {
       const { data, error } = await fetchAllRows(
         'kitchen_production',
-        '*, recipe:recipes(product:products(name, sku, unit, category))',
+        '*, recipe:recipes(product:products(name, sku, unit, category, business_unit, product_type))',
         'production_date',
         { ascending: false }
       )
@@ -362,10 +369,11 @@ const REPORTS = {
 
   kitchenLeftovers: {
     label: 'Kitchen Leftovers',
+    productFilterable: true,
     description: 'Daily leftover servings recorded per kitchen item — informational, doesn\'t affect stock.',
     dateField: (r) => r.waste_date,
     async fetch() {
-      const { data, error } = await fetchAllRows('waste', '*, product:products(name, sku, unit, category)', 'waste_date', { ascending: false })
+      const { data, error } = await fetchAllRows('waste', '*, product:products(name, sku, unit, category, business_unit, product_type)', 'waste_date', { ascending: false })
       if (error) throw error
       return (data ?? []).filter((w) => w.reason === 'Daily Leftover')
     },
@@ -429,10 +437,31 @@ export default function Reports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportKey])
 
+  const [selectedTypes, setSelectedTypes] = useState([])
+  const [selectedCategories, setSelectedCategories] = useState([])
+
+  // Some reports build rows directly from products (flat: category, business_unit,
+  // product_type live on the row itself). Others join a product (nested under
+  // r.product). This works with either shape without each report needing to
+  // flatten its own fetch.
+  function resolveProductFields(r) {
+    const src = r.product ?? r.recipe?.product ?? r
+    return { category: src.category, business_unit: src.business_unit, product_type: src.product_type }
+  }
+
   const filteredRows = report?.dateField
     ? rows.filter((r) => withinRange(report.dateField(r), dateFrom, dateTo))
     : rows
-  const sortedFilteredRows = report ? sortRows(filteredRows, sortKey, sortDir, reportSortAccessor) : filteredRows
+  const productFilteredRows = report?.productFilterable
+    ? filteredRows.filter((r) => {
+        const fields = resolveProductFields(r)
+        return (
+          (selectedTypes.length === 0 || selectedTypes.includes(productTypeGroup(fields))) &&
+          (selectedCategories.length === 0 || selectedCategories.includes(fields.category || '(none)'))
+        )
+      })
+    : filteredRows
+  const sortedFilteredRows = report ? sortRows(productFilteredRows, sortKey, sortDir, reportSortAccessor) : productFilteredRows
 
   const generatedAt = new Date().toLocaleString()
 
@@ -520,6 +549,16 @@ export default function Reports() {
             <span className="pb-2 text-xs text-[var(--color-ink-soft)]">This report is a current snapshot — date range doesn't apply.</span>
           )}
         </div>
+      )}
+
+      {report?.productFilterable && (
+        <TypeCategoryFilter
+          products={filteredRows.map(resolveProductFields)}
+          selectedTypes={selectedTypes}
+          setSelectedTypes={setSelectedTypes}
+          selectedCategories={selectedCategories}
+          setSelectedCategories={setSelectedCategories}
+        />
       )}
 
       {errorMsg && (
