@@ -1174,7 +1174,9 @@ function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
 function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
-  const [categoryGroups, setCategoryGroups] = useState([])
+  const [productSummaries, setProductSummaries] = useState([]) // [{ product, qty, revenue, cost, profit }] — ingredients already excluded, not yet filtered by type/category
+  const [selectedTypes, setSelectedTypes] = useState([])
+  const [selectedCategories, setSelectedCategories] = useState([])
 
   useEffect(() => {
     let cancelled = false
@@ -1206,24 +1208,9 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           byProduct[p.id].cost += Number(l.fifo_cost)
         }
 
-        const byCategory = {}
-        for (const item of Object.values(byProduct)) {
-          const cat = item.product.category || '(none)'
-          byCategory[cat] = byCategory[cat] ?? { category: cat, items: [], totalQty: 0, totalRevenue: 0, totalProfit: 0 }
-          const profit = item.revenue - item.cost
-          byCategory[cat].items.push({ ...item, profit })
-          byCategory[cat].totalQty += item.qty
-          byCategory[cat].totalRevenue += item.revenue
-          byCategory[cat].totalProfit += profit
-        }
+        const summaries = Object.values(byProduct).map((item) => ({ ...item, profit: item.revenue - item.cost }))
 
-        // Categories ordered by revenue (biggest first); items within each
-        // category ordered by quantity sold — the actual "best sellers" rank.
-        const groups = Object.values(byCategory)
-          .map((g) => ({ ...g, items: g.items.sort((a, b) => b.qty - a.qty) }))
-          .sort((a, b) => b.totalRevenue - a.totalRevenue)
-
-        if (!cancelled) setCategoryGroups(groups)
+        if (!cancelled) setProductSummaries(summaries)
       } catch (err) {
         if (!cancelled) setErrorMsg(err.message ?? 'Could not load this report.')
       } finally {
@@ -1235,6 +1222,27 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       cancelled = true
     }
   }, [dateFrom, dateTo])
+
+  const filteredSummaries = productSummaries.filter(
+    (item) =>
+      (selectedTypes.length === 0 || selectedTypes.includes(productTypeGroup(item.product))) &&
+      (selectedCategories.length === 0 || selectedCategories.includes(item.product.category || '(none)'))
+  )
+
+  const byCategory = {}
+  for (const item of filteredSummaries) {
+    const cat = item.product.category || '(none)'
+    byCategory[cat] = byCategory[cat] ?? { category: cat, items: [], totalQty: 0, totalRevenue: 0, totalProfit: 0 }
+    byCategory[cat].items.push(item)
+    byCategory[cat].totalQty += item.qty
+    byCategory[cat].totalRevenue += item.revenue
+    byCategory[cat].totalProfit += item.profit
+  }
+  // Categories ordered by revenue (biggest first); items within each category
+  // ordered by quantity sold — the actual "best sellers" rank.
+  const categoryGroups = Object.values(byCategory)
+    .map((g) => ({ ...g, items: [...g.items].sort((a, b) => b.qty - a.qty) }))
+    .sort((a, b) => b.totalRevenue - a.totalRevenue)
 
   const grandTotalQty = categoryGroups.reduce((s, g) => s + g.totalQty, 0)
   const grandTotalRevenue = categoryGroups.reduce((s, g) => s + g.totalRevenue, 0)
@@ -1292,6 +1300,14 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         </div>
       )}
 
+      <TypeCategoryFilter
+        products={productSummaries.map((item) => item.product)}
+        selectedTypes={selectedTypes}
+        setSelectedTypes={setSelectedTypes}
+        selectedCategories={selectedCategories}
+        setSelectedCategories={setSelectedCategories}
+      />
+
       <div id="printable-report">
         <div className="mb-4">
           <div className="font-display text-lg font-semibold">Best Sellers by Category</div>
@@ -1303,7 +1319,9 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         {loading && <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">Loading…</div>}
 
         {!loading && categoryGroups.length === 0 && (
-          <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">No sales in this date range.</div>
+          <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">
+            {productSummaries.length === 0 ? 'No sales in this date range.' : 'Nothing matches the current filter.'}
+          </div>
         )}
 
         {!loading &&
