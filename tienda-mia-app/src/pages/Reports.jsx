@@ -1,5 +1,6 @@
 import { useEffect, useState, Fragment } from 'react'
 import { Printer, Download } from 'lucide-react'
+import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
@@ -642,7 +643,11 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       try {
         const days = datesInRange(dateFrom, dateTo)
 
-        const [productsRes, saleLinesRes, wasteRes] = await Promise.all([
+        const dayBeforeStart = new Date(dateFrom)
+        dayBeforeStart.setDate(dayBeforeStart.getDate() - 1)
+        const initialCountCutoff = dayBeforeStart.toISOString().slice(0, 10)
+
+        const [productsRes, saleLinesRes, wasteRes, initialCountRes] = await Promise.all([
           fetchAllRows(
             'products',
             'id, sku, name, unit, current_cost, selling_price, reorder_point, status, category, business_unit, product_type, inventory_cache(current_stock)',
@@ -650,11 +655,16 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           ),
           fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, pos_terminal)'),
           fetchAllRows('waste', 'product_id, quantity, waste_date'),
+          supabase.rpc('get_inventory_as_of', { cutoff_date: initialCountCutoff }),
         ])
 
         if (productsRes.error) throw productsRes.error
         if (saleLinesRes.error) throw saleLinesRes.error
         if (wasteRes.error) throw wasteRes.error
+        if (initialCountRes.error) throw initialCountRes.error
+
+        const initialCountMap = {}
+        for (const row of initialCountRes.data ?? []) initialCountMap[row.product_id] = Number(row.stock)
 
         productsRes.data = (productsRes.data ?? []).filter((p) => p.status === 'active')
         wasteRes.data = (wasteRes.data ?? []).filter((w) => withinRange(w.waste_date, dateFrom, dateTo))
@@ -713,6 +723,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           return {
             product: p,
             byDay: grid[p.id] ?? {},
+            initialCount: initialCountMap[p.id] ?? 0,
             totalQtySold: totals.qty,
             totalSales: totals.sales,
             totalCost: totals.cost,
@@ -747,17 +758,17 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     if (!matrix) return
     const { days, terminals } = matrix
     const productRows = filteredProductRows
-    const dayHeader1 = ['', '', '', '', ''].concat(
+    const dayHeader1 = ['', '', '', '', '', ''].concat(
       days.flatMap((d) => [d, ''])
     ).concat(['', '', '', '', '', '', '', ''])
-    const dayHeader2 = ['SKU', 'Description', 'Category', 'Unit Cost', 'Price'].concat(
+    const dayHeader2 = ['SKU', 'Description', 'Category', 'Unit Cost', 'Price', 'Initial Count'].concat(
       days.flatMap(() => terminals)
     ).concat(['Total Qty Sold', 'Total Sales', 'Total Cost', 'Remaining Qty', 'Percent', 'Avg Qty Sales', 'Movement', 'Waste', 'Suggested Purchase (7d)'])
 
     const lines = [dayHeader1, dayHeader2].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
 
     for (const pr of productRows) {
-      const row = [pr.product.sku, pr.product.name, pr.product.category ?? '', Number(pr.product.current_cost).toFixed(2), Number(pr.product.selling_price).toFixed(2)]
+      const row = [pr.product.sku, pr.product.name, pr.product.category ?? '', Number(pr.product.current_cost).toFixed(2), Number(pr.product.selling_price).toFixed(2), pr.initialCount]
       for (const d of days) {
         const cell = pr.byDay[d] ?? [0, 0]
         row.push(cell[0] || '', cell[1] || '')
@@ -842,7 +853,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
             <table className="w-full whitespace-nowrap text-left text-xs">
               <thead className="text-[var(--color-ink-soft)]">
                 <tr className="border-b border-[var(--color-line)]">
-                  <th className="px-2 py-2" colSpan={5} />
+                  <th className="px-2 py-2" colSpan={6} />
                   {matrix.days.map((d) => (
                     <th key={d} className="px-2 py-2 text-center" colSpan={2}>{d.slice(5)}</th>
                   ))}
@@ -854,6 +865,9 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                   <th className="px-2 py-2">Category</th>
                   <th className="px-2 py-2">Cost</th>
                   <th className="px-2 py-2">Price</th>
+                  <th className="px-2 py-2" title="Stock as of the day before this report's date range begins — compare it to Remaining to see if the numbers actually add up">
+                    Initial Count
+                  </th>
                   {matrix.days.map((d) => (
                     <Fragment key={d}>
                       <th className="px-1 py-2 text-center">{matrix.terminals[0]}</th>
@@ -873,7 +887,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
               </thead>
               <tbody>
                 {filteredProductRows.length === 0 && (
-                  <tr><td colSpan={5 + matrix.days.length * 2 + 9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No products match this filter.</td></tr>
+                  <tr><td colSpan={6 + matrix.days.length * 2 + 9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No products match this filter.</td></tr>
                 )}
                 {filteredProductRows.map((pr) => (
                   <tr key={pr.product.id} className="border-b border-[var(--color-line)] last:border-0">
@@ -882,6 +896,7 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                     <td className="px-2 py-1.5 text-[var(--color-ink-soft)]">{pr.product.category || '—'}</td>
                     <td className="px-2 py-1.5">{Number(pr.product.current_cost).toFixed(2)}</td>
                     <td className="px-2 py-1.5">{Number(pr.product.selling_price).toFixed(2)}</td>
+                    <td className="px-2 py-1.5 font-medium">{pr.initialCount}</td>
                     {matrix.days.map((d) => {
                       const cell = pr.byDay[d] ?? [0, 0]
                       return (

@@ -1,10 +1,17 @@
 import { X } from 'lucide-react'
 
+const WIDTHS = {
+  md: 'max-w-md',
+  xl: 'max-w-4xl',
+}
+
 /**
  * Right-side slide panel — the spec calls for this pattern for every
- * Add/Edit form instead of full-page navigation or modals.
+ * Add/Edit form instead of full-page navigation or modals. Defaults to a
+ * narrow width (forms); pass size="xl" for content that genuinely needs
+ * room, like a full line-items table.
  */
-export default function SlidePanel({ open, title, onClose, children }) {
+export default function SlidePanel({ open, title, onClose, children, size = 'md' }) {
   if (!open) return null
 
   return (
@@ -14,7 +21,7 @@ export default function SlidePanel({ open, title, onClose, children }) {
         onClick={onClose}
         className="absolute inset-0 bg-[var(--color-ink)]/40"
       />
-      <div className="relative flex h-full w-full max-w-md flex-col bg-[var(--color-paper-raised)] shadow-xl">
+      <div className={`relative flex h-full w-full ${WIDTHS[size] ?? WIDTHS.md} flex-col bg-[var(--color-paper-raised)] shadow-xl`}>
         <div className="flex items-center justify-between border-b border-[var(--color-line)] px-6 py-4">
           <h2 className="font-display text-lg font-semibold">{title}</h2>
           <button

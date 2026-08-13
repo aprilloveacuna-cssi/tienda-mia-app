@@ -1000,6 +1000,7 @@ export default function Sales() {
         open={panelOpen}
         title={mode === 'new' ? 'New sale' : viewedSale?.sale_number}
         onClose={() => setPanelOpen(false)}
+        size="xl"
       >
         {errorMsg && (
           <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
@@ -1040,8 +1041,8 @@ export default function Sales() {
               Line items
             </div>
 
-            <div className="mb-4 max-h-64 overflow-auto rounded-md border border-[var(--color-line)]">
-              <table className="w-full min-w-[520px] whitespace-nowrap text-left text-sm">
+            <div className="mb-4 max-h-[50vh] overflow-auto rounded-md border border-[var(--color-line)]">
+              <table className="w-full whitespace-nowrap text-left text-sm">
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Product</th>
@@ -1337,8 +1338,8 @@ export default function Sales() {
               Line items
             </div>
 
-            <div className="mb-5 max-h-64 overflow-auto rounded-md border border-[var(--color-line)]">
-              <table className="w-full min-w-[480px] whitespace-nowrap text-left text-sm">
+            <div className="mb-5 max-h-[60vh] overflow-auto rounded-md border border-[var(--color-line)]">
+              <table className="w-full whitespace-nowrap text-left text-sm">
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Product</th>

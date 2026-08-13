@@ -541,6 +541,7 @@ export default function Purchases() {
         open={panelOpen}
         title={selected ? selected.purchase_number : 'New purchase'}
         onClose={() => setPanelOpen(false)}
+        size={selected ? 'xl' : 'md'}
       >
         {errorMsg && (
           <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
@@ -597,8 +598,8 @@ export default function Purchases() {
               Line items
             </div>
 
-            <div className="mb-4 max-h-64 overflow-auto rounded-md border border-[var(--color-line)]">
-              <table className="w-full min-w-[560px] whitespace-nowrap text-left text-sm">
+            <div className="mb-4 max-h-[60vh] overflow-auto rounded-md border border-[var(--color-line)]">
+              <table className="w-full whitespace-nowrap text-left text-sm">
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
                     <th className="px-3 py-2">Product</th>
