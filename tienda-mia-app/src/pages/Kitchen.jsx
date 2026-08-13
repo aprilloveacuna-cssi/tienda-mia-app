@@ -1215,6 +1215,7 @@ export default function Kitchen() {
         unit_cost_at_transaction: line.unit_cost,
         source_module: 'Kitchen',
         source_reference_id: batch.id,
+        occurred_at: dailyMealsDate,
       })
 
       if (ledgerErr) {

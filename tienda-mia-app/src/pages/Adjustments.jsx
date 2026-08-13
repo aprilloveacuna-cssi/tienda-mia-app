@@ -94,6 +94,7 @@ export default function Adjustments() {
     setLabelDraft('')
     setCountLines([])
     setCountReason('')
+    loadInventoryAsOf(data.count_date)
     loadPhysicalCounts()
   }
 
@@ -103,11 +104,20 @@ export default function Adjustments() {
     setCountReason('')
     setCountError('')
     await loadCountLines(count.id)
+    loadInventoryAsOf(count.count_date)
   }
 
   async function saveCountLabel() {
     if (!selectedCount) return
     await supabase.from('physical_counts').update({ label: labelDraft.trim() || null }).eq('id', selectedCount.id)
+    loadPhysicalCounts()
+  }
+
+  async function saveCountDate(newDate) {
+    if (!selectedCount) return
+    await supabase.from('physical_counts').update({ count_date: newDate }).eq('id', selectedCount.id)
+    setSelectedCount({ ...selectedCount, count_date: newDate })
+    loadInventoryAsOf(newDate)
     loadPhysicalCounts()
   }
 
@@ -131,14 +141,14 @@ export default function Adjustments() {
     loadPhysicalCounts()
   }
 
-  async function loadInventoryCache() {
-    const { data, error } = await fetchAllRows('inventory_cache', 'product_id, current_stock', null, { tiebreaker: 'product_id' })
+  async function loadInventoryAsOf(cutoffDate) {
+    const { data, error } = await supabase.rpc('get_inventory_as_of', { cutoff_date: cutoffDate })
     if (error) {
-      setCountError('Could not load current stock levels — System Qty may show as 0 until this is fixed.')
+      setCountError('Could not load stock as of that date — System Qty may be inaccurate until this is fixed.')
       return
     }
     const map = {}
-    for (const row of data ?? []) map[row.product_id] = Number(row.current_stock)
+    for (const row of data ?? []) map[row.product_id] = Number(row.stock)
     setInventoryCacheMap(map)
   }
 
@@ -176,7 +186,6 @@ export default function Adjustments() {
     loadAdjustments()
     loadProducts()
     loadAdjustmentTypes()
-    loadInventoryCache()
     loadPhysicalCounts()
   }, [])
 
@@ -418,7 +427,7 @@ export default function Adjustments() {
     }
     await supabase.from('physical_count_lines').update({ posted: true }).eq('id', line.id)
     await loadCountLines(selectedCount.id)
-    loadInventoryCache()
+    loadInventoryAsOf(selectedCount.count_date)
   }
 
   async function postAllCountVariances() {
@@ -452,7 +461,7 @@ export default function Adjustments() {
     if (failed.length > 0) setCountError(`Posted the rest, but failed for: ${failed.join(', ')}`)
     await loadCountLines(selectedCount.id)
     loadAdjustments()
-    loadInventoryCache()
+    loadInventoryAsOf(selectedCount.count_date)
   }
 
   const { sortKey: countSortKey, sortDir: countSortDir, toggleSort: toggleCountSort } = useSort('added', 'desc')
@@ -477,7 +486,7 @@ export default function Adjustments() {
   const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', 'System Qty', 'Counted Qty', 'Variance', 'Value Impact', 'Status']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Variance', 'Value Impact', 'Status']
     const rows = sortedCountRows.map((row) => {
       const systemQty = inventoryCacheMap[row.product_id] ?? 0
       const variance = row.counted_qty - systemQty
@@ -622,6 +631,7 @@ export default function Adjustments() {
                 <tr>
                   <th className="px-4 py-3">Count #</th>
                   <th className="px-4 py-3">Label</th>
+                  <th className="px-4 py-3">Count date</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Items</th>
                   <th className="px-4 py-3">Posted</th>
@@ -631,7 +641,7 @@ export default function Adjustments() {
               </thead>
               <tbody>
                 {physicalCounts.length === 0 && (
-                  <tr><td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No physical counts yet — start one when you're ready.</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No physical counts yet — start one when you're ready.</td></tr>
                 )}
                 {physicalCounts.map((c) => (
                   <tr
@@ -641,6 +651,7 @@ export default function Adjustments() {
                   >
                     <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{c.count_number}</td>
                     <td className="px-4 py-3 font-medium">{c.label || '—'}</td>
+                    <td className="px-4 py-3">{c.count_date}</td>
                     <td className="px-4 py-3"><StatusChip tone={c.status === 'completed' ? 'ok' : 'attention'}>{c.status}</StatusChip></td>
                     <td className="px-4 py-3">{(c.physical_count_lines ?? []).length}</td>
                     <td className="px-4 py-3">{(c.physical_count_lines ?? []).filter((l) => l.posted).length}</td>
@@ -686,16 +697,31 @@ export default function Adjustments() {
             )}
           </div>
 
-          <label className="mb-4 block">
-            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Label (optional)</span>
-            <input
-              value={labelDraft}
-              onChange={(e) => setLabelDraft(e.target.value)}
-              onBlur={saveCountLabel}
-              placeholder="e.g. End of July 2026 count"
-              className="input max-w-sm"
-            />
-          </label>
+          <div className="mb-4 flex gap-4">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Label (optional)</span>
+              <input
+                value={labelDraft}
+                onChange={(e) => setLabelDraft(e.target.value)}
+                onBlur={saveCountLabel}
+                placeholder="e.g. End of July 2026 count"
+                className="input max-w-sm"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Count date</span>
+              <input
+                type="date"
+                value={selectedCount.count_date}
+                onChange={(e) => saveCountDate(e.target.value)}
+                className="input"
+              />
+            </label>
+          </div>
+          <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
+            System Qty below reflects stock exactly as it stood on the count date above — not today's live numbers.
+            Change this if the count represents an earlier date than when you're actually entering it.
+          </p>
 
           {countError && (
             <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
@@ -802,7 +828,7 @@ export default function Adjustments() {
                       <SortableTh label="Added" sortKey="added" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Product" sortKey="product" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
-                      <SortableTh label="System Qty" sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label={`System Qty (as of ${selectedCount.count_date})`} sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Variance" sortKey="variance" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Value Impact" sortKey="valueImpact" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />

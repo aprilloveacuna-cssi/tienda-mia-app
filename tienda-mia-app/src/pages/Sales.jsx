@@ -220,6 +220,7 @@ export default function Sales() {
         unit_cost_at_transaction: topUpCost,
         source_module: 'Kitchen',
         source_reference_id: newBatch.id,
+        occurred_at: saleDate,
       })
     }
   }
@@ -850,6 +851,7 @@ export default function Sales() {
         unit_cost_at_transaction: c.unit_cost,
         source_module: 'Sales',
         source_reference_id: saleLine.id,
+        occurred_at: saleDateTime.toISOString(),
       }))
       const { error: ledgerErr } = await supabase.from('inventory_ledger').insert(ledgerRows)
       if (ledgerErr) {

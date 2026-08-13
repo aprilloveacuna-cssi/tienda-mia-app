@@ -172,6 +172,7 @@ export default function ReturnsWaste() {
         unit_cost_at_transaction: Number(selectedProduct?.current_cost ?? 0),
         source_module: 'Returns',
         source_reference_id: ret.id,
+        occurred_at: ret.return_date,
       }
     } else if (returnType === 'Supplier') {
       ledgerRow = {
@@ -182,6 +183,7 @@ export default function ReturnsWaste() {
         unit_cost_at_transaction: Number(selectedBatch?.unit_cost ?? 0),
         source_module: 'Returns',
         source_reference_id: ret.id,
+        occurred_at: ret.return_date,
       }
     }
 
@@ -238,6 +240,7 @@ export default function ReturnsWaste() {
       unit_cost_at_transaction: Number(selectedBatch?.unit_cost ?? 0),
       source_module: 'Waste',
       source_reference_id: w.id,
+      occurred_at: w.waste_date,
     })
     if (ledgerErr) {
       setErrorMsg(`Waste recorded but inventory wasn't updated: ${ledgerErr.message}`)

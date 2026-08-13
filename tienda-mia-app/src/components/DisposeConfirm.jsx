@@ -63,6 +63,7 @@ export default function DisposeConfirm({ open, batch, onClose, onDisposed }) {
       unit_cost_at_transaction: Number(batch.unit_cost ?? 0),
       source_module: 'Waste',
       source_reference_id: w.id,
+      occurred_at: w.waste_date,
     })
 
     setSaving(false)

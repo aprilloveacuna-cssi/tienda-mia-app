@@ -121,7 +121,6 @@ export default function Dashboard() {
       const lowStock = invRows
         .filter((r) => r.current_stock <= 0 || (r.product.reorder_point && r.current_stock <= r.product.reorder_point))
         .sort((a, b) => a.current_stock - b.current_stock)
-        .slice(0, 5)
       setAlerts(lowStock)
 
       await loadExpiryAlerts()
@@ -203,16 +202,21 @@ export default function Dashboard() {
           ) : alerts.length === 0 ? (
             <EmptyRow text="Everything is above its reorder point right now." />
           ) : (
-            <div className="space-y-2">
-              {alerts.map((r) => (
-                <div key={r.product_id} className="flex items-center justify-between text-sm">
-                  <span>{r.product.name}</span>
-                  <StatusChip tone={r.current_stock <= 0 ? 'critical' : 'attention'}>
-                    {r.current_stock <= 0 ? 'out of stock' : `${r.current_stock} left`}
-                  </StatusChip>
-                </div>
-              ))}
-            </div>
+            <>
+              <div className="mb-2 text-xs text-[var(--color-ink-soft)]">
+                {alerts.length} item{alerts.length === 1 ? '' : 's'} need{alerts.length === 1 ? 's' : ''} reordering
+              </div>
+              <div className="max-h-64 space-y-2 overflow-y-auto">
+                {alerts.map((r) => (
+                  <div key={r.product_id} className="flex items-center justify-between text-sm">
+                    <span>{r.product.name}</span>
+                    <StatusChip tone={r.current_stock <= 0 ? 'critical' : 'attention'}>
+                      {r.current_stock <= 0 ? 'out of stock' : `${r.current_stock} left`}
+                    </StatusChip>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </Panel>
 
