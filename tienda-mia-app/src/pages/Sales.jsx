@@ -51,6 +51,7 @@ export default function Sales() {
       })
     : sortedSales
   const [products, setProducts] = useState([])
+  const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // cleanedBarcode -> product_id, for additional barcodes beyond the primary one
   const activeProducts = products.filter((p) => p.status === 'active')
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -115,10 +116,25 @@ export default function Sales() {
     if (data) setDiscountPct(Number(data.value))
   }
 
+  async function loadExtraBarcodes() {
+    const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const map = {}
+    for (const row of data ?? []) {
+      const cleaned = (row.barcode ?? '')
+        .normalize('NFKC')
+        // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+        .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+        .toUpperCase()
+      map[cleaned] = row.product_id
+    }
+    setExtraBarcodeMap(map)
+  }
+
   useEffect(() => {
     loadSales()
     loadProducts()
     loadDiscountSetting()
+    loadExtraBarcodes()
   }, [])
 
   function openNew() {
@@ -391,7 +407,8 @@ export default function Sales() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode))
+            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
+              products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
             : obj.sku
               ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
               : null
@@ -467,15 +484,12 @@ export default function Sales() {
           try {
             const stockGroupIds = resolveStockGroupIds(pr.product)
             const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
-            if (!satisfied && !pr.product.unlimited_stock) {
-              skipped.push({ rowNum: pr.rowNum, reason: `${pr.product.name}: only ${totalAvailable} ${pr.product.unit} available` })
-              continue
-            }
             const lineTotal = pr.qty * pr.unitPrice
             const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
             const openQty = pr.qty - consumedQty
             const fifoCost =
               consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(pr.product.current_cost ?? 0)
+            const isOversold = !satisfied && !pr.product.unlimited_stock
             const newLine = {
               tempId: crypto.randomUUID(),
               product_id: pr.product.id,
@@ -489,6 +503,8 @@ export default function Sales() {
               gross_profit: lineTotal - fifoCost,
               consumption,
               openQty,
+              isOversold,
+              oversoldNote: isOversold ? `only ${totalAvailable} ${pr.product.unit} were in stock — sold anyway, now negative` : null,
             }
             accumulator.push(newLine)
             valid.push(newLine)
@@ -528,33 +544,32 @@ export default function Sales() {
       await ensureKitchenStock(updatedProduct, mismatch.qty, headerForm.sale_date)
       const stockGroupIds = resolveStockGroupIds(updatedProduct)
       const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, mismatch.qty, reservationSource)
-      if (!satisfied && !updatedProduct.unlimited_stock) {
-        setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: `${updatedProduct.name}: only ${totalAvailable} ${updatedProduct.unit} available` }])
-      } else {
-        const lineTotal = mismatch.qty * mismatch.givenUnitPrice
-        const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-        const openQty = mismatch.qty - consumedQty
-        const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(updatedProduct.current_cost ?? 0)
-        setImportPreviewValid([
-          ...importPreviewValid,
-          {
-            tempId: crypto.randomUUID(),
-            product_id: updatedProduct.id,
-            product_name: updatedProduct.name,
-            category: updatedProduct.category,
-            unit: updatedProduct.unit,
-            quantity: mismatch.qty,
-            unit_price: mismatch.givenUnitPrice,
-            line_total: lineTotal,
-            fifo_cost: fifoCost,
-            gross_profit: lineTotal - fifoCost,
-            consumption,
-            openQty,
-            is_discounted: false,
-            discount_amount: 0,
-          },
-        ])
-      }
+      const isOversold = !satisfied && !updatedProduct.unlimited_stock
+      const lineTotal = mismatch.qty * mismatch.givenUnitPrice
+      const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+      const openQty = mismatch.qty - consumedQty
+      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(updatedProduct.current_cost ?? 0)
+      setImportPreviewValid([
+        ...importPreviewValid,
+        {
+          tempId: crypto.randomUUID(),
+          product_id: updatedProduct.id,
+          product_name: updatedProduct.name,
+          category: updatedProduct.category,
+          unit: updatedProduct.unit,
+          quantity: mismatch.qty,
+          unit_price: mismatch.givenUnitPrice,
+          line_total: lineTotal,
+          fifo_cost: fifoCost,
+          gross_profit: lineTotal - fifoCost,
+          consumption,
+          openQty,
+          isOversold,
+          oversoldNote: isOversold ? `only ${totalAvailable} ${updatedProduct.unit} were in stock — sold anyway, now negative` : null,
+          is_discounted: false,
+          discount_amount: 0,
+        },
+      ])
     } catch {
       setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
     }
@@ -593,24 +608,24 @@ export default function Sales() {
     const stockGroupIds = resolveStockGroupIds(product)
     const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, qty)
 
-    // Items flagged "never block for low stock" (e.g. Rice, where real
-    // batch-level stock isn't tracked precisely) still consume whatever
-    // real batches exist first, then treat the remainder as an open
-    // quantity costed at current cost — never blocking the sale itself.
-    if (!satisfied && !product.unlimited_stock) {
-      setLineWarning(
-        totalAvailable === 0
-          ? `${product.name} has no stock available.`
-          : `Only ${totalAvailable} ${product.unit} of ${product.name} available (across pending lines already added).`
-      )
-      return false
-    }
-
     const lineTotal = qty * unitPrice
     const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
     const openQty = qty - consumedQty
     const fifoCost =
       consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
+
+    // Sales never block on insufficient stock. Items flagged "unlimited
+    // stock" already treat the shortfall as an untracked open quantity —
+    // for everything else, the shortfall becomes real, visible negative
+    // stock (a batch-less ledger entry written at completeSale), so it
+    // surfaces in the Negative Stock tab instead of silently vanishing or
+    // stopping the sale.
+    const isOversold = !satisfied && !product.unlimited_stock
+    if (isOversold) {
+      setLineWarning(
+        `${product.name}: only ${totalAvailable} ${product.unit} available — sold anyway. ${openQty} ${product.unit} will show as negative stock until corrected.`
+      )
+    }
 
     setPendingLines([
       ...pendingLines,
@@ -627,6 +642,7 @@ export default function Sales() {
         gross_profit: lineTotal - fifoCost,
         consumption,
         openQty,
+        isOversold,
         is_discounted: false,
         discount_amount: 0,
       },
@@ -853,6 +869,25 @@ export default function Sales() {
         source_reference_id: saleLine.id,
         occurred_at: saleDateTime.toISOString(),
       }))
+
+      // The oversold portion of a line (sold beyond what any batch actually
+      // had) gets its own batch-less ledger entry — this is what makes the
+      // shortfall real, visible negative stock instead of silently vanishing.
+      if (line.isOversold && line.openQty > 0) {
+        const product = products.find((p) => p.id === line.product_id)
+        ledgerRows.push({
+          product_id: line.product_id,
+          batch_id: null,
+          transaction_type: 'Sale',
+          quantity_change: -line.openQty,
+          unit_cost_at_transaction: Number(product?.current_cost ?? 0),
+          source_module: 'Sales',
+          source_reference_id: saleLine.id,
+          remarks: 'Oversold — sold beyond available stock',
+          occurred_at: saleDateTime.toISOString(),
+        })
+      }
+
       const { error: ledgerErr } = await supabase.from('inventory_ledger').insert(ledgerRows)
       if (ledgerErr) {
         setErrorMsg(`Sale created but inventory wasn't fully updated: ${ledgerErr.message}. Check ${sale.sale_number} manually.`)
@@ -1066,13 +1101,22 @@ export default function Sales() {
                     <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">
                         {l.product_name}
-                        {l.openQty > 0 && (
+                        {l.isOversold ? (
                           <span
-                            title="Consumed whatever real stock exists, rest costed at current cost — this item never blocks a sale"
-                            className="ml-1.5 rounded-full bg-[var(--color-amber-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-amber)]"
+                            title="Sold beyond what was actually in stock — this product will show negative until corrected in the Negative Stock tab"
+                            className="ml-1.5 rounded-full bg-[var(--color-rust-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-rust)]"
                           >
-                            {l.openQty} open
+                            {l.openQty} oversold
                           </span>
+                        ) : (
+                          l.openQty > 0 && (
+                            <span
+                              title="Consumed whatever real stock exists, rest costed at current cost — this item never blocks a sale"
+                              className="ml-1.5 rounded-full bg-[var(--color-amber-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-amber)]"
+                            >
+                              {l.openQty} open
+                            </span>
+                          )
                         )}
                         {l.is_discounted && (
                           <span

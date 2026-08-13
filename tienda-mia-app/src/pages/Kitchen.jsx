@@ -92,6 +92,7 @@ function recipeCost(recipe, ingredients) {
 export default function Kitchen() {
   const [tab, setTab] = useState('recipes')
   const [products, setProducts] = useState([])
+  const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // cleanedBarcode -> product_id, for additional barcodes beyond the primary one
   const [recipes, setRecipes] = useState([])
   const [leftovers, setLeftovers] = useState([])
   const [dailyMealsHistory, setDailyMealsHistory] = useState([])
@@ -228,7 +229,7 @@ export default function Kitchen() {
   async function loadAll() {
     setLoading(true)
     setErrorMsg('')
-    const [productsRes, recipesRes, leftoversRes, dailyMealsHistoryRes] = await Promise.all([
+    const [productsRes, recipesRes, leftoversRes, dailyMealsHistoryRes, barcodesRes] = await Promise.all([
       fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, selling_price, status, business_unit, category, product_type', 'name'),
       supabase
         .from('recipes')
@@ -237,6 +238,7 @@ export default function Kitchen() {
         .order('created_at', { ascending: false }),
       fetchAllRows('waste', '*, product:products(name, sku, unit, category)', 'waste_date', { ascending: false }),
       loadDailyMealsHistory(),
+      supabase.from('product_barcodes').select('product_id, barcode'),
     ])
 
     if (productsRes.error || recipesRes.error || leftoversRes.error || dailyMealsHistoryRes.error) {
@@ -250,6 +252,18 @@ export default function Kitchen() {
     setIngredientProducts(allProducts.filter((p) => p.product_type === 'RAW MATERIAL'))
     setRecipes(recipesRes.data ?? [])
     setLeftovers((leftoversRes.data ?? []).filter((w) => w.reason === 'Daily Leftover'))
+
+    const barcodeMap = {}
+    for (const row of barcodesRes.data ?? []) {
+      const cleaned = (row.barcode ?? '')
+        .normalize('NFKC')
+        // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+        .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+        .toUpperCase()
+      barcodeMap[cleaned] = row.product_id
+    }
+    setExtraBarcodeMap(barcodeMap)
+
     setLoading(false)
   }
 
@@ -636,7 +650,8 @@ export default function Kitchen() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode))
+            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
+              products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
             : obj.sku
               ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
               : obj.name

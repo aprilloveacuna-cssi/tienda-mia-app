@@ -12,7 +12,7 @@ import { normalizeSearchText } from '../lib/search'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
 export default function Adjustments() {
-  const [tab, setTab] = useState('adjustments') // 'adjustments' | 'physicalCount'
+  const [tab, setTab] = useState('adjustments') // 'adjustments' | 'physicalCount' | 'negativeStock'
   const [adjustments, setAdjustments] = useState([])
   const [inventoryCacheMap, setInventoryCacheMap] = useState({})
 
@@ -38,6 +38,7 @@ export default function Adjustments() {
       })
     : sortedAdjustments
   const [products, setProducts] = useState([])
+  const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // normalizedBarcode -> product_id, for additional barcodes beyond the primary one
   const [adjustmentTypes, setAdjustmentTypes] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -47,6 +48,8 @@ export default function Adjustments() {
   const [level, setLevel] = useState('product') // 'product' | 'batch'
   const [batches, setBatches] = useState([])
   const [batchId, setBatchId] = useState('')
+  const [expiryDraft, setExpiryDraft] = useState('')
+  const [originalExpiry, setOriginalExpiry] = useState('')
   const [oldValue, setOldValue] = useState(null)
   const [newValue, setNewValue] = useState('')
   const [adjustmentType, setAdjustmentType] = useState('')
@@ -68,6 +71,96 @@ export default function Adjustments() {
   const [countImportSkipped, setCountImportSkipped] = useState([])
   const [countSearch, setCountSearch] = useState('')
   const countFileInputRef = useRef(null)
+
+  // ---------- Negative Stock ----------
+  const [negativeStockRows, setNegativeStockRows] = useState([]) // [{ product, current_stock, first_negative_date }]
+  const [negativeStockLoading, setNegativeStockLoading] = useState(true)
+  const [negativeStockError, setNegativeStockError] = useState('')
+  const [negDateFrom, setNegDateFrom] = useState('')
+  const [negDateTo, setNegDateTo] = useState('')
+  const [fixingProductId, setFixingProductId] = useState(null)
+  const [fixNewValue, setFixNewValue] = useState('')
+  const [fixReason, setFixReason] = useState('')
+
+  async function loadNegativeStock() {
+    setNegativeStockLoading(true)
+    setNegativeStockError('')
+    const { data, error } = await supabase.rpc('get_first_negative_date')
+    if (error) {
+      setNegativeStockError(error.message)
+      setNegativeStockLoading(false)
+      return
+    }
+    const productIds = (data ?? []).map((r) => r.product_id)
+    if (productIds.length === 0) {
+      setNegativeStockRows([])
+      setNegativeStockLoading(false)
+      return
+    }
+    const { data: productsData, error: prodErr } = await supabase
+      .from('products')
+      .select('id, name, sku, barcode, unit, category, current_cost')
+      .in('id', productIds)
+    if (prodErr) {
+      setNegativeStockError(prodErr.message)
+      setNegativeStockLoading(false)
+      return
+    }
+    const productsById = Object.fromEntries((productsData ?? []).map((p) => [p.id, p]))
+    const rows = (data ?? [])
+      .map((r) => ({
+        product: productsById[r.product_id],
+        current_stock: Number(r.current_stock),
+        first_negative_date: r.first_negative_date,
+      }))
+      .filter((r) => r.product)
+      .sort((a, b) => a.current_stock - b.current_stock)
+    setNegativeStockRows(rows)
+    setNegativeStockLoading(false)
+  }
+
+  function startFix(row) {
+    setFixingProductId(row.product.id)
+    setFixNewValue('')
+    setFixReason('')
+  }
+
+  function cancelFix() {
+    setFixingProductId(null)
+    setFixNewValue('')
+    setFixReason('')
+  }
+
+  async function saveFix(row) {
+    if (fixNewValue === '' || !fixReason.trim()) {
+      setNegativeStockError('Enter both a corrected quantity and a reason before saving.')
+      return
+    }
+    const { error } = await supabase.from('adjustments').insert({
+      product_id: row.product.id,
+      batch_id: null,
+      adjustment_type: 'Count Correction',
+      reason: fixReason.trim(),
+      old_value: row.current_stock,
+      new_value: Number(fixNewValue),
+    })
+    if (error) {
+      setNegativeStockError(error.message)
+      return
+    }
+    setFixingProductId(null)
+    setFixNewValue('')
+    setFixReason('')
+    setNegativeStockError('')
+    loadNegativeStock()
+    loadAdjustments()
+  }
+
+  const filteredNegativeStockRows = negativeStockRows.filter(
+    (r) =>
+      (!negDateFrom || r.first_negative_date >= negDateFrom) &&
+      (!negDateTo || r.first_negative_date <= negDateTo)
+  )
 
   async function loadPhysicalCounts() {
     const { data, error } = await fetchAllRows('physical_counts', '*, physical_count_lines(id, posted)', 'updated_at', { ascending: false })
@@ -172,6 +265,13 @@ export default function Adjustments() {
     setProducts((data ?? []).filter((p) => p.status === 'active'))
   }
 
+  async function loadExtraBarcodes() {
+    const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const map = {}
+    for (const row of data ?? []) map[normalizeSearchText(row.barcode)] = row.product_id
+    setExtraBarcodeMap(map)
+  }
+
   async function loadAdjustmentTypes() {
     const { data } = await supabase
       .from('lists')
@@ -185,8 +285,10 @@ export default function Adjustments() {
   useEffect(() => {
     loadAdjustments()
     loadProducts()
+    loadExtraBarcodes()
     loadAdjustmentTypes()
     loadPhysicalCounts()
+    loadNegativeStock()
   }, [])
 
   function resetForm() {
@@ -212,6 +314,8 @@ export default function Adjustments() {
     setProductId(id)
     setLevel('product')
     setBatchId('')
+    setExpiryDraft('')
+    setOriginalExpiry('')
     setNewValue('')
 
     const { data: cache } = await supabase
@@ -232,6 +336,8 @@ export default function Adjustments() {
   function onLevelChange(newLevel) {
     setLevel(newLevel)
     setNewValue('')
+    setExpiryDraft('')
+    setOriginalExpiry('')
     if (newLevel === 'product') {
       setBatchId('')
       const found = products.find((p) => p.id === productId)
@@ -244,6 +350,8 @@ export default function Adjustments() {
     const b = batches.find((x) => x.batch_id === id)
     setOldValue(b ? Number(b.remaining_quantity) : 0)
     setNewValue('')
+    setExpiryDraft(b?.expiration_date ?? '')
+    setOriginalExpiry(b?.expiration_date ?? '')
   }
 
   const adjustmentQty = useMemo(() => {
@@ -271,6 +379,15 @@ export default function Adjustments() {
       new_value: Number(newValue),
       remarks: remarks.trim() || null,
     })
+
+    if (!error && level === 'batch' && batchId && expiryDraft !== originalExpiry) {
+      const newDate = expiryDraft || null
+      // batch_cache is a snapshot that only refreshes when a ledger row is
+      // written — updating it directly here too, same fix as Inventory's
+      // "Edit date," or the screen would keep showing the old date.
+      await supabase.from('batches').update({ expiration_date: newDate }).eq('id', batchId)
+      await supabase.from('batch_cache').update({ expiration_date: newDate }).eq('batch_id', batchId)
+    }
 
     setSaving(false)
     if (error) {
@@ -365,7 +482,8 @@ export default function Adjustments() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => normalizeSearchText(p.barcode) === normalizeSearchText(obj.barcode))
+            ? products.find((p) => normalizeSearchText(p.barcode) === normalizeSearchText(obj.barcode)) ||
+              products.find((p) => p.id === extraBarcodeMap[normalizeSearchText(obj.barcode)])
             : obj.sku
               ? products.find((p) => normalizeSearchText(p.sku) === normalizeSearchText(obj.sku))
               : null
@@ -533,6 +651,7 @@ export default function Adjustments() {
         {[
           ['adjustments', 'Adjustments'],
           ['physicalCount', 'Physical Count'],
+          ['negativeStock', 'Negative Stock'],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -894,6 +1013,121 @@ export default function Adjustments() {
         </div>
       )}
 
+      {tab === 'negativeStock' && (
+        <div>
+          <p className="mb-4 text-sm text-[var(--color-ink-soft)]">
+            Every product currently sitting below zero, with the exact date its running balance first crossed
+            negative — computed from the full transaction history, not a guess. Fixing one here posts a single
+            adjustment for the whole product, not one per sale line.
+          </p>
+
+          <div className="mb-4 flex flex-wrap items-end gap-3">
+            <label className="text-sm">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Went negative from</span>
+              <input type="date" value={negDateFrom} onChange={(e) => setNegDateFrom(e.target.value)} className="input" />
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">to</span>
+              <input type="date" value={negDateTo} onChange={(e) => setNegDateTo(e.target.value)} className="input" />
+            </label>
+            {(negDateFrom || negDateTo) && (
+              <button
+                onClick={() => {
+                  setNegDateFrom('')
+                  setNegDateTo('')
+                }}
+                className="text-xs text-[var(--color-ink-soft)] underline underline-offset-2"
+              >
+                Clear dates
+              </button>
+            )}
+          </div>
+
+          {negativeStockError && (
+            <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+              {negativeStockError}
+            </div>
+          )}
+
+          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <th className="px-4 py-3">Product</th>
+                  <th className="px-4 py-3">Category</th>
+                  <th className="px-4 py-3">Current stock</th>
+                  <th className="px-4 py-3">Went negative on</th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody>
+                {negativeStockLoading && (
+                  <tr><td colSpan={5} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>
+                )}
+                {!negativeStockLoading && filteredNegativeStockRows.length === 0 && (
+                  <tr><td colSpan={5} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                    {negativeStockRows.length === 0 ? 'Nothing is negative right now.' : 'Nothing went negative in that date range.'}
+                  </td></tr>
+                )}
+                {filteredNegativeStockRows.map((row) => (
+                  <tr key={row.product.id} className="border-b border-[var(--color-line)] last:border-0">
+                    <td className="px-4 py-3 font-medium">{row.product.name}</td>
+                    <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product.category || '—'}</td>
+                    <td className="px-4 py-3">
+                      <StatusChip tone="critical">{row.current_stock} {row.product.unit}</StatusChip>
+                    </td>
+                    <td className="px-4 py-3">{row.first_negative_date}</td>
+                    <td className="px-4 py-3">
+                      {fixingProductId === row.product.id ? (
+                        <div className="flex items-end gap-2">
+                          <label className="block">
+                            <span className="mb-1 block text-[10px] font-medium text-[var(--color-ink-soft)]">Actual qty</span>
+                            <input
+                              type="number" step="0.001"
+                              value={fixNewValue}
+                              onChange={(e) => setFixNewValue(e.target.value)}
+                              className="input w-24 py-1 text-xs"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-[10px] font-medium text-[var(--color-ink-soft)]">Reason</span>
+                            <input
+                              value={fixReason}
+                              onChange={(e) => setFixReason(e.target.value)}
+                              placeholder="Why was this negative?"
+                              className="input w-48 py-1 text-xs"
+                            />
+                          </label>
+                          <button
+                            onClick={() => saveFix(row)}
+                            className="rounded-md bg-[var(--color-ink)] px-2 py-1 text-xs font-medium text-white"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={cancelFix}
+                            className="rounded-md border border-[var(--color-line)] px-2 py-1 text-xs font-medium"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => startFix(row)}
+                          className="rounded-md border border-[var(--color-ink)] px-2.5 py-1.5 text-xs font-medium"
+                        >
+                          Fix
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <SlidePanel open={panelOpen} title="New adjustment" onClose={() => setPanelOpen(false)}>
         {errorMsg && (
           <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
@@ -936,6 +1170,20 @@ export default function Adjustments() {
                       </option>
                     ))}
                   </select>
+                </Field>
+              )}
+
+              {level === 'batch' && batchId && (
+                <Field label="Expiration date">
+                  <input
+                    type="date"
+                    value={expiryDraft}
+                    onChange={(e) => setExpiryDraft(e.target.value)}
+                    className="input"
+                  />
+                  <p className="mt-1 text-xs text-[var(--color-ink-soft)]">
+                    Only changes if you edit it — saved together with the quantity correction below, in one action.
+                  </p>
                 </Field>
               )}
 

@@ -54,6 +54,7 @@ export default function Purchases() {
       })
     : sortedPurchases
   const [products, setProducts] = useState([])
+  const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // cleanedBarcode -> product_id, for additional barcodes beyond the primary one
   const activeProducts = products.filter((p) => p.status === 'active')
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -146,9 +147,24 @@ export default function Purchases() {
     if (!error) setLines(data ?? [])
   }
 
+  async function loadExtraBarcodes() {
+    const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const map = {}
+    for (const row of data ?? []) {
+      const cleaned = (row.barcode ?? '')
+        .normalize('NFKC')
+        // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+        .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+        .toUpperCase()
+      map[cleaned] = row.product_id
+    }
+    setExtraBarcodeMap(map)
+  }
+
   useEffect(() => {
     loadPurchases()
     loadProducts()
+    loadExtraBarcodes()
   }, [])
 
   const runningTotal = useMemo(
@@ -314,7 +330,8 @@ export default function Purchases() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode))
+            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
+              products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
             : obj.sku
               ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
               : null

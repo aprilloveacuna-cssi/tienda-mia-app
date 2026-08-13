@@ -1,21 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
+import { supabase } from '../lib/supabaseClient'
 import { normalizeSearchText } from '../lib/search'
 
 /**
  * Search-as-you-type product picker — swaps in for a plain <select> once a
- * catalog is too long to scroll through. Matches on name, SKU, or barcode.
- * Fully keyboard-operable: Arrow Up/Down moves the highlight, Enter selects
- * the highlighted option, Escape closes without changing anything.
+ * catalog is too long to scroll through. Matches on name, SKU, primary
+ * barcode, or any additional barcode a product has. Fully keyboard-operable:
+ * Arrow Up/Down moves the highlight, Enter selects the highlighted option,
+ * Escape closes without changing anything.
  */
 export default function ProductPicker({ products, value, onChange, placeholder = 'Search by name, SKU, or barcode…' }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
   const [highlightedIndex, setHighlightedIndex] = useState(-1)
+  const [extraBarcodesByProduct, setExtraBarcodesByProduct] = useState({})
   const containerRef = useRef(null)
   const optionRefs = useRef([])
 
   const selected = products.find((p) => p.id === value)
+
+  useEffect(() => {
+    async function load() {
+      const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+      const map = {}
+      for (const row of data ?? []) {
+        if (!map[row.product_id]) map[row.product_id] = []
+        map[row.product_id].push(row.barcode)
+      }
+      setExtraBarcodesByProduct(map)
+    }
+    load()
+  }, [])
 
   useEffect(() => {
     function handleClickOutside(e) {
@@ -30,10 +46,12 @@ export default function ProductPicker({ products, value, onChange, placeholder =
   const filtered = query.trim()
     ? products.filter((p) => {
         const q = normalizeSearchText(query)
+        const extraBarcodeMatch = (extraBarcodesByProduct[p.id] ?? []).some((b) => normalizeSearchText(b).includes(q))
         return (
           normalizeSearchText(p.name).includes(q) ||
           normalizeSearchText(p.sku).includes(q) ||
-          normalizeSearchText(p.barcode).includes(q)
+          normalizeSearchText(p.barcode).includes(q) ||
+          extraBarcodeMatch
         )
       })
     : products

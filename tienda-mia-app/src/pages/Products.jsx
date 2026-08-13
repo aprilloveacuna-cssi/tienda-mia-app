@@ -111,12 +111,16 @@ function pairingStatus(product, allProducts) {
 
 export default function Products() {
   const [products, setProducts] = useState([])
+  const [extraBarcodesByProduct, setExtraBarcodesByProduct] = useState({}) // product_id -> [barcode, ...]
   const [lists, setLists] = useState({})
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [search, setSearch] = useState('')
   const [panelOpen, setPanelOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
+  const [extraBarcodes, setExtraBarcodes] = useState([])
+  const [newBarcodeDraft, setNewBarcodeDraft] = useState('')
+  const [barcodeError, setBarcodeError] = useState('')
   const [form, setForm] = useState(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
 
@@ -146,6 +150,16 @@ export default function Products() {
     setLoading(false)
   }
 
+  async function loadAllExtraBarcodes() {
+    const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const map = {}
+    for (const row of data ?? []) {
+      if (!map[row.product_id]) map[row.product_id] = []
+      map[row.product_id].push(row.barcode)
+    }
+    setExtraBarcodesByProduct(map)
+  }
+
   async function loadLists() {
     const { data, error } = await supabase
       .from('lists')
@@ -166,6 +180,7 @@ export default function Products() {
   useEffect(() => {
     loadProducts()
     loadLists()
+    loadAllExtraBarcodes()
   }, [])
 
   const [pairingFilter, setPairingFilter] = useState('all') // 'all' | 'needsPairing'
@@ -174,18 +189,21 @@ export default function Products() {
     const q = normalizeSearchText(search)
     let rows = products
     if (q) {
-      rows = rows.filter(
-        (p) =>
+      rows = rows.filter((p) => {
+        const extraMatch = (extraBarcodesByProduct[p.id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return (
           normalizeSearchText(p.name).includes(q) ||
           normalizeSearchText(p.barcode).includes(q) ||
-          normalizeSearchText(p.sku).includes(q)
-      )
+          normalizeSearchText(p.sku).includes(q) ||
+          extraMatch
+        )
+      })
     }
     if (pairingFilter === 'needsPairing') {
       rows = rows.filter((p) => pairingStatus(p, products) === false)
     }
     return rows
-  }, [products, search, pairingFilter])
+  }, [products, search, pairingFilter, extraBarcodesByProduct])
 
   const { sortKey, sortDir, toggleSort } = useSort('name')
   function sortAccessor(row, key) {
@@ -201,11 +219,45 @@ export default function Products() {
   function openAddPanel() {
     setEditingId(null)
     setForm(EMPTY_FORM)
+    setExtraBarcodes([])
+    setNewBarcodeDraft('')
+    setBarcodeError('')
     setPanelOpen(true)
+  }
+
+  async function loadExtraBarcodes(productId) {
+    const { data } = await supabase.from('product_barcodes').select('id, barcode').eq('product_id', productId).order('created_at')
+    setExtraBarcodes(data ?? [])
+  }
+
+  async function addExtraBarcode() {
+    const code = newBarcodeDraft.trim()
+    if (!code) return
+    setBarcodeError('')
+    const { error } = await supabase.from('product_barcodes').insert({ product_id: editingId, barcode: code })
+    if (error) {
+      setBarcodeError(
+        error.code === '23505' ? `"${code}" is already in use by another product.` : error.message
+      )
+      return
+    }
+    setNewBarcodeDraft('')
+    loadExtraBarcodes(editingId)
+    loadAllExtraBarcodes()
+  }
+
+  async function removeExtraBarcode(id) {
+    await supabase.from('product_barcodes').delete().eq('id', id)
+    loadExtraBarcodes(editingId)
+    loadAllExtraBarcodes()
   }
 
   function openEditPanel(product) {
     setEditingId(product.id)
+    setExtraBarcodes([])
+    setNewBarcodeDraft('')
+    setBarcodeError('')
+    loadExtraBarcodes(product.id)
     setForm({
       barcode: product.barcode ?? '',
       name: product.name ?? '',
@@ -251,9 +303,9 @@ export default function Products() {
       unlimited_stock: form.unlimited_stock,
     }
 
-    const { error } = editingId
-      ? await supabase.from('products').update(payload).eq('id', editingId)
-      : await supabase.from('products').insert(payload)
+    const { data: savedProduct, error } = editingId
+      ? await supabase.from('products').update(payload).eq('id', editingId).select().single()
+      : await supabase.from('products').insert(payload).select().single()
 
     if (error) {
       // Postgres unique_violation on barcode surfaces here in plain terms
@@ -264,6 +316,16 @@ export default function Products() {
       )
       setSaving(false)
       return
+    }
+
+    // Keeps product_barcodes in sync with the primary barcode field, so
+    // every barcode a product has ever used — primary or additional — is
+    // checkable from one place.
+    if (payload.barcode) {
+      await supabase.from('product_barcodes').upsert(
+        { product_id: savedProduct.id, barcode: payload.barcode },
+        { onConflict: 'barcode' }
+      )
     }
 
     setSaving(false)
@@ -613,6 +675,65 @@ export default function Products() {
               className="input"
             />
           </Field>
+
+          {editingId && (
+            <div className="rounded-md border border-dashed border-[var(--color-line)] p-3">
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+                Additional barcodes
+              </div>
+              <p className="mb-2 text-xs text-[var(--color-ink-soft)]">
+                For when a supplier prints a different code on the same item — any of these will match this product too.
+              </p>
+              {barcodeError && (
+                <div className="mb-2 rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                  {barcodeError}
+                </div>
+              )}
+              {extraBarcodes.filter((b) => b.barcode !== form.barcode).length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {extraBarcodes
+                    .filter((b) => b.barcode !== form.barcode)
+                    .map((b) => (
+                      <span
+                        key={b.id}
+                        className="flex items-center gap-1.5 rounded-full bg-[var(--color-paper)] px-2.5 py-1 text-xs font-mono"
+                      >
+                        {b.barcode}
+                        <button
+                          type="button"
+                          onClick={() => removeExtraBarcode(b.id)}
+                          aria-label="Remove barcode"
+                          className="text-[var(--color-ink-soft)] hover:text-[var(--color-rust)]"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <input
+                  value={newBarcodeDraft}
+                  onChange={(e) => setNewBarcodeDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      addExtraBarcode()
+                    }
+                  }}
+                  placeholder="Scan or type another barcode"
+                  className="input flex-1"
+                />
+                <button
+                  type="button"
+                  onClick={addExtraBarcode}
+                  className="rounded-md border border-[var(--color-ink)] px-3 py-2 text-sm font-medium"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
 
           <Field label="Product name" required>
             <input
