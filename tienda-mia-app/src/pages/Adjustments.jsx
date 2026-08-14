@@ -63,7 +63,7 @@ export default function Adjustments() {
   const [selectedCount, setSelectedCount] = useState(null) // the open physical_counts row, or null = list view
   const [countLines, setCountLines] = useState([]) // persisted lines for the selected count, joined to products
   const [labelDraft, setLabelDraft] = useState('')
-  const [countForm, setCountForm] = useState({ product_id: '', counted_qty: '' })
+  const [countForm, setCountForm] = useState({ product_id: '', counted_qty: '', expiration_date: '' })
   const [countReason, setCountReason] = useState('')
   const [showOnlyMismatches, setShowOnlyMismatches] = useState(true)
   const [countPosting, setCountPosting] = useState(false)
@@ -413,12 +413,13 @@ export default function Adjustments() {
       physical_count_id: selectedCount.id,
       product_id: p.id,
       counted_qty: Number(countForm.counted_qty),
+      expiration_date: countForm.expiration_date || null,
     })
     if (error) {
       setCountError(error.message)
       return
     }
-    setCountForm({ product_id: '', counted_qty: '' })
+    setCountForm({ product_id: '', counted_qty: '', expiration_date: '' })
     setCountError('')
     await loadCountLines(selectedCount.id)
     touchCountUpdatedAt()
@@ -433,9 +434,9 @@ export default function Adjustments() {
   }
 
   function handleDownloadCountTemplate() {
-    const headers = ['Barcode', 'Counted Qty']
-    const example1 = ['4800123456789', '48']
-    const example2 = ['4800987654321', '0']
+    const headers = ['Barcode', 'Counted Qty', 'Expiration Date']
+    const example1 = ['4800123456789', '48', '2026-12-31']
+    const example2 = ['4800987654321', '0', '']
     const csv = [headers, example1, example2]
       .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
       .join('\n')
@@ -463,6 +464,7 @@ export default function Adjustments() {
         const aliases = {
           barcode: 'barcode', sku: 'sku',
           countedqty: 'counted_qty', counted: 'counted_qty', qty: 'counted_qty', quantity: 'counted_qty', actualcount: 'counted_qty',
+          expirationdate: 'expiration_date', expiry: 'expiration_date', expdate: 'expiration_date',
         }
         const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
 
@@ -502,7 +504,12 @@ export default function Adjustments() {
           }
 
           existingIds.add(product.id)
-          newLines.push({ physical_count_id: selectedCount.id, product_id: product.id, counted_qty: Number(obj.counted_qty) })
+          newLines.push({
+            physical_count_id: selectedCount.id,
+            product_id: product.id,
+            counted_qty: Number(obj.counted_qty),
+            expiration_date: obj.expiration_date || null,
+          })
         })
 
         if (newLines.length > 0) {
@@ -525,12 +532,42 @@ export default function Adjustments() {
     reader.readAsText(file)
   }
 
-  async function postCountLine(line) {
-    if (!countReason.trim()) {
-      setCountError('Add a reason before posting — it applies to every adjustment this creates.')
-      return
-    }
+  // One rule, one place: a positive count with an expiration date is
+  // genuinely new stock — most commonly kickstarting inventory after a wipe
+  // — so it gets a real batch with that shelf life, not just a number
+  // correction. Everything else (no date, or a decrease) stays a plain
+  // product-level adjustment, same as before.
+  async function postCountVariance(line) {
     const systemQty = inventoryCacheMap[line.product_id] ?? 0
+    const variance = line.counted_qty - systemQty
+
+    if (line.expiration_date && variance > 0) {
+      const product = products.find((p) => p.id === line.product_id)
+      const { data: newBatch, error: batchErr } = await supabase
+        .from('batches')
+        .insert({
+          product_id: line.product_id,
+          source_type: 'BeginningInventory',
+          received_quantity: variance,
+          unit_cost: Number(product?.current_cost ?? 0),
+          expiration_date: line.expiration_date,
+          received_date: selectedCount.count_date,
+        })
+        .select()
+        .single()
+      if (batchErr) return { error: batchErr }
+
+      const { error } = await supabase.from('adjustments').insert({
+        product_id: line.product_id,
+        batch_id: newBatch.id,
+        adjustment_type: 'Count Correction',
+        reason: countReason.trim(),
+        old_value: 0,
+        new_value: variance,
+      })
+      return { error }
+    }
+
     const { error } = await supabase.from('adjustments').insert({
       product_id: line.product_id,
       batch_id: null,
@@ -539,6 +576,15 @@ export default function Adjustments() {
       old_value: systemQty,
       new_value: line.counted_qty,
     })
+    return { error }
+  }
+
+  async function postCountLine(line) {
+    if (!countReason.trim()) {
+      setCountError('Add a reason before posting — it applies to every adjustment this creates.')
+      return
+    }
+    const { error } = await postCountVariance(line)
     if (error) {
       setCountError(`${line.product?.name}: ${error.message}`)
       return
@@ -559,15 +605,7 @@ export default function Adjustments() {
     const failed = []
 
     for (const line of toPost) {
-      const systemQty = inventoryCacheMap[line.product_id] ?? 0
-      const { error } = await supabase.from('adjustments').insert({
-        product_id: line.product_id,
-        batch_id: null,
-        adjustment_type: 'Count Correction',
-        reason: countReason.trim(),
-        old_value: systemQty,
-        new_value: line.counted_qty,
-      })
+      const { error } = await postCountVariance(line)
       if (error) {
         failed.push(line.product?.name)
       } else {
@@ -590,6 +628,7 @@ export default function Adjustments() {
     if (key === 'category') return row.product?.category
     if (key === 'systemQty') return systemQty
     if (key === 'countedQty') return row.counted_qty
+    if (key === 'expiration') return row.expiration_date ?? ''
     if (key === 'variance') return Math.abs(row.counted_qty - systemQty)
     if (key === 'valueImpact') return (row.counted_qty - systemQty) * Number(row.product?.current_cost ?? 0)
     return row[key]
@@ -604,7 +643,7 @@ export default function Adjustments() {
   const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Variance', 'Value Impact', 'Status']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Expiration', 'Variance', 'Value Impact', 'Status']
     const rows = sortedCountRows.map((row) => {
       const systemQty = inventoryCacheMap[row.product_id] ?? 0
       const variance = row.counted_qty - systemQty
@@ -616,6 +655,7 @@ export default function Adjustments() {
         row.product?.category ?? '',
         systemQty,
         row.counted_qty,
+        row.expiration_date ?? '',
         variance,
         valueImpact.toFixed(2),
         row.posted ? 'posted' : variance === 0 ? 'matches' : 'pending',
@@ -849,7 +889,7 @@ export default function Adjustments() {
           )}
 
           <div className="mb-5 rounded-md border border-dashed border-[var(--color-line)] p-4">
-            <form onSubmit={addCountRow} className="mb-3 grid grid-cols-4 gap-3">
+            <form onSubmit={addCountRow} className="mb-3 grid grid-cols-5 gap-3">
               <div className="col-span-2">
                 <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Product</span>
                 <ProductPicker products={products} value={countForm.product_id} onChange={(id) => setCountForm({ ...countForm, product_id: id })} />
@@ -860,6 +900,15 @@ export default function Adjustments() {
                   type="number" step="0.001" min="0" required
                   value={countForm.counted_qty}
                   onChange={(e) => setCountForm({ ...countForm, counted_qty: e.target.value })}
+                  className="input"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Expiration date (optional)</span>
+                <input
+                  type="date"
+                  value={countForm.expiration_date}
+                  onChange={(e) => setCountForm({ ...countForm, expiration_date: e.target.value })}
                   className="input"
                 />
               </label>
@@ -949,6 +998,7 @@ export default function Adjustments() {
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label={`System Qty (as of ${selectedCount.count_date})`} sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Expiration" sortKey="expiration" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Variance" sortKey="variance" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Value Impact" sortKey="valueImpact" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <th className="px-4 py-3" />
@@ -956,7 +1006,7 @@ export default function Adjustments() {
                   </thead>
                   <tbody>
                     {sortedCountRows.length === 0 && (
-                      <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                      <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                         {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing matches this search.'}
                       </td></tr>
                     )}
@@ -971,6 +1021,7 @@ export default function Adjustments() {
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product?.category || '—'}</td>
                           <td className="px-4 py-3">{systemQty} {row.product?.unit}</td>
                           <td className="px-4 py-3">{row.counted_qty} {row.product?.unit}</td>
+                          <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.expiration_date || '—'}</td>
                           <td className="px-4 py-3">
                             {variance === 0 ? (
                               <StatusChip tone="ok">matches</StatusChip>
