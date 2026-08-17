@@ -405,8 +405,17 @@ export default function Adjustments() {
     e.preventDefault()
     if (!selectedCount || !countForm.product_id || countForm.counted_qty === '') return
     const p = products.find((x) => x.id === countForm.product_id)
-    if (countLines.some((r) => r.product_id === p.id)) {
-      setCountError(`${p.name} is already in this list.`)
+    const newDate = countForm.expiration_date || null
+    // A product can appear more than once here as long as each line has its
+    // own expiration date — that's how "20 expire July, 10 expire August"
+    // gets represented. Only a genuine duplicate (same product, same date,
+    // or both with no date at all) gets blocked.
+    if (countLines.some((r) => r.product_id === p.id && (r.expiration_date ?? null) === newDate)) {
+      setCountError(
+        newDate
+          ? `${p.name} already has a line for ${newDate} — edit that one instead, or use a different date.`
+          : `${p.name} is already in this list without a date — add an expiration date to enter it as a separate batch.`
+      )
       return
     }
     const { error } = await supabase.from('physical_count_lines').insert({
@@ -468,7 +477,7 @@ export default function Adjustments() {
         }
         const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
 
-        const existingIds = new Set(countLines.map((r) => r.product_id))
+        const existingKeys = new Set(countLines.map((r) => `${r.product_id}|${r.expiration_date ?? ''}`))
         const newLines = []
         const skipped = []
 
@@ -494,8 +503,14 @@ export default function Adjustments() {
             skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
             return
           }
-          if (existingIds.has(product.id)) {
-            skipped.push({ rowNum, reason: `${product.name} is already in this list` })
+          const rowKey = `${product.id}|${obj.expiration_date || ''}`
+          if (existingKeys.has(rowKey)) {
+            skipped.push({
+              rowNum,
+              reason: obj.expiration_date
+                ? `${product.name} already has a line for ${obj.expiration_date}`
+                : `${product.name} is already in this list without a date — give each row its own expiration date to enter multiple`,
+            })
             return
           }
           if (obj.counted_qty === '' || isNaN(Number(obj.counted_qty))) {
@@ -503,7 +518,7 @@ export default function Adjustments() {
             return
           }
 
-          existingIds.add(product.id)
+          existingKeys.add(rowKey)
           newLines.push({
             physical_count_id: selectedCount.id,
             product_id: product.id,
