@@ -10,6 +10,7 @@ import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 import { normalizeSearchText } from '../lib/search'
+import { parsePosReportWorkbook, extractDateAndTerminalFromFilename } from '../lib/posReportParser'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
 
@@ -64,6 +65,8 @@ export default function Sales() {
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
+  const posReportFileInputRef = useRef(null)
+  const [posReportValidationWarning, setPosReportValidationWarning] = useState(null)
   const [importPanelOpen, setImportPanelOpen] = useState(false)
   const [importPreviewValid, setImportPreviewValid] = useState([])
   const [importPreviewSkipped, setImportPreviewSkipped] = useState([])
@@ -361,6 +364,163 @@ export default function Sales() {
     importFileInputRef.current?.click()
   }
 
+  // Shared by both the CSV import and the POS report import — takes a plain
+  // 2D array (row[0] = header, matched against SALE_LINE_HEADER_ALIASES) and
+  // runs the exact same matching, price-mismatch, and stock-check pipeline
+  // either way. Only how `rows` gets built differs between the two formats.
+  async function processSalesImportRows(rows) {
+    if (rows.length < 2) {
+      setErrorMsg('That file has no data rows.')
+      setImportParsing(false)
+      return
+    }
+    const headerRow = rows[0].map((h) => String(h).trim())
+    const canonicalKeys = headerRow.map((h) => SALE_LINE_HEADER_ALIASES[normalizeHeader(h)] ?? null)
+
+    // Strips stray whitespace (including non-breaking spaces Excel/Sheets
+    // sometimes paste in) and ignores case, so a barcode that LOOKS
+    // identical doesn't get skipped over an invisible formatting difference.
+    const cleanCode = (v) =>
+      (v ?? '')
+        .normalize('NFKC')
+        // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
+        .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
+        .toUpperCase()
+
+    // ---------- Pass 1: parse every row and match it to a product ----------
+    const parsedRows = []
+    const skipped = []
+    const mismatches = []
+
+    for (const [idx, r] of rows.slice(1).entries()) {
+      const rowNum = idx + 2
+      if (r.length !== headerRow.length) {
+        skipped.push({
+          rowNum,
+          reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma in this row or an earlier one threw off parsing from here on`,
+        })
+        continue
+      }
+
+      const obj = {}
+      canonicalKeys.forEach((key, i) => {
+        if (key) obj[key] = String(r[i] ?? '').trim()
+      })
+
+      const product = obj.barcode
+        ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
+          products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
+        : obj.sku
+          ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
+          : null
+
+      if (!product) {
+        skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+        continue
+      }
+      if (product.status !== 'active') {
+        skipped.push({ rowNum, reason: `${product.name} (${product.barcode}) exists but is archived — restore it in Products first` })
+        continue
+      }
+      const qty = Number(obj.quantity)
+      if (!qty || qty <= 0) {
+        skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
+        continue
+      }
+
+      // Either Unit Price or Total Price can be given — Total Price gets
+      // divided back down to a per-unit price. Neither given at all just
+      // defaults to the recorded price (no mismatch possible by definition).
+      let unitPrice
+      const priceWasGiven = Boolean(obj.unit_price || obj.total_price)
+      if (obj.unit_price) {
+        unitPrice = Number(obj.unit_price)
+      } else if (obj.total_price) {
+        unitPrice = Number(obj.total_price) / qty
+      } else {
+        unitPrice = Number(product.selling_price ?? 0)
+      }
+
+      if (priceWasGiven && Math.abs(unitPrice - Number(product.selling_price ?? 0)) > 0.01) {
+        mismatches.push({
+          tempId: crypto.randomUUID(),
+          rowNum,
+          product,
+          qty,
+          givenUnitPrice: unitPrice,
+          recordedPrice: Number(product.selling_price ?? 0),
+        })
+        continue
+      }
+
+      parsedRows.push({ rowNum, product, qty, unitPrice })
+    }
+
+    // ---------- Pass 2: Kitchen items always have enough stock ----------
+    // One rule, applied here per distinct group so a Meal+Silog sharing
+    // one Only only gets topped up once for their combined need, not
+    // once per row. See ensureKitchenStock for what the rule actually is.
+    const kitchenGroups = new Map()
+    for (const pr of parsedRows) {
+      const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
+      if (!isKitchen || pr.product.unlimited_stock) continue
+      const key = [...resolveStockGroupIds(pr.product)].sort().join(',')
+      if (!kitchenGroups.has(key)) {
+        kitchenGroups.set(key, { neededQty: 0, product: pr.product })
+      }
+      kitchenGroups.get(key).neededQty += pr.qty
+    }
+    for (const g of kitchenGroups.values()) {
+      await ensureKitchenStock(g.product, g.neededQty, headerForm.sale_date)
+    }
+
+    // ---------- Pass 3: normal per-row FIFO stock check ----------
+    const valid = []
+    // Accumulates alongside `pendingLines` so each row in this same file
+    // correctly sees stock already claimed by earlier rows in the file —
+    // React state wouldn't update fast enough inside this loop to rely on.
+    const accumulator = [...pendingLines]
+
+    for (const pr of parsedRows) {
+      try {
+        const stockGroupIds = resolveStockGroupIds(pr.product)
+        const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
+        const lineTotal = pr.qty * pr.unitPrice
+        const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+        const openQty = pr.qty - consumedQty
+        const fifoCost =
+          consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(pr.product.current_cost ?? 0)
+        const isOversold = !satisfied && !pr.product.unlimited_stock
+        const newLine = {
+          tempId: crypto.randomUUID(),
+          product_id: pr.product.id,
+          product_name: pr.product.name,
+          category: pr.product.category,
+          unit: pr.product.unit,
+          quantity: pr.qty,
+          unit_price: pr.unitPrice,
+          line_total: lineTotal,
+          fifo_cost: fifoCost,
+          gross_profit: lineTotal - fifoCost,
+          consumption,
+          openQty,
+          isOversold,
+          oversoldNote: isOversold ? `only ${totalAvailable} ${pr.product.unit} were in stock — sold anyway, now negative` : null,
+        }
+        accumulator.push(newLine)
+        valid.push(newLine)
+      } catch {
+        skipped.push({ rowNum: pr.rowNum, reason: 'Could not check stock for this row' })
+      }
+    }
+
+    setImportPreviewValid(valid)
+    setImportPreviewSkipped(skipped)
+    setImportMismatches(mismatches)
+    setImportParsing(false)
+    setImportPanelOpen(true)
+  }
+
   function handleImportFileChange(e) {
     const file = e.target.files?.[0]
     e.target.value = ''
@@ -370,164 +530,56 @@ export default function Sales() {
     reader.onload = async () => {
       setImportParsing(true)
       setErrorMsg('')
+      setPosReportValidationWarning(null)
       try {
         const rows = parseCsv(String(reader.result))
-        if (rows.length < 2) {
-          setErrorMsg('That file has no data rows.')
-          setImportParsing(false)
-          return
-        }
-        const headerRow = rows[0].map((h) => h.trim())
-        const canonicalKeys = headerRow.map((h) => SALE_LINE_HEADER_ALIASES[normalizeHeader(h)] ?? null)
-
-        // Strips stray whitespace (including non-breaking spaces Excel/Sheets
-        // sometimes paste in) and ignores case, so a barcode that LOOKS
-        // identical doesn't get skipped over an invisible formatting difference.
-        const cleanCode = (v) =>
-          (v ?? '')
-            .normalize('NFKC')
-            // eslint-disable-next-line no-misleading-character-class -- intentional list of individual invisible chars, not a ZWJ sequence
-            .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
-            .toUpperCase()
-
-        // ---------- Pass 1: parse every row and match it to a product ----------
-        const parsedRows = []
-        const skipped = []
-        const mismatches = []
-
-        for (const [idx, r] of rows.slice(1).entries()) {
-          const rowNum = idx + 2
-          if (r.length !== headerRow.length) {
-            skipped.push({
-              rowNum,
-              reason: `Row has ${r.length} column${r.length === 1 ? '' : 's'}, expected ${headerRow.length} — likely a stray quote or comma in this row or an earlier one threw off parsing from here on`,
-            })
-            continue
-          }
-
-          const obj = {}
-          canonicalKeys.forEach((key, i) => {
-            if (key) obj[key] = (r[i] ?? '').trim()
-          })
-
-          const product = obj.barcode
-            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
-              products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
-            : obj.sku
-              ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
-              : null
-
-          if (!product) {
-            skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
-            continue
-          }
-          if (product.status !== 'active') {
-            skipped.push({ rowNum, reason: `${product.name} (${product.barcode}) exists but is archived — restore it in Products first` })
-            continue
-          }
-          const qty = Number(obj.quantity)
-          if (!qty || qty <= 0) {
-            skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
-            continue
-          }
-
-          // Either Unit Price or Total Price can be given — Total Price gets
-          // divided back down to a per-unit price. Neither given at all just
-          // defaults to the recorded price (no mismatch possible by definition).
-          let unitPrice
-          const priceWasGiven = Boolean(obj.unit_price || obj.total_price)
-          if (obj.unit_price) {
-            unitPrice = Number(obj.unit_price)
-          } else if (obj.total_price) {
-            unitPrice = Number(obj.total_price) / qty
-          } else {
-            unitPrice = Number(product.selling_price ?? 0)
-          }
-
-          if (priceWasGiven && Math.abs(unitPrice - Number(product.selling_price ?? 0)) > 0.01) {
-            mismatches.push({
-              tempId: crypto.randomUUID(),
-              rowNum,
-              product,
-              qty,
-              givenUnitPrice: unitPrice,
-              recordedPrice: Number(product.selling_price ?? 0),
-            })
-            continue
-          }
-
-          parsedRows.push({ rowNum, product, qty, unitPrice })
-        }
-
-        // ---------- Pass 2: Kitchen items always have enough stock ----------
-        // One rule, applied here per distinct group so a Meal+Silog sharing
-        // one Only only gets topped up once for their combined need, not
-        // once per row. See ensureKitchenStock for what the rule actually is.
-        const kitchenGroups = new Map()
-        for (const pr of parsedRows) {
-          const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
-          if (!isKitchen || pr.product.unlimited_stock) continue
-          const key = [...resolveStockGroupIds(pr.product)].sort().join(',')
-          if (!kitchenGroups.has(key)) {
-            kitchenGroups.set(key, { neededQty: 0, product: pr.product })
-          }
-          kitchenGroups.get(key).neededQty += pr.qty
-        }
-        for (const g of kitchenGroups.values()) {
-          await ensureKitchenStock(g.product, g.neededQty, headerForm.sale_date)
-        }
-
-        // ---------- Pass 3: normal per-row FIFO stock check ----------
-        const valid = []
-        // Accumulates alongside `pendingLines` so each row in this same file
-        // correctly sees stock already claimed by earlier rows in the file —
-        // React state wouldn't update fast enough inside this loop to rely on.
-        const accumulator = [...pendingLines]
-
-        for (const pr of parsedRows) {
-          try {
-            const stockGroupIds = resolveStockGroupIds(pr.product)
-            const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
-            const lineTotal = pr.qty * pr.unitPrice
-            const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-            const openQty = pr.qty - consumedQty
-            const fifoCost =
-              consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(pr.product.current_cost ?? 0)
-            const isOversold = !satisfied && !pr.product.unlimited_stock
-            const newLine = {
-              tempId: crypto.randomUUID(),
-              product_id: pr.product.id,
-              product_name: pr.product.name,
-              category: pr.product.category,
-              unit: pr.product.unit,
-              quantity: pr.qty,
-              unit_price: pr.unitPrice,
-              line_total: lineTotal,
-              fifo_cost: fifoCost,
-              gross_profit: lineTotal - fifoCost,
-              consumption,
-              openQty,
-              isOversold,
-              oversoldNote: isOversold ? `only ${totalAvailable} ${pr.product.unit} were in stock — sold anyway, now negative` : null,
-            }
-            accumulator.push(newLine)
-            valid.push(newLine)
-          } catch {
-            skipped.push({ rowNum: pr.rowNum, reason: 'Could not check stock for this row' })
-          }
-        }
-
-        setImportPreviewValid(valid)
-        setImportPreviewSkipped(skipped)
-        setImportMismatches(mismatches)
-        setImportParsing(false)
-        setImportPanelOpen(true)
+        await processSalesImportRows(rows)
       } catch {
         setImportParsing(false)
         setErrorMsg('Could not read that file — make sure it is a CSV, not an .xlsx.')
       }
     }
     reader.readAsText(file)
+  }
+
+  function handlePosReportImportClick() {
+    posReportFileInputRef.current?.click()
+  }
+
+  function handlePosReportFileChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = async () => {
+      setImportParsing(true)
+      setErrorMsg('')
+      setPosReportValidationWarning(null)
+      try {
+        const result = parsePosReportWorkbook(reader.result)
+        if (result.error) {
+          setImportParsing(false)
+          setErrorMsg(result.error)
+          return
+        }
+        if (result.validationWarning) setPosReportValidationWarning(result.validationWarning)
+
+        const { saleDate, posTerminal } = extractDateAndTerminalFromFilename(file.name)
+        if (saleDate) setHeaderForm((f) => ({ ...f, sale_date: saleDate }))
+        if (posTerminal) setHeaderForm((f) => ({ ...f, pos_terminal: posTerminal }))
+
+        const rows = [
+          ['Barcode', 'Quantity', 'Total Price'],
+          ...result.dataRows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
+        ]
+        await processSalesImportRows(rows)
+      } catch {
+        setImportParsing(false)
+        setErrorMsg('Could not read that file — make sure it is the .xls "Items Sold" POS report.')
+      }
+    }
+    reader.readAsArrayBuffer(file)
   }
 
   function setMismatchDraft(tempId, draft) {
@@ -605,6 +657,7 @@ export default function Sales() {
     setImportPanelOpen(false)
     setImportPreviewValid([])
     setImportPreviewSkipped([])
+    setPosReportValidationWarning(null)
   }
 
   async function proceedAddLine(product, qty, unitPrice) {
@@ -1193,6 +1246,22 @@ export default function Sales() {
                 {importParsing ? 'Checking stock…' : 'Import a day\'s sales CSV'}
               </button>
               <input ref={importFileInputRef} type="file" accept=".csv" onChange={handleImportFileChange} className="hidden" />
+              <button
+                type="button"
+                onClick={handlePosReportImportClick}
+                disabled={importParsing}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-60"
+              >
+                <Upload size={15} />
+                {importParsing ? 'Checking stock…' : 'Import POS report (.xls)'}
+              </button>
+              <input
+                ref={posReportFileInputRef}
+                type="file"
+                accept=".xls,.xlsx"
+                onChange={handlePosReportFileChange}
+                className="hidden"
+              />
             </div>
 
             <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
@@ -1437,6 +1506,15 @@ export default function Sales() {
         title="Import sale lines"
         onClose={() => setImportPanelOpen(false)}
       >
+        {posReportValidationWarning && (
+          <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+            <div className="flex items-start gap-1.5">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+              {posReportValidationWarning}
+            </div>
+          </div>
+        )}
+
         <div className="mb-4 grid grid-cols-3 gap-3">
           <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3 text-center">
             <div className="font-display text-xl font-semibold text-[var(--color-herb)]">{importPreviewValid.length}</div>
