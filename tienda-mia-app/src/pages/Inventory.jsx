@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Plus, Trash2, Download } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
 import SortableTh from '../components/SortableTh'
 import DisposeConfirm from '../components/DisposeConfirm'
@@ -111,9 +112,12 @@ export default function Inventory() {
   async function load() {
     setLoading(true)
     setErrorMsg('')
-    const { data, error } = await supabase
-      .from('inventory_cache')
-      .select('*, product:products(name, sku, barcode, unit, reorder_point, category, business_unit, product_type)')
+    const { data, error } = await fetchAllRows(
+      'inventory_cache',
+      '*, product:products(name, sku, barcode, unit, reorder_point, category, business_unit, product_type)',
+      null,
+      { tiebreaker: 'product_id' }
+    )
 
     if (error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
@@ -129,7 +133,7 @@ export default function Inventory() {
   }
 
   async function loadExtraBarcodes() {
-    const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
     if (error) {
       setErrorMsg(`Could not load additional barcodes — search won't match them until this is fixed: ${error.message}`)
       return

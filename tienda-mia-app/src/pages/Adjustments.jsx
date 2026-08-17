@@ -270,7 +270,7 @@ export default function Adjustments() {
   }
 
   async function loadExtraBarcodes() {
-    const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
     if (error) {
       setCountError(`Could not load additional barcodes — they won't match until this is fixed: ${error.message}`)
       return

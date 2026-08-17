@@ -95,7 +95,7 @@ export default function ReturnsWaste() {
       fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, status', 'name'),
       supabase.from('lists').select('value').eq('list_type', 'ReturnReason').eq('active', true).order('value'),
       supabase.from('lists').select('value').eq('list_type', 'WasteReason').eq('active', true).order('value'),
-      supabase.from('product_barcodes').select('product_id, barcode'),
+      fetchAllRows('product_barcodes', 'product_id, barcode'),
     ])
 
     if (returnsRes.error || wastesRes.error || productsRes.error) {

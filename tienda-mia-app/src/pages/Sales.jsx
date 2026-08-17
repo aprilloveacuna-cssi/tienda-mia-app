@@ -117,7 +117,7 @@ export default function Sales() {
   }
 
   async function loadExtraBarcodes() {
-    const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
     if (error) {
       setErrorMsg(`Could not load additional barcodes — imports won't match them until this is fixed: ${error.message}`)
       return

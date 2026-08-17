@@ -253,7 +253,7 @@ export default function Kitchen() {
         .order('created_at', { ascending: false }),
       fetchAllRows('waste', '*, product:products(name, sku, unit, category)', 'waste_date', { ascending: false }),
       loadDailyMealsHistory(),
-      supabase.from('product_barcodes').select('product_id, barcode'),
+      fetchAllRows('product_barcodes', 'product_id, barcode'),
     ])
 
     if (productsRes.error || recipesRes.error || leftoversRes.error || dailyMealsHistoryRes.error) {

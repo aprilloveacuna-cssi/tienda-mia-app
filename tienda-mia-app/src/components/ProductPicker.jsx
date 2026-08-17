@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
-import { supabase } from '../lib/supabaseClient'
+import { fetchAllRows } from '../lib/fetchAllRows'
 import { normalizeSearchText } from '../lib/search'
 
 /**
@@ -22,7 +22,7 @@ export default function ProductPicker({ products, value, onChange, placeholder =
 
   useEffect(() => {
     async function load() {
-      const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+      const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
       if (error) {
         console.error('Could not load additional barcodes for product search:', error.message)
         return
