@@ -20,6 +20,7 @@ const HEADER_ALIASES = {
   producttype: 'product_type', type: 'product_type',
   unit: 'unit', uom: 'unit',
   sellingprice: 'selling_price', price: 'selling_price',
+  cost: 'current_cost', currentcost: 'current_cost', unitcost: 'current_cost',
   minimumstock: 'minimum_stock', minstock: 'minimum_stock',
   reorderpoint: 'reorder_point', reorder: 'reorder_point',
   safetystock: 'safety_stock',
@@ -88,6 +89,7 @@ const EMPTY_FORM = {
   product_type: '',
   unit: '',
   selling_price: '',
+  current_cost: '',
   minimum_stock: '',
   reorder_point: '',
   safety_stock: '',
@@ -275,6 +277,7 @@ export default function Products() {
       product_type: product.product_type ?? '',
       unit: product.unit ?? '',
       selling_price: product.selling_price ?? '',
+      current_cost: product.current_cost ?? '',
       minimum_stock: product.minimum_stock ?? '',
       reorder_point: product.reorder_point ?? '',
       safety_stock: product.safety_stock ?? '',
@@ -301,6 +304,7 @@ export default function Products() {
       product_type: upper(form.product_type) || null,
       unit: upper(form.unit) || null,
       selling_price: form.selling_price === '' ? 0 : Number(form.selling_price),
+      current_cost: form.current_cost === '' ? 0 : Number(form.current_cost),
       minimum_stock: form.minimum_stock === '' ? 0 : Number(form.minimum_stock),
       reorder_point: form.reorder_point === '' ? 0 : Number(form.reorder_point),
       safety_stock: form.safety_stock === '' ? 0 : Number(form.safety_stock),
@@ -369,12 +373,12 @@ export default function Products() {
   function handleDownloadTemplate() {
     const headers = [
       'Barcode', 'Name', 'Brand', 'Category', 'Business Unit', 'Product Type', 'Unit',
-      'Selling Price', 'Minimum Stock', 'Reorder Point', 'Safety Stock', 'Notes',
+      'Selling Price', 'Cost', 'Minimum Stock', 'Reorder Point', 'Safety Stock', 'Notes',
     ]
     // One retail example, one kitchen example — kitchen items still need SOME
     // barcode value (schema requires it), so an internal code works fine here.
-    const exampleRetail = ['4800123456789', 'Coke 330ML', 'Coca-Cola', 'Beverages', 'Retail', 'Retail Item', 'pcs', '45', '24', '12', '6', '']
-    const exampleKitchen = ['TMIA-TURON-001', 'T.Mia Banana Turon', '', 'Bakery', 'Kitchen', 'Finished Good', 'pcs', '25', '0', '0', '0', 'Prepared in-house, no supplier barcode']
+    const exampleRetail = ['4800123456789', 'Coke 330ML', 'Coca-Cola', 'Beverages', 'Retail', 'Retail Item', 'pcs', '45', '32', '24', '12', '6', '']
+    const exampleKitchen = ['TMIA-TURON-001', 'T.Mia Banana Turon', '', 'Bakery', 'Kitchen', 'Finished Good', 'pcs', '25', '15', '0', '0', '0', 'Prepared in-house, no supplier barcode']
     const csv = [headers, exampleRetail, exampleKitchen]
       .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
       .join('\n')
@@ -447,6 +451,7 @@ export default function Products() {
             product_type: upper(obj.product_type) || null,
             unit: upper(obj.unit) || null,
             selling_price: obj.selling_price ? Number(obj.selling_price) || 0 : 0,
+            current_cost: obj.current_cost ? Number(obj.current_cost) || 0 : 0,
             minimum_stock: obj.minimum_stock ? Number(obj.minimum_stock) || 0 : 0,
             reorder_point: obj.reorder_point ? Number(obj.reorder_point) || 0 : 0,
             safety_stock: obj.safety_stock ? Number(obj.safety_stock) || 0 : 0,
@@ -794,16 +799,32 @@ export default function Products() {
             </Field>
           </div>
 
-          <Field label="Selling price">
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={form.selling_price}
-              onChange={(e) => setForm({ ...form, selling_price: e.target.value })}
-              className="input"
-            />
-          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Selling price">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={form.selling_price}
+                onChange={(e) => setForm({ ...form, selling_price: e.target.value })}
+                className="input"
+              />
+            </Field>
+            <Field label="Cost">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={form.current_cost}
+                onChange={(e) => setForm({ ...form, current_cost: e.target.value })}
+                className="input"
+              />
+              <p className="mt-1 text-xs text-[var(--color-ink-soft)]">
+                Normally updates automatically from your next posted purchase — set it directly here if it needs
+                correcting now, or for a product that hasn't had a real purchase yet.
+              </p>
+            </Field>
+          </div>
 
           <div className="grid grid-cols-3 gap-3">
             <Field label="Min stock">
