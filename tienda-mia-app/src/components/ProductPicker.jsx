@@ -22,7 +22,11 @@ export default function ProductPicker({ products, value, onChange, placeholder =
 
   useEffect(() => {
     async function load() {
-      const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+      const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+      if (error) {
+        console.error('Could not load additional barcodes for product search:', error.message)
+        return
+      }
       const map = {}
       for (const row of data ?? []) {
         if (!map[row.product_id]) map[row.product_id] = []

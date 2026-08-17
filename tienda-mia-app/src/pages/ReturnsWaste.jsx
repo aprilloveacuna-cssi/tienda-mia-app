@@ -38,12 +38,31 @@ export default function ReturnsWaste() {
   const [search, setSearch] = useState('')
   const q = normalizeSearchText(search)
   const searchedReturns = q
-    ? sortedReturns.filter((r) => normalizeSearchText(r.return_number).includes(q) || normalizeSearchText(r.product?.name).includes(q) || normalizeSearchText(r.reason).includes(q))
+    ? sortedReturns.filter((r) => {
+        const extraMatch = (extraBarcodesByProduct[r.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return (
+          normalizeSearchText(r.return_number).includes(q) ||
+          normalizeSearchText(r.product?.name).includes(q) ||
+          normalizeSearchText(r.product?.barcode).includes(q) ||
+          normalizeSearchText(r.reason).includes(q) ||
+          extraMatch
+        )
+      })
     : sortedReturns
   const searchedWastes = q
-    ? sortedWastes.filter((w) => normalizeSearchText(w.waste_number).includes(q) || normalizeSearchText(w.product?.name).includes(q) || normalizeSearchText(w.reason).includes(q))
+    ? sortedWastes.filter((w) => {
+        const extraMatch = (extraBarcodesByProduct[w.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return (
+          normalizeSearchText(w.waste_number).includes(q) ||
+          normalizeSearchText(w.product?.name).includes(q) ||
+          normalizeSearchText(w.product?.barcode).includes(q) ||
+          normalizeSearchText(w.reason).includes(q) ||
+          extraMatch
+        )
+      })
     : sortedWastes
   const [products, setProducts] = useState([])
+  const [extraBarcodesByProduct, setExtraBarcodesByProduct] = useState({}) // product_id -> [barcode, ...]
   const [returnReasons, setReturnReasons] = useState([])
   const [wasteReasons, setWasteReasons] = useState([])
   const [loading, setLoading] = useState(true)
@@ -70,12 +89,13 @@ export default function ReturnsWaste() {
   async function loadAll() {
     setLoading(true)
     setErrorMsg('')
-    const [returnsRes, wastesRes, productsRes, returnReasonsRes, wasteReasonsRes] = await Promise.all([
-      fetchAllRows('returns', '*, product:products(name, sku, unit, category)', 'created_at', { ascending: false }),
-      fetchAllRows('waste', '*, product:products(name, sku, unit, category), batch:batches(batch_number)', 'created_at', { ascending: false }),
+    const [returnsRes, wastesRes, productsRes, returnReasonsRes, wasteReasonsRes, barcodesRes] = await Promise.all([
+      fetchAllRows('returns', '*, product:products(name, sku, barcode, unit, category)', 'created_at', { ascending: false }),
+      fetchAllRows('waste', '*, product:products(name, sku, barcode, unit, category), batch:batches(batch_number)', 'created_at', { ascending: false }),
       fetchAllRows('products', 'id, sku, name, unit, barcode, current_cost, status', 'name'),
       supabase.from('lists').select('value').eq('list_type', 'ReturnReason').eq('active', true).order('value'),
       supabase.from('lists').select('value').eq('list_type', 'WasteReason').eq('active', true).order('value'),
+      supabase.from('product_barcodes').select('product_id, barcode'),
     ])
 
     if (returnsRes.error || wastesRes.error || productsRes.error) {
@@ -88,6 +108,17 @@ export default function ReturnsWaste() {
     setProducts((productsRes.data ?? []).filter((p) => p.status === 'active'))
     setReturnReasons((returnReasonsRes.data ?? []).map((r) => r.value))
     setWasteReasons((wasteReasonsRes.data ?? []).map((r) => r.value))
+
+    if (barcodesRes.error) {
+      setErrorMsg(`Could not load additional barcodes — search won't match them until this is fixed: ${barcodesRes.error.message}`)
+    }
+    const barcodeMap = {}
+    for (const row of barcodesRes.data ?? []) {
+      if (!barcodeMap[row.product_id]) barcodeMap[row.product_id] = []
+      barcodeMap[row.product_id].push(row.barcode)
+    }
+    setExtraBarcodesByProduct(barcodeMap)
+
     setLoading(false)
   }
 

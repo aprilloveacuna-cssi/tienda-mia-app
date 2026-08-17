@@ -30,15 +30,19 @@ export default function Adjustments() {
   const searchedAdjustments = search.trim()
     ? sortedAdjustments.filter((a) => {
         const q = normalizeSearchText(search)
+        const extraMatch = (extraBarcodesByProduct[a.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
         return (
           normalizeSearchText(a.adjustment_number).includes(q) ||
           normalizeSearchText(a.product?.name).includes(q) ||
-          normalizeSearchText(a.reason).includes(q)
+          normalizeSearchText(a.product?.barcode).includes(q) ||
+          normalizeSearchText(a.reason).includes(q) ||
+          extraMatch
         )
       })
     : sortedAdjustments
   const [products, setProducts] = useState([])
   const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // normalizedBarcode -> product_id, for additional barcodes beyond the primary one
+  const [extraBarcodesByProduct, setExtraBarcodesByProduct] = useState({}) // product_id -> [barcode, ...], for fuzzy search
   const [adjustmentTypes, setAdjustmentTypes] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -250,7 +254,7 @@ export default function Adjustments() {
     setErrorMsg('')
     const { data, error } = await supabase
       .from('adjustments')
-      .select('*, product:products(name, sku, unit, category), batch:batches(batch_number)')
+      .select('*, product:products(name, sku, barcode, unit, category), batch:batches(batch_number)')
       .order('created_at', { ascending: false })
     if (error) {
       setErrorMsg('Could not reach Supabase. Check your .env values and that migrations have run.')
@@ -266,10 +270,20 @@ export default function Adjustments() {
   }
 
   async function loadExtraBarcodes() {
-    const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+    if (error) {
+      setCountError(`Could not load additional barcodes — they won't match until this is fixed: ${error.message}`)
+      return
+    }
     const map = {}
-    for (const row of data ?? []) map[normalizeSearchText(row.barcode)] = row.product_id
+    const byProduct = {}
+    for (const row of data ?? []) {
+      map[normalizeSearchText(row.barcode)] = row.product_id
+      if (!byProduct[row.product_id]) byProduct[row.product_id] = []
+      byProduct[row.product_id].push(row.barcode)
+    }
     setExtraBarcodeMap(map)
+    setExtraBarcodesByProduct(byProduct)
   }
 
   async function loadAdjustmentTypes() {
@@ -649,7 +663,16 @@ export default function Adjustments() {
     return row[key]
   }
   const countSearchFiltered = countSearch.trim()
-    ? countLines.filter((r) => normalizeSearchText(r.product?.name).includes(normalizeSearchText(countSearch)))
+    ? countLines.filter((r) => {
+        const q = normalizeSearchText(countSearch)
+        const extraMatch = (extraBarcodesByProduct[r.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return (
+          normalizeSearchText(r.product?.name).includes(q) ||
+          normalizeSearchText(r.product?.sku).includes(q) ||
+          normalizeSearchText(r.product?.barcode).includes(q) ||
+          extraMatch
+        )
+      })
     : countLines
   const visibleCountRows = showOnlyMismatches
     ? countSearchFiltered.filter((r) => r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0))
@@ -969,7 +992,7 @@ export default function Adjustments() {
 
           {countLines.length > 0 && (
             <>
-              <SearchBar value={countSearch} onChange={setCountSearch} placeholder="Search this count by product name" />
+              <SearchBar value={countSearch} onChange={setCountSearch} placeholder="Search this count by product name, SKU, or barcode" />
 
               <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
                 <label className="flex-1 block">

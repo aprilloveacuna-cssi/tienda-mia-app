@@ -151,7 +151,11 @@ export default function Products() {
   }
 
   async function loadAllExtraBarcodes() {
-    const { data } = await supabase.from('product_barcodes').select('product_id, barcode')
+    const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+    if (error) {
+      setErrorMsg(`Could not load additional barcodes — search won't match them until this is fixed: ${error.message}`)
+      return
+    }
     const map = {}
     for (const row of data ?? []) {
       if (!map[row.product_id]) map[row.product_id] = []
@@ -226,7 +230,11 @@ export default function Products() {
   }
 
   async function loadExtraBarcodes(productId) {
-    const { data } = await supabase.from('product_barcodes').select('id, barcode').eq('product_id', productId).order('created_at')
+    const { data, error } = await supabase.from('product_barcodes').select('id, barcode').eq('product_id', productId).order('created_at')
+    if (error) {
+      setBarcodeError(error.message)
+      return
+    }
     setExtraBarcodes(data ?? [])
   }
 

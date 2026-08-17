@@ -68,13 +68,20 @@ export default function Inventory() {
   const sortedRows = sortRows(rows, sortKey, sortDir, sortAccessor)
 
   const [search, setSearch] = useState('')
+  const [extraBarcodesByProduct, setExtraBarcodesByProduct] = useState({}) // product_id -> [barcode, ...]
   const [selectedTypes, setSelectedTypes] = useState([])
   const [selectedCategories, setSelectedCategories] = useState([])
 
   const searchedRows = search.trim()
     ? sortedRows.filter((r) => {
         const q = normalizeSearchText(search)
-        return normalizeSearchText(r.product?.name).includes(q) || normalizeSearchText(r.product?.sku).includes(q)
+        const extraMatch = (extraBarcodesByProduct[r.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return (
+          normalizeSearchText(r.product?.name).includes(q) ||
+          normalizeSearchText(r.product?.sku).includes(q) ||
+          normalizeSearchText(r.product?.barcode).includes(q) ||
+          extraMatch
+        )
       })
     : sortedRows
   const filteredRows = searchedRows.filter(
@@ -121,8 +128,23 @@ export default function Inventory() {
     setLoading(false)
   }
 
+  async function loadExtraBarcodes() {
+    const { data, error } = await supabase.from('product_barcodes').select('product_id, barcode')
+    if (error) {
+      setErrorMsg(`Could not load additional barcodes — search won't match them until this is fixed: ${error.message}`)
+      return
+    }
+    const map = {}
+    for (const row of data ?? []) {
+      if (!map[row.product_id]) map[row.product_id] = []
+      map[row.product_id].push(row.barcode)
+    }
+    setExtraBarcodesByProduct(map)
+  }
+
   useEffect(() => {
     load()
+    loadExtraBarcodes()
   }, [])
 
   async function fetchBatches(productId) {
@@ -353,7 +375,7 @@ export default function Inventory() {
         setSelectedCategories={setSelectedCategories}
       />
 
-      <SearchBar value={search} onChange={setSearch} placeholder="Search by name or SKU" />
+      <SearchBar value={search} onChange={setSearch} placeholder="Search by name, SKU, or barcode" />
 
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">

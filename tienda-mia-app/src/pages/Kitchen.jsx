@@ -93,6 +93,7 @@ export default function Kitchen() {
   const [tab, setTab] = useState('recipes')
   const [products, setProducts] = useState([])
   const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // cleanedBarcode -> product_id, for additional barcodes beyond the primary one
+  const [extraBarcodesByProduct, setExtraBarcodesByProduct] = useState({}) // product_id -> [barcode, ...], for fuzzy search
   const [recipes, setRecipes] = useState([])
   const [leftovers, setLeftovers] = useState([])
   const [dailyMealsHistory, setDailyMealsHistory] = useState([])
@@ -165,16 +166,30 @@ export default function Kitchen() {
 
   const [search, setSearch] = useState('')
   const q = normalizeSearchText(search)
-  const searchedRecipes = q ? sortedRecipes.filter((r) => normalizeSearchText(r.product?.name).includes(q)) : sortedRecipes
+  const searchedRecipes = q
+    ? sortedRecipes.filter((r) => {
+        const extraMatch = (extraBarcodesByProduct[r.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return normalizeSearchText(r.product?.name).includes(q) || extraMatch
+      })
+    : sortedRecipes
   const searchedIngredientProducts = q
-    ? ingredientProducts.filter((p) => normalizeSearchText(p.name).includes(q) || normalizeSearchText(p.barcode).includes(q))
+    ? ingredientProducts.filter((p) => {
+        const extraMatch = (extraBarcodesByProduct[p.id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return normalizeSearchText(p.name).includes(q) || normalizeSearchText(p.barcode).includes(q) || extraMatch
+      })
     : ingredientProducts
   const searchedLeftovers = q
-    ? leftovers.filter((w) => normalizeSearchText(w.product?.name).includes(q) || normalizeSearchText(w.remarks).includes(q))
+    ? leftovers.filter((w) => {
+        const extraMatch = (extraBarcodesByProduct[w.product_id] ?? []).some((b) => normalizeSearchText(b).includes(q))
+        return normalizeSearchText(w.product?.name).includes(q) || normalizeSearchText(w.remarks).includes(q) || extraMatch
+      })
     : leftovers
 
   const searchedDailyMealsHistory = q
-    ? dailyMealsHistory.filter((b) => normalizeSearchText(b.product?.name).includes(q))
+    ? dailyMealsHistory.filter((b) => {
+        const extraMatch = (extraBarcodesByProduct[b.product_id] ?? []).some((bc) => normalizeSearchText(bc).includes(q))
+        return normalizeSearchText(b.product?.name).includes(q) || extraMatch
+      })
     : dailyMealsHistory
   const { sortKey: dmhSortKey, sortDir: dmhSortDir, toggleSort: toggleDmhSort } = useSort('received_date', 'desc')
   function dmhSortAccessor(row, key) {
@@ -253,7 +268,11 @@ export default function Kitchen() {
     setRecipes(recipesRes.data ?? [])
     setLeftovers((leftoversRes.data ?? []).filter((w) => w.reason === 'Daily Leftover'))
 
+    if (barcodesRes.error) {
+      setErrorMsg(`Could not load additional barcodes — ingredient import won't match them until this is fixed: ${barcodesRes.error.message}`)
+    }
     const barcodeMap = {}
+    const barcodesByProduct = {}
     for (const row of barcodesRes.data ?? []) {
       const cleaned = (row.barcode ?? '')
         .normalize('NFKC')
@@ -261,8 +280,11 @@ export default function Kitchen() {
         .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g, '')
         .toUpperCase()
       barcodeMap[cleaned] = row.product_id
+      if (!barcodesByProduct[row.product_id]) barcodesByProduct[row.product_id] = []
+      barcodesByProduct[row.product_id].push(row.barcode)
     }
     setExtraBarcodeMap(barcodeMap)
+    setExtraBarcodesByProduct(barcodesByProduct)
 
     setLoading(false)
   }
