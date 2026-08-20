@@ -586,42 +586,37 @@ export default function Sales() {
     setImportMismatches(importMismatches.map((m) => (m.tempId === tempId ? { ...m, discountQtyDraft: draft } : m)))
   }
 
-  async function resolveMismatchUpdatePrice(mismatch) {
-    const { error } = await supabase.from('products').update({ selling_price: mismatch.givenUnitPrice }).eq('id', mismatch.product.id)
-    if (error) {
-      setErrorMsg(error.message)
-      return
-    }
-    const updatedProduct = { ...mismatch.product, selling_price: mismatch.givenUnitPrice }
-    setProducts(products.map((p) => (p.id === updatedProduct.id ? updatedProduct : p)))
-
+  // Shared by resolveMismatchUpdatePrice and resolveMismatchUseOnce — both
+  // end up doing the same stock check and building the same kind of line,
+  // just with different opinions on whether products.selling_price changes.
+  async function addResolvedMismatchLine(mismatch, product, unitPrice) {
     try {
       const reservationSource = [...pendingLines, ...importPreviewValid]
-      await ensureKitchenStock(updatedProduct, mismatch.qty, headerForm.sale_date)
-      const stockGroupIds = resolveStockGroupIds(updatedProduct)
+      await ensureKitchenStock(product, mismatch.qty, headerForm.sale_date)
+      const stockGroupIds = resolveStockGroupIds(product)
       const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, mismatch.qty, reservationSource)
-      const isOversold = !satisfied && !updatedProduct.unlimited_stock
-      const lineTotal = mismatch.qty * mismatch.givenUnitPrice
+      const isOversold = !satisfied && !product.unlimited_stock
+      const lineTotal = mismatch.qty * unitPrice
       const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
       const openQty = mismatch.qty - consumedQty
-      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(updatedProduct.current_cost ?? 0)
+      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
       setImportPreviewValid([
         ...importPreviewValid,
         {
           tempId: crypto.randomUUID(),
-          product_id: updatedProduct.id,
-          product_name: updatedProduct.name,
-          category: updatedProduct.category,
-          unit: updatedProduct.unit,
+          product_id: product.id,
+          product_name: product.name,
+          category: product.category,
+          unit: product.unit,
           quantity: mismatch.qty,
-          unit_price: mismatch.givenUnitPrice,
+          unit_price: unitPrice,
           line_total: lineTotal,
           fifo_cost: fifoCost,
           gross_profit: lineTotal - fifoCost,
           consumption,
           openQty,
           isOversold,
-          oversoldNote: isOversold ? `only ${totalAvailable} ${updatedProduct.unit} were in stock — sold anyway, now negative` : null,
+          oversoldNote: isOversold ? `only ${totalAvailable} ${product.unit} were in stock — sold anyway, now negative` : null,
           is_discounted: false,
           discount_amount: 0,
         },
@@ -630,6 +625,17 @@ export default function Sales() {
       setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
     }
     setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
+  }
+
+  async function resolveMismatchUpdatePrice(mismatch) {
+    const { error } = await supabase.from('products').update({ selling_price: mismatch.givenUnitPrice }).eq('id', mismatch.product.id)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    const updatedProduct = { ...mismatch.product, selling_price: mismatch.givenUnitPrice }
+    setProducts(products.map((p) => (p.id === updatedProduct.id ? updatedProduct : p)))
+    await addResolvedMismatchLine(mismatch, updatedProduct, mismatch.givenUnitPrice)
   }
 
   async function resolveMismatchDiscount(mismatch) {
@@ -643,6 +649,15 @@ export default function Sales() {
       setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
     }
     setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
+  }
+
+  // For backlog imports specifically — the given price was genuinely
+  // correct on that date, but the product's price has since changed and
+  // shouldn't be reverted. Uses the given price for this one line only,
+  // leaving products.selling_price untouched (unlike resolveMismatchUpdatePrice)
+  // and without treating it as a discount (unlike resolveMismatchDiscount).
+  async function resolveMismatchUseOnce(mismatch) {
+    await addResolvedMismatchLine(mismatch, mismatch.product, mismatch.givenUnitPrice)
   }
 
   function resolveMismatchSkip(mismatch) {
@@ -750,6 +765,26 @@ export default function Sales() {
     setPriceMismatch(null)
     try {
       const added = await proceedAddLine({ ...product, selling_price: newPrice }, Number(lineForm.quantity), newPrice)
+      if (added) {
+        setLineForm(EMPTY_LINE_FORM)
+        setDiscountMode(false)
+        setDiscountQtyDraft('')
+      }
+    } catch {
+      setLineWarning('Could not check available stock — try again.')
+    }
+  }
+
+  // Same backlog scenario as the bulk import's "use once" option — the given
+  // price was accurate on that date, but the product's price has since
+  // changed and shouldn't be reverted. Adds the line at that price without
+  // touching products.selling_price.
+  async function handleUseOnceAndAdd() {
+    const product = products.find((p) => p.id === lineForm.product_id)
+    const givenPrice = priceMismatch.givenPrice
+    setPriceMismatch(null)
+    try {
+      const added = await proceedAddLine(product, Number(lineForm.quantity), givenPrice)
       if (added) {
         setLineForm(EMPTY_LINE_FORM)
         setDiscountMode(false)
@@ -1321,13 +1356,21 @@ export default function Sales() {
                     This is ₱{priceMismatch.givenPrice.toFixed(2)}, but the recorded price is ₱{priceMismatch.recordedPrice.toFixed(2)}.
                   </div>
                   {!discountMode ? (
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={handleUpdatePriceAndAdd}
                         className="rounded-md border border-[var(--color-ink)] px-2.5 py-1.5 font-medium"
                       >
                         Update price to ₱{priceMismatch.givenPrice.toFixed(2)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleUseOnceAndAdd}
+                        title="Use this price for this sale only — the product's current recorded price stays unchanged. For backlog entries where the price was accurate on that date but has since changed."
+                        className="rounded-md border border-[var(--color-ink)] px-2.5 py-1.5 font-medium"
+                      >
+                        Use ₱{priceMismatch.givenPrice.toFixed(2)} for this sale only
                       </button>
                       <button
                         type="button"
@@ -1577,6 +1620,13 @@ export default function Sales() {
                       className="rounded-md border border-[var(--color-ink)] px-2 py-1 font-medium"
                     >
                       Update price to ₱{m.givenUnitPrice.toFixed(2)}
+                    </button>
+                    <button
+                      onClick={() => resolveMismatchUseOnce(m)}
+                      title="Use this price for this sale only — the product's current recorded price stays unchanged. For backlog imports where the price was accurate on that date but has since changed."
+                      className="rounded-md border border-[var(--color-ink)] px-2 py-1 font-medium"
+                    >
+                      Use ₱{m.givenUnitPrice.toFixed(2)} for this sale only
                     </button>
                     <label className="block">
                       <span className="mb-1 block text-[var(--color-ink-soft)]">Discounted qty</span>
