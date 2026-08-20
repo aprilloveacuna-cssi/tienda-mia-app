@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2, Send, Ban, Upload, FileDown, Pencil, X } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { resolveProductByCode } from '../lib/productMatch'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
@@ -334,8 +335,7 @@ export default function Purchases() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
-              products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
+            ? resolveProductByCode(products, extraBarcodeMap, obj.barcode, cleanCode)
             : obj.sku
               ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
               : null

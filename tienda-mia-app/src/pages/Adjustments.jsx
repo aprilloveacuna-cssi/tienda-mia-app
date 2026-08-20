@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Upload, FileDown, Trash2, Check } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
+import { resolveProductByCode } from '../lib/productMatch'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import SlidePanel from '../components/SlidePanel'
 import StatusChip from '../components/StatusChip'
@@ -507,8 +508,7 @@ export default function Adjustments() {
           })
 
           const product = obj.barcode
-            ? products.find((p) => normalizeSearchText(p.barcode) === normalizeSearchText(obj.barcode)) ||
-              products.find((p) => p.id === extraBarcodeMap[normalizeSearchText(obj.barcode)])
+            ? resolveProductByCode(products, extraBarcodeMap, obj.barcode, normalizeSearchText)
             : obj.sku
               ? products.find((p) => normalizeSearchText(p.sku) === normalizeSearchText(obj.sku))
               : null

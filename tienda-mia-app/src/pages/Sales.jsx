@@ -11,6 +11,7 @@ import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 import { normalizeSearchText } from '../lib/search'
 import { parsePosReportWorkbook, extractDateAndTerminalFromFilename } from '../lib/posReportParser'
+import { resolveProductByCode } from '../lib/productMatch'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
 
@@ -408,8 +409,7 @@ export default function Sales() {
       })
 
       const product = obj.barcode
-        ? products.find((p) => cleanCode(p.barcode) === cleanCode(obj.barcode)) ||
-          products.find((p) => p.id === extraBarcodeMap[cleanCode(obj.barcode)])
+        ? resolveProductByCode(products, extraBarcodeMap, obj.barcode, cleanCode)
         : obj.sku
           ? products.find((p) => cleanCode(p.sku) === cleanCode(obj.sku))
           : null
