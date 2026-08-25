@@ -37,7 +37,7 @@ export default function Dashboard() {
     const cutoff = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
     const { data, error } = await supabase
       .from('batch_cache')
-      .select('*, batch:batches(batch_number), product:products(name, unit)')
+      .select('*, batch:batches(batch_number, received_date), product:products(name, unit)')
       .gt('remaining_quantity', 0)
       .not('expiration_date', 'is', null)
       .lte('expiration_date', cutoff)
@@ -268,6 +268,9 @@ export default function Dashboard() {
                         {expiryLabel(row.expiration_date)}
                       </StatusChip>
                       <span className="text-xs text-[var(--color-ink-soft)]">{row.expiration_date}</span>
+                      {row.batch?.received_date && (
+                        <span className="text-xs text-[var(--color-ink-soft)]">· purchased {row.batch.received_date}</span>
+                      )}
                       <button
                         onClick={() => startEditExpiry(row)}
                         className="rounded-md border border-[var(--color-line)] px-2 py-1 text-xs font-medium text-[var(--color-ink-soft)] hover:bg-[var(--color-paper)]"

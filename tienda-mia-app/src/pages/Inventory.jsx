@@ -154,7 +154,7 @@ export default function Inventory() {
   async function fetchBatches(productId) {
     const { data } = await supabase
       .from('batch_cache')
-      .select('*, batch:batches(batch_number)')
+      .select('*, batch:batches(batch_number, received_date)')
       .eq('product_id', productId)
       .order('fifo_sequence')
     setBatchesByProduct((prev) => ({ ...prev, [productId]: data ?? [] }))
@@ -489,6 +489,11 @@ export default function Inventory() {
                                         <span className="text-[var(--color-ink-soft)]">{b.expiration_date}</span>
                                       )}
                                     </div>
+                                    {b.batch?.received_date && (
+                                      <div className="mt-0.5 text-[var(--color-ink-soft)]">
+                                        purchased {b.batch.received_date}
+                                      </div>
+                                    )}
                                     <div className="mt-1.5 flex gap-1">
                                       <button
                                         onClick={() => startEditExpiry(b)}
