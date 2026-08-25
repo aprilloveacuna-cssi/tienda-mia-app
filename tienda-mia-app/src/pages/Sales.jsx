@@ -546,40 +546,76 @@ export default function Sales() {
     posReportFileInputRef.current?.click()
   }
 
-  function handlePosReportFileChange(e) {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
+  // Wraps FileReader in a promise so multiple files can be read with a
+  // plain await loop instead of nesting callbacks.
+  function readFileAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(reader.error)
+      reader.readAsArrayBuffer(file)
+    })
+  }
 
-    const reader = new FileReader()
-    reader.onload = async () => {
-      setImportParsing(true)
-      setErrorMsg('')
-      setPosReportValidationWarning(null)
+  async function handlePosReportFileChange(e) {
+    const files = Array.from(e.target.files ?? [])
+    e.target.value = ''
+    if (files.length === 0) return
+
+    setImportParsing(true)
+    setErrorMsg('')
+    setPosReportValidationWarning(null)
+
+    const allDataRows = []
+    const warnings = []
+    const dates = new Set()
+    const terminals = new Set()
+
+    for (const file of files) {
       try {
-        const result = parsePosReportWorkbook(reader.result)
+        const buffer = await readFileAsArrayBuffer(file)
+        const result = parsePosReportWorkbook(buffer)
         if (result.error) {
           setImportParsing(false)
-          setErrorMsg(result.error)
+          setErrorMsg(`${file.name}: ${result.error}`)
           return
         }
-        if (result.validationWarning) setPosReportValidationWarning(result.validationWarning)
+        if (result.validationWarning) warnings.push(`${file.name}: ${result.validationWarning}`)
 
         const { saleDate, posTerminal } = extractDateAndTerminalFromFilename(file.name)
-        if (saleDate) setHeaderForm((f) => ({ ...f, sale_date: saleDate }))
-        if (posTerminal) setHeaderForm((f) => ({ ...f, pos_terminal: posTerminal }))
+        if (saleDate) dates.add(saleDate)
+        if (posTerminal) terminals.add(posTerminal)
 
-        const rows = [
-          ['Barcode', 'Quantity', 'Total Price'],
-          ...result.dataRows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
-        ]
-        await processSalesImportRows(rows)
+        allDataRows.push(...result.dataRows)
       } catch {
         setImportParsing(false)
-        setErrorMsg('Could not read that file — make sure it is the .xls "Items Sold" POS report.')
+        setErrorMsg(`${file.name}: could not read this file — make sure it's the .xls "Items Sold" POS report.`)
+        return
       }
     }
-    reader.readAsArrayBuffer(file)
+
+    // Different files disagreeing on date almost always means the wrong
+    // files got selected together — this is worth stopping for, not just
+    // warning about, since it'd otherwise silently merge two different days.
+    if (dates.size > 1) {
+      setImportParsing(false)
+      setErrorMsg(
+        `These files don't all have the same date (found: ${[...dates].join(', ')}) — import each date separately, or double-check the right files were selected.`
+      )
+      return
+    }
+
+    if (warnings.length > 0) setPosReportValidationWarning(warnings)
+    if (dates.size === 1) setHeaderForm((f) => ({ ...f, sale_date: [...dates][0] }))
+    if (terminals.size > 0) {
+      setHeaderForm((f) => ({ ...f, pos_terminal: [...terminals].sort().join(', ') }))
+    }
+
+    const rows = [
+      ['Barcode', 'Quantity', 'Total Price'],
+      ...allDataRows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
+    ]
+    await processSalesImportRows(rows)
   }
 
   function setMismatchDraft(tempId, draft) {
@@ -1288,16 +1324,20 @@ export default function Sales() {
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-60"
               >
                 <Upload size={15} />
-                {importParsing ? 'Checking stock…' : 'Import POS report (.xls)'}
+                {importParsing ? 'Checking stock…' : 'Import POS report(s) (.xls)'}
               </button>
               <input
                 ref={posReportFileInputRef}
                 type="file"
                 accept=".xls,.xlsx"
+                multiple
                 onChange={handlePosReportFileChange}
                 className="hidden"
               />
             </div>
+            <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
+              Select both terminals' files together (Ctrl/Cmd-click, or shift-click) to combine them into one sale — they need to be the same date.
+            </p>
 
             <form onSubmit={handleAddLine} className="mb-5 space-y-3 rounded-md border border-dashed border-[var(--color-line)] p-3">
               <Field label="Product" required>
@@ -1550,11 +1590,13 @@ export default function Sales() {
         onClose={() => setImportPanelOpen(false)}
       >
         {posReportValidationWarning && (
-          <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
-            <div className="flex items-start gap-1.5">
-              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-              {posReportValidationWarning}
-            </div>
+          <div className="mb-4 space-y-2 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+            {posReportValidationWarning.map((w, i) => (
+              <div key={i} className="flex items-start gap-1.5">
+                <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                {w}
+              </div>
+            ))}
           </div>
         )}
 
