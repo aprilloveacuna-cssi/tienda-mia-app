@@ -31,7 +31,7 @@ const FIELD_META = {
   SENIOR_PWD_DISCOUNT_PCT: {
     label: 'Senior / PWD discount',
     type: 'number',
-    suffix: '% off — applied identically to both, since they compute the same',
+    suffix: '% off the VAT-exclusive price — applied identically to both, since they compute the same',
   },
   EOQ_ORDERING_COST: {
     label: 'EOQ ordering cost',

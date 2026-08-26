@@ -308,7 +308,13 @@ export default function Sales() {
   async function buildDiscountSplitLines(product, totalQty, discountedQty, reservationSource) {
     const lines = []
     const regularQty = totalQty - discountedQty
-    const discountedUnitPrice = Math.round(Number(product.selling_price) * (1 - discountPct / 100) * 100) / 100
+    // Standard BIR Senior/PWD computation: VAT is backed out of the
+    // (VAT-inclusive) selling price first, then the discount applies to
+    // that VAT-exclusive amount — not a flat percentage off the sticker
+    // price. VAT_RATE is the national rate, not a business setting.
+    const VAT_RATE = 0.12
+    const vatExclusivePrice = Number(product.selling_price) / (1 + VAT_RATE)
+    const discountedUnitPrice = Math.round(vatExclusivePrice * (1 - discountPct / 100) * 100) / 100
     await ensureKitchenStock(product, totalQty, headerForm.sale_date)
     const stockGroupIds = resolveStockGroupIds(product)
 
