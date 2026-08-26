@@ -250,8 +250,8 @@ const REPORTS = {
     dateField: (r) => r.date,
     async fetch() {
       const [batchesRes, wasteRes] = await Promise.all([
-        fetchAllRows('batches', 'batch_number, expiration_date, product:products(name, sku, unit, category, business_unit, product_type), cache:batch_cache(remaining_quantity)'),
-        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit, category, business_unit, product_type), batch:batches(batch_number)'),
+        fetchAllRows('batches', 'batch_number, received_date, expiration_date, product:products(name, sku, unit, category, business_unit, product_type), cache:batch_cache(remaining_quantity)'),
+        fetchAllRows('waste', 'waste_number, waste_date, quantity, reason, product:products(name, sku, unit, category, business_unit, product_type), batch:batches(batch_number, received_date)'),
       ])
       if (batchesRes.error) throw batchesRes.error
       if (wasteRes.error) throw wasteRes.error
@@ -262,6 +262,7 @@ const REPORTS = {
         .map((r) => ({
           type: 'Expiry',
           date: r.expiration_date,
+          purchasedDate: r.received_date,
           reference: r.batch_number,
           product: r.product?.name,
           category: r.product?.category,
@@ -273,6 +274,7 @@ const REPORTS = {
       const wasteRows = (wasteRes.data ?? []).map((w) => ({
         type: 'Waste',
         date: w.waste_date,
+        purchasedDate: w.batch?.received_date,
         reference: w.waste_number,
         product: w.product?.name,
         category: w.product?.category,
@@ -290,6 +292,7 @@ const REPORTS = {
         render: (r) => <StatusChip tone={r.type === 'Waste' ? 'critical' : expiryTone(r.date)}>{r.type}</StatusChip>,
       },
       { key: 'date', label: 'Date' },
+      { key: 'purchasedDate', label: 'Purchased', value: (r) => r.purchasedDate ?? '—' },
       { key: 'reference', label: 'Reference' },
       { key: 'product', label: 'Product' },
       { key: 'category', label: 'Category', value: (r) => r.category ?? '—' },

@@ -68,11 +68,12 @@ export default function Dashboard() {
   }
 
   function exportExpiryAlertsCsv() {
-    const headers = ['Product', 'Unit', 'Batch', 'Remaining Qty', 'Expiration Date', 'Status']
+    const headers = ['Product', 'Unit', 'Batch', 'Purchased Date', 'Remaining Qty', 'Expiration Date', 'Status']
     const rows = expiryAlerts.map((row) => [
       row.product?.name ?? '',
       row.product?.unit ?? '',
       row.batch?.batch_number ?? '',
+      row.batch?.received_date ?? '',
       row.remaining_quantity,
       row.expiration_date,
       daysUntil(row.expiration_date) < 0 ? 'expired' : expiryLabel(row.expiration_date),
