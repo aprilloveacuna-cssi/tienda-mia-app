@@ -285,6 +285,50 @@ export default function ReturnsWaste() {
     loadAll()
   }
 
+  async function voidWaste(w) {
+    if (!confirm(`Void ${w.waste_number}? This restores the stock it disposed — the record stays, it doesn't get deleted. Use this when stock marked as waste turned out to be sold or recovered instead.`)) {
+      return
+    }
+    setErrorMsg('')
+
+    const { data: originalLedgerRows, error: fetchErr } = await supabase
+      .from('inventory_ledger')
+      .select('*')
+      .eq('source_reference_id', w.id)
+      .eq('transaction_type', 'Waste')
+
+    if (fetchErr) {
+      setErrorMsg(fetchErr.message)
+      return
+    }
+
+    const reversalRows = (originalLedgerRows ?? []).map((row) => ({
+      product_id: row.product_id,
+      batch_id: row.batch_id,
+      transaction_type: 'Void',
+      quantity_change: -row.quantity_change, // flips the original negative back to positive
+      unit_cost_at_transaction: row.unit_cost_at_transaction,
+      source_module: 'Waste',
+      source_reference_id: row.source_reference_id,
+      remarks: `Reversal of voided waste ${w.waste_number}`,
+    }))
+
+    if (reversalRows.length > 0) {
+      const { error: insErr } = await supabase.from('inventory_ledger').insert(reversalRows)
+      if (insErr) {
+        setErrorMsg(insErr.message)
+        return
+      }
+    }
+
+    const { error: updErr } = await supabase.from('waste').update({ status: 'voided' }).eq('id', w.id)
+    if (updErr) {
+      setErrorMsg(updErr.message)
+      return
+    }
+    loadAll()
+  }
+
   return (
     <div>
       <div className="mb-5 flex items-center justify-between">
@@ -383,12 +427,14 @@ export default function ReturnsWaste() {
                 <SortableTh label="Qty" sortKey="quantity" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
                 <th className="px-4 py-3">Reason</th>
                 <SortableTh label="Disposed by" sortKey="disposed_by" activeKey={wasteSortKey} activeDir={wasteSortDir} onSort={toggleWasteSort} />
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3" />
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
+              {loading && <tr><td colSpan={10} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">Loading…</td></tr>}
               {!loading && searchedWastes.length === 0 && (
-                <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No waste recorded yet.</td></tr>
+                <tr><td colSpan={10} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No waste recorded yet.</td></tr>
               )}
               {searchedWastes.map((w) => (
                 <tr key={w.id} className="border-b border-[var(--color-line)] last:border-0">
@@ -402,6 +448,19 @@ export default function ReturnsWaste() {
                   </td>
                   <td className="px-4 py-3 text-[var(--color-ink-soft)]">{w.reason}</td>
                   <td className="px-4 py-3 text-[var(--color-ink-soft)]">{w.disposed_by || '—'}</td>
+                  <td className="px-4 py-3">
+                    <StatusChip tone={w.status === 'voided' ? 'neutral' : 'ok'}>{w.status ?? 'posted'}</StatusChip>
+                  </td>
+                  <td className="px-4 py-3">
+                    {w.status !== 'voided' && (
+                      <button
+                        onClick={() => voidWaste(w)}
+                        className="rounded-md border border-[var(--color-rust)] px-2 py-1 text-xs font-medium text-[var(--color-rust)] hover:bg-[var(--color-rust-soft)]"
+                      >
+                        Void
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
