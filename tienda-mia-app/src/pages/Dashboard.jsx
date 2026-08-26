@@ -34,7 +34,7 @@ export default function Dashboard() {
   const [mealLogSaving, setMealLogSaving] = useState(false)
 
   async function loadExpiryAlerts() {
-    const cutoff = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+    const cutoff = new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10)
     const { data, error } = await supabase
       .from('batch_cache')
       .select('*, batch:batches(batch_number, received_date), product:products(name, unit)')
@@ -230,7 +230,7 @@ export default function Dashboard() {
             </button>
           )}
           {expiryAlerts.length === 0 ? (
-            <EmptyRow text="Nothing expired or expiring within 7 days — good shape." />
+            <EmptyRow text="Nothing expired or expiring within 15 days — good shape." />
           ) : (
             <div className="space-y-2">
               {expiryAlerts.map((row) => (

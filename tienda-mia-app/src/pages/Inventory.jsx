@@ -29,7 +29,7 @@ function expiryTone(expirationDate) {
   if (!expirationDate) return 'neutral'
   const days = (new Date(expirationDate) - new Date()) / (1000 * 60 * 60 * 24)
   if (days < 0) return 'critical'
-  if (days <= 7) return 'attention'
+  if (days <= 15) return 'attention'
   return 'ok'
 }
 
