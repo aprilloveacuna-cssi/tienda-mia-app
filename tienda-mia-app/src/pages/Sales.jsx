@@ -68,6 +68,11 @@ export default function Sales() {
   const importFileInputRef = useRef(null)
   const posReportFileInputRef = useRef(null)
   const [posReportValidationWarning, setPosReportValidationWarning] = useState(null)
+  // When selected files span more than one date, each date becomes its own
+  // sale — this holds the remaining ones, processed one at a time as each
+  // prior sale gets completed.
+  const [dateImportQueue, setDateImportQueue] = useState([])
+  const [dateImportQueueTotal, setDateImportQueueTotal] = useState(0)
   const [importPanelOpen, setImportPanelOpen] = useState(false)
   const [importPreviewValid, setImportPreviewValid] = useState([])
   const [importPreviewSkipped, setImportPreviewSkipped] = useState([])
@@ -152,6 +157,9 @@ export default function Sales() {
     setLineForm(EMPTY_LINE_FORM)
     setLineWarning('')
     setErrorMsg('')
+    setDateImportQueue([])
+    setDateImportQueueTotal(0)
+    setPosReportValidationWarning(null)
     setPanelOpen(true)
     loadProducts()
   }
@@ -557,6 +565,23 @@ export default function Sales() {
     })
   }
 
+  // Runs the parsed rows for one date-group through the same import
+  // pipeline, whether it's the only date selected or one queued up after
+  // an earlier one in the same batch just got completed.
+  async function startDateGroupImport(group) {
+    setHeaderForm((f) => ({
+      ...f,
+      sale_date: group.date,
+      pos_terminal: group.terminals.length > 0 ? group.terminals.join(', ') : f.pos_terminal,
+    }))
+    if (group.warnings.length > 0) setPosReportValidationWarning(group.warnings)
+    const rows = [
+      ['Barcode', 'Quantity', 'Total Price'],
+      ...group.rows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
+    ]
+    await processSalesImportRows(rows)
+  }
+
   async function handlePosReportFileChange(e) {
     const files = Array.from(e.target.files ?? [])
     e.target.value = ''
@@ -566,10 +591,10 @@ export default function Sales() {
     setErrorMsg('')
     setPosReportValidationWarning(null)
 
-    const allDataRows = []
-    const warnings = []
-    const dates = new Set()
-    const terminals = new Set()
+    // date -> { rows: [...], terminals: Set, warnings: [...] } — files with
+    // no detectable date fall back to whatever date is already in the form,
+    // same as before this grouped multiple dates at all.
+    const groups = new Map()
 
     for (const file of files) {
       try {
@@ -580,13 +605,14 @@ export default function Sales() {
           setErrorMsg(`${file.name}: ${result.error}`)
           return
         }
-        if (result.validationWarning) warnings.push(`${file.name}: ${result.validationWarning}`)
 
         const { saleDate, posTerminal } = extractDateAndTerminalFromFilename(file.name)
-        if (saleDate) dates.add(saleDate)
-        if (posTerminal) terminals.add(posTerminal)
-
-        allDataRows.push(...result.dataRows)
+        const key = saleDate ?? headerForm.sale_date
+        if (!groups.has(key)) groups.set(key, { date: key, terminals: new Set(), warnings: [], rows: [] })
+        const group = groups.get(key)
+        if (posTerminal) group.terminals.add(posTerminal)
+        if (result.validationWarning) group.warnings.push(`${file.name}: ${result.validationWarning}`)
+        group.rows.push(...result.dataRows)
       } catch {
         setImportParsing(false)
         setErrorMsg(`${file.name}: could not read this file — make sure it's the .xls "Items Sold" POS report.`)
@@ -594,28 +620,14 @@ export default function Sales() {
       }
     }
 
-    // Different files disagreeing on date almost always means the wrong
-    // files got selected together — this is worth stopping for, not just
-    // warning about, since it'd otherwise silently merge two different days.
-    if (dates.size > 1) {
-      setImportParsing(false)
-      setErrorMsg(
-        `These files don't all have the same date (found: ${[...dates].join(', ')}) — import each date separately, or double-check the right files were selected.`
-      )
-      return
-    }
+    // Oldest date first — matches how a backlog would actually get entered.
+    const sortedGroups = [...groups.values()]
+      .map((g) => ({ ...g, terminals: [...g.terminals].sort() }))
+      .sort((a, b) => a.date.localeCompare(b.date))
 
-    if (warnings.length > 0) setPosReportValidationWarning(warnings)
-    if (dates.size === 1) setHeaderForm((f) => ({ ...f, sale_date: [...dates][0] }))
-    if (terminals.size > 0) {
-      setHeaderForm((f) => ({ ...f, pos_terminal: [...terminals].sort().join(', ') }))
-    }
-
-    const rows = [
-      ['Barcode', 'Quantity', 'Total Price'],
-      ...allDataRows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
-    ]
-    await processSalesImportRows(rows)
+    setDateImportQueueTotal(sortedGroups.length)
+    setDateImportQueue(sortedGroups.slice(1))
+    await startDateGroupImport(sortedGroups[0])
   }
 
   function setMismatchDraft(tempId, draft) {
@@ -1026,8 +1038,19 @@ export default function Sales() {
     }
 
     setSaving(false)
-    setPanelOpen(false)
     loadSales()
+
+    if (dateImportQueue.length > 0) {
+      const [next, ...rest] = dateImportQueue
+      setDateImportQueue(rest)
+      setPendingLines([])
+      setLineForm(EMPTY_LINE_FORM)
+      setPosReportValidationWarning(null)
+      await startDateGroupImport(next)
+    } else {
+      setPanelOpen(false)
+      setDateImportQueueTotal(0)
+    }
   }
 
   async function voidSale() {
@@ -1162,7 +1185,11 @@ export default function Sales() {
       <SlidePanel
         open={panelOpen}
         title={mode === 'new' ? 'New sale' : viewedSale?.sale_number}
-        onClose={() => setPanelOpen(false)}
+        onClose={() => {
+          setPanelOpen(false)
+          setDateImportQueue([])
+          setDateImportQueueTotal(0)
+        }}
         size="xl"
       >
         {errorMsg && (
@@ -1173,6 +1200,11 @@ export default function Sales() {
 
         {mode === 'new' ? (
           <div>
+            {dateImportQueueTotal > 1 && (
+              <div className="mb-4 rounded-md bg-[var(--color-amber-soft)] px-3.5 py-2.5 text-sm text-[var(--color-amber)]">
+                Sale {dateImportQueueTotal - dateImportQueue.length} of {dateImportQueueTotal} from this import — completing this one will automatically open the next date.
+              </div>
+            )}
             <div className="mb-4 grid grid-cols-2 gap-3">
               <Field label="Sale date" required>
                 <input
