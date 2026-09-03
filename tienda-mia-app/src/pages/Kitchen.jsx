@@ -130,7 +130,7 @@ export default function Kitchen() {
   const [marketExpenseForm, setMarketExpenseForm] = useState({ week_start: '', week_end: '', amount: '', notes: '' })
   const [marketExpenseSaving, setMarketExpenseSaving] = useState(false)
   const [marketExpenseError, setMarketExpenseError] = useState('')
-  const [kitchenRevenueByExpense, setKitchenRevenueByExpense] = useState({}) // expense id -> revenue for that week
+  const [kitchenRevenueByExpense, setKitchenRevenueByExpense] = useState({}) // expense id -> { revenue, vat, discounts } for that week
   const [ingredientProductImportOpen, setIngredientProductImportOpen] = useState(false)
   const [ingredientProductImportValid, setIngredientProductImportValid] = useState([])
   const [ingredientProductImportSkipped, setIngredientProductImportSkipped] = useState([])
@@ -320,7 +320,7 @@ export default function Kitchen() {
     // and avoids N separate round trips as the expense log grows.
     const { data: lines, error: linesErr } = await fetchAllRows(
       'sale_lines',
-      'quantity, unit_price, sale:sales(sale_date, status), product:products(business_unit, category)'
+      'quantity, unit_price, is_discounted, discount_amount, sale:sales(sale_date, status), product:products(business_unit, category)'
     )
     if (linesErr) {
       setMarketExpenseError(linesErr.message)
@@ -330,18 +330,28 @@ export default function Kitchen() {
       (l) => l.sale?.status !== 'voided' && (l.product?.business_unit === 'KITCHEN' || l.product?.category === 'KITCHEN')
     )
 
-    const revenueByExpense = {}
+    const VAT_RATE = 0.12
+    const statsByExpense = {}
     for (const exp of expenses) {
       let revenue = 0
+      let vat = 0
+      let discounts = 0
       for (const l of kitchenLines) {
         const day = l.sale?.sale_date
         if (day && day >= exp.week_start && day <= exp.week_end) {
-          revenue += Number(l.quantity) * Number(l.unit_price)
+          const lineTotal = Number(l.quantity) * Number(l.unit_price)
+          revenue += lineTotal
+          // Same rule as the Daily POS Summary report: discounted
+          // (Senior/PWD) lines are VAT-exempt by law and already charged
+          // at the VAT-exclusive price, so there's no VAT to back out of
+          // those — only regular lines carry embedded VAT.
+          vat += l.is_discounted ? 0 : lineTotal * (VAT_RATE / (1 + VAT_RATE))
+          discounts += Number(l.discount_amount ?? 0)
         }
       }
-      revenueByExpense[exp.id] = revenue
+      statsByExpense[exp.id] = { revenue, vat, discounts }
     }
-    setKitchenRevenueByExpense(revenueByExpense)
+    setKitchenRevenueByExpense(statsByExpense)
   }
 
   async function addMarketExpense(e) {
@@ -1814,6 +1824,8 @@ export default function Kitchen() {
                   <th className="px-4 py-3">Week</th>
                   <th className="px-4 py-3">Market Expense</th>
                   <th className="px-4 py-3">Kitchen Sales Revenue</th>
+                  <th className="px-4 py-3">VAT</th>
+                  <th className="px-4 py-3">Discounts</th>
                   <th className="px-4 py-3">Profit</th>
                   <th className="px-4 py-3">Notes</th>
                   <th className="px-4 py-3" />
@@ -1821,18 +1833,25 @@ export default function Kitchen() {
               </thead>
               <tbody>
                 {marketExpenses.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                  <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                     No weekly expenses logged yet.
                   </td></tr>
                 )}
                 {marketExpenses.map((exp) => {
-                  const revenue = kitchenRevenueByExpense[exp.id] ?? 0
-                  const profit = revenue - Number(exp.amount)
+                  const stats = kitchenRevenueByExpense[exp.id] ?? { revenue: 0, vat: 0, discounts: 0 }
+                  // Same rule as Daily POS Summary: revenue is already the
+                  // actual charged amount (post-discount), so discounts
+                  // isn't subtracted again here — it's shown for visibility,
+                  // not as a further deduction. VAT is backed out since it's
+                  // never really the business's own revenue.
+                  const profit = stats.revenue - stats.vat - Number(exp.amount)
                   return (
                     <tr key={exp.id} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-4 py-3">{exp.week_start} to {exp.week_end}</td>
                       <td className="px-4 py-3">{Number(exp.amount).toFixed(2)}</td>
-                      <td className="px-4 py-3">{revenue.toFixed(2)}</td>
+                      <td className="px-4 py-3">{stats.revenue.toFixed(2)}</td>
+                      <td className="px-4 py-3">{stats.vat.toFixed(2)}</td>
+                      <td className="px-4 py-3">{stats.discounts.toFixed(2)}</td>
                       <td className="px-4 py-3">
                         <StatusChip tone={profit >= 0 ? 'ok' : 'critical'}>{profit.toFixed(2)}</StatusChip>
                       </td>
