@@ -405,6 +405,7 @@ export default function Reports() {
   const isMatrix = reportKey === 'dailyMatrix'
   const isMealRice = reportKey === 'mealRice'
   const isBestSellers = reportKey === 'bestSellers'
+  const isPosSummary = reportKey === 'posDailySummary'
   const report = isMatrix ? null : REPORTS[reportKey]
 
   const { sortKey, sortDir, toggleSort } = useSort(null)
@@ -424,7 +425,7 @@ export default function Reports() {
   }
 
   useEffect(() => {
-    if (isMatrix || isMealRice || isBestSellers) return
+    if (isMatrix || isMealRice || isBestSellers || isPosSummary) return
     let cancelled = false
     async function load() {
       setLoading(true)
@@ -488,7 +489,7 @@ export default function Reports() {
             Every export reflects real transaction data, computed the same way the rest of the app sees it.
           </p>
         </div>
-        {!isMatrix && !isMealRice && !isBestSellers && (
+        {!isMatrix && !isMealRice && !isBestSellers && !isPosSummary && (
           <div className="flex gap-2">
             <button
               onClick={exportCsv}
@@ -546,9 +547,17 @@ export default function Reports() {
         >
           Best Sellers by Category
         </button>
+        <button
+          onClick={() => selectReport('posDailySummary')}
+          className={`px-3 py-2 text-sm font-medium ${
+            isPosSummary ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
+          }`}
+        >
+          Daily POS Summary
+        </button>
       </div>
 
-      {!isMatrix && !isMealRice && !isBestSellers && (
+      {!isMatrix && !isMealRice && !isBestSellers && !isPosSummary && (
         <div className="no-print mb-4 flex flex-wrap items-end gap-3">
           <label className="text-sm">
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
@@ -586,6 +595,8 @@ export default function Reports() {
         <MealRiceSummary dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
       ) : isBestSellers ? (
         <BestSellersByCategory dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
+      ) : isPosSummary ? (
+        <PosDailySummary dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo} />
       ) : (
         <div id="printable-report">
           <div className="mb-3">
@@ -934,6 +945,212 @@ function DailySalesMatrix({ dateFrom, dateTo, setDateFrom, setDateTo }) {
 // paired "Only" counterpart (configured in Products → Meal / Rice tracking),
 // and separately tallies total rice cups sold — Meals count as whatever
 // rice_cups their pairing implies, plus any standalone Rice / Half Rice sales.
+function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
+  const [loading, setLoading] = useState(true)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [terminalGroups, setTerminalGroups] = useState([]) // [{ terminal, rows: [...], totals: {...} }]
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      setErrorMsg('')
+      try {
+        const { data, error } = await fetchAllRows(
+          'sale_lines',
+          'sale_id, quantity, unit_price, fifo_cost, is_discounted, discount_amount, sale:sales(sale_date, pos_terminal, status)'
+        )
+        if (error) throw error
+
+        const VAT_RATE = 0.12
+        const byGroup = {}
+        for (const l of data ?? []) {
+          if (l.sale?.status === 'voided') continue
+          const day = toDateOnly(l.sale?.sale_date)
+          if (!day || !withinRange(day, dateFrom, dateTo)) continue
+          const terminal = l.sale?.pos_terminal?.trim() || 'Unspecified'
+          const key = `${terminal}|${day}`
+          byGroup[key] = byGroup[key] ?? { terminal, date: day, qty: 0, sales: 0, vat: 0, discounts: 0, cost: 0 }
+          const lineTotal = Number(l.quantity) * Number(l.unit_price)
+          byGroup[key].qty += Number(l.quantity)
+          byGroup[key].sales += lineTotal
+          // Discounted (Senior/PWD) lines are VAT-exempt by law and already
+          // charged at the VAT-exclusive price, so there's no VAT to back out
+          // of those. Regular lines charge the VAT-inclusive price, so VAT is
+          // the portion above the VAT-exclusive amount.
+          byGroup[key].vat += l.is_discounted ? 0 : lineTotal * (VAT_RATE / (1 + VAT_RATE))
+          byGroup[key].discounts += Number(l.discount_amount ?? 0)
+          byGroup[key].cost += Number(l.fifo_cost ?? 0)
+        }
+
+        const allRows = Object.values(byGroup).map((g) => ({ ...g, profit: g.sales - g.vat - g.cost }))
+
+        // One section per distinct terminal value actually found. A sale
+        // imported with both terminals' files combined into one record ends
+        // up here as its own "1, 2" group rather than being guessed into
+        // either POS 1 or POS 2 — splitting it further isn't possible from
+        // the data as recorded, so it's shown honestly instead of silently.
+        const byTerminal = {}
+        for (const r of allRows) {
+          if (!byTerminal[r.terminal]) byTerminal[r.terminal] = []
+          byTerminal[r.terminal].push(r)
+        }
+        const terminals = Object.keys(byTerminal).sort((a, b) => {
+          const aNum = /^\d+$/.test(a)
+          const bNum = /^\d+$/.test(b)
+          if (aNum && bNum) return Number(a) - Number(b)
+          if (aNum) return -1
+          if (bNum) return 1
+          return a.localeCompare(b)
+        })
+
+        const groups = terminals.map((terminal) => {
+          const rows = byTerminal[terminal].sort((a, b) => (a.date < b.date ? -1 : 1))
+          const totals = rows.reduce(
+            (acc, r) => ({
+              qty: acc.qty + r.qty,
+              sales: acc.sales + r.sales,
+              vat: acc.vat + r.vat,
+              discounts: acc.discounts + r.discounts,
+              cost: acc.cost + r.cost,
+              profit: acc.profit + r.profit,
+            }),
+            { qty: 0, sales: 0, vat: 0, discounts: 0, cost: 0, profit: 0 }
+          )
+          return { terminal, rows, totals }
+        })
+
+        if (!cancelled) setTerminalGroups(groups)
+      } catch (err) {
+        if (!cancelled) setErrorMsg(err.message ?? 'Could not load this report.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [dateFrom, dateTo])
+
+  function exportCsv() {
+    const sections = []
+    for (const g of terminalGroups) {
+      sections.push([`POS ${g.terminal}`])
+      sections.push(['Date', 'Qty Sold', 'Sales', 'VAT', 'Discounts', 'Cost', 'Profit'])
+      for (const r of g.rows) {
+        sections.push([r.date, r.qty, r.sales.toFixed(2), r.vat.toFixed(2), r.discounts.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2)])
+      }
+      sections.push(['Total', g.totals.qty, g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.discounts.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2)])
+      sections.push([])
+    }
+    const csv = sections.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
+    downloadFile(`pos-daily-summary_${dateFrom}_to_${dateTo}.csv`, csv, 'text/csv;charset=utf-8;')
+  }
+
+  return (
+    <div>
+      <div className="no-print mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
+            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="input" />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">To</span>
+            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
+          </label>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={exportCsv}
+            disabled={loading || terminalGroups.length === 0}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            <Download size={15} />
+            Export CSV
+          </button>
+          <button
+            onClick={() => window.print()}
+            disabled={loading || terminalGroups.length === 0}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            <Printer size={15} />
+            Print / Save PDF
+          </button>
+        </div>
+      </div>
+
+      {errorMsg && (
+        <div className="no-print mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+          {errorMsg}
+        </div>
+      )}
+
+      <div id="printable-report">
+        <div className="mb-3">
+          <div className="font-display text-lg font-semibold">Daily POS Summary</div>
+          <div className="text-xs text-[var(--color-ink-soft)]">
+            {dateFrom} to {dateTo} — one table per terminal, voided sales excluded
+          </div>
+        </div>
+
+        {loading && <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">Loading…</div>}
+
+        {!loading && terminalGroups.length === 0 && (
+          <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">No sales in this date range.</div>
+        )}
+
+        {!loading &&
+          terminalGroups.map((g) => (
+            <div key={g.terminal} className="mb-8">
+              <div className="mb-2 font-display text-base font-semibold">
+                {g.terminal === 'Unspecified' || g.terminal.includes(',') ? g.terminal : `POS ${g.terminal}`}
+              </div>
+              <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                    <tr>
+                      <th className="px-4 py-3">Date</th>
+                      <th className="px-4 py-3">Qty Sold</th>
+                      <th className="px-4 py-3">Sales</th>
+                      <th className="px-4 py-3">VAT</th>
+                      <th className="px-4 py-3">Discounts</th>
+                      <th className="px-4 py-3">Cost</th>
+                      <th className="px-4 py-3">Profit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.rows.map((r) => (
+                      <tr key={r.date} className="border-b border-[var(--color-line)] last:border-0">
+                        <td className="px-4 py-3">{r.date}</td>
+                        <td className="px-4 py-3">{r.qty}</td>
+                        <td className="px-4 py-3">{r.sales.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.vat.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.discounts.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.cost.toFixed(2)}</td>
+                        <td className="px-4 py-3 font-medium">{r.profit.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-t-2 border-[var(--color-line)] font-medium">
+                      <td className="px-4 py-3">Total</td>
+                      <td className="px-4 py-3">{g.totals.qty}</td>
+                      <td className="px-4 py-3">{g.totals.sales.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.vat.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.discounts.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.cost.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.profit.toFixed(2)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  )
+}
+
 function MealRiceSummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
