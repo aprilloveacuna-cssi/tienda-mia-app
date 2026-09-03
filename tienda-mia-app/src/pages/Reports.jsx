@@ -949,7 +949,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [terminalGroups, setTerminalGroups] = useState([]) // [{ terminal, rows: [...], totals: {...} }]
-  const [retailOnly, setRetailOnly] = useState(false)
+  const [itemFilter, setItemFilter] = useState('all') // 'all' | 'retail' | 'kitchen'
 
   useEffect(() => {
     let cancelled = false
@@ -968,7 +968,8 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         for (const l of data ?? []) {
           if (l.sale?.status === 'voided') continue
           const isKitchen = l.product?.business_unit === 'KITCHEN' || l.product?.category === 'KITCHEN'
-          if (retailOnly && isKitchen) continue
+          if (itemFilter === 'retail' && isKitchen) continue
+          if (itemFilter === 'kitchen' && !isKitchen) continue
           const day = toDateOnly(l.sale?.sale_date)
           if (!day || !withinRange(day, dateFrom, dateTo)) continue
           const terminal = l.sale?.pos_terminal?.trim() || 'Unspecified'
@@ -986,7 +987,17 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           byGroup[key].cost += Number(l.fifo_cost ?? 0)
         }
 
-        const allRows = Object.values(byGroup).map((g) => ({ ...g, profit: g.sales - g.vat - g.cost }))
+        // "Sales" is already what was actually charged — for a discounted
+        // line, that's the discounted price, not the regular one.
+        // "Discounts" is the separate, informational amount that was given
+        // up — it doesn't sit inside Sales waiting to be subtracted again.
+        // Gross Sales (what would've been charged at full price) is Sales +
+        // Discounts, added back — never Sales minus Discounts.
+        const allRows = Object.values(byGroup).map((g) => ({
+          ...g,
+          grossSales: g.sales + g.discounts,
+          profit: g.sales - g.vat - g.cost,
+        }))
 
         // One section per distinct terminal value actually found. A sale
         // imported with both terminals' files combined into one record ends
@@ -1012,13 +1023,14 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           const totals = rows.reduce(
             (acc, r) => ({
               qty: acc.qty + r.qty,
+              grossSales: acc.grossSales + r.grossSales,
               sales: acc.sales + r.sales,
               vat: acc.vat + r.vat,
               discounts: acc.discounts + r.discounts,
               cost: acc.cost + r.cost,
               profit: acc.profit + r.profit,
             }),
-            { qty: 0, sales: 0, vat: 0, discounts: 0, cost: 0, profit: 0 }
+            { qty: 0, grossSales: 0, sales: 0, vat: 0, discounts: 0, cost: 0, profit: 0 }
           )
           return { terminal, rows, totals }
         })
@@ -1034,17 +1046,17 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     return () => {
       cancelled = true
     }
-  }, [dateFrom, dateTo, retailOnly])
+  }, [dateFrom, dateTo, itemFilter])
 
   function exportCsv() {
     const sections = []
     for (const g of terminalGroups) {
       sections.push([`POS ${g.terminal}`])
-      sections.push(['Date', 'Qty Sold', 'Sales', 'VAT', 'Discounts', 'Cost', 'Profit'])
+      sections.push(['Date', 'Qty Sold', 'Gross Sales', 'Sales', 'VAT', 'Discounts', 'Cost', 'Profit'])
       for (const r of g.rows) {
-        sections.push([r.date, r.qty, r.sales.toFixed(2), r.vat.toFixed(2), r.discounts.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2)])
+        sections.push([r.date, r.qty, r.grossSales.toFixed(2), r.sales.toFixed(2), r.vat.toFixed(2), r.discounts.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2)])
       }
-      sections.push(['Total', g.totals.qty, g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.discounts.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2)])
+      sections.push(['Total', g.totals.qty, g.totals.grossSales.toFixed(2), g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.discounts.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2)])
       sections.push([])
     }
     const csv = sections.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -1063,9 +1075,13 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">To</span>
             <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
           </label>
-          <label className="flex items-center gap-1.5 pb-2 text-sm">
-            <input type="checkbox" checked={retailOnly} onChange={(e) => setRetailOnly(e.target.checked)} />
-            Retail items only (excludes Kitchen)
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Show</span>
+            <select value={itemFilter} onChange={(e) => setItemFilter(e.target.value)} className="input">
+              <option value="all">Everything (Retail + Kitchen)</option>
+              <option value="retail">Retail items only</option>
+              <option value="kitchen">Kitchen items only</option>
+            </select>
           </label>
         </div>
         <div className="flex gap-2">
@@ -1120,6 +1136,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                     <tr>
                       <th className="px-4 py-3">Date</th>
                       <th className="px-4 py-3">Qty Sold</th>
+                      <th className="px-4 py-3">Gross Sales</th>
                       <th className="px-4 py-3">Sales</th>
                       <th className="px-4 py-3">VAT</th>
                       <th className="px-4 py-3">Discounts</th>
@@ -1132,6 +1149,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                       <tr key={r.date} className="border-b border-[var(--color-line)] last:border-0">
                         <td className="px-4 py-3">{r.date}</td>
                         <td className="px-4 py-3">{r.qty}</td>
+                        <td className="px-4 py-3">{r.grossSales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.sales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.vat.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.discounts.toFixed(2)}</td>
@@ -1142,6 +1160,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                     <tr className="border-t-2 border-[var(--color-line)] font-medium">
                       <td className="px-4 py-3">Total</td>
                       <td className="px-4 py-3">{g.totals.qty}</td>
+                      <td className="px-4 py-3">{g.totals.grossSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.sales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.vat.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.discounts.toFixed(2)}</td>

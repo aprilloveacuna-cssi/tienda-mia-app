@@ -1823,6 +1823,7 @@ export default function Kitchen() {
                 <tr>
                   <th className="px-4 py-3">Week</th>
                   <th className="px-4 py-3">Market Expense</th>
+                  <th className="px-4 py-3">Gross Sales</th>
                   <th className="px-4 py-3">Kitchen Sales Revenue</th>
                   <th className="px-4 py-3">VAT</th>
                   <th className="px-4 py-3">Discounts</th>
@@ -1833,12 +1834,17 @@ export default function Kitchen() {
               </thead>
               <tbody>
                 {marketExpenses.length === 0 && (
-                  <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                  <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                     No weekly expenses logged yet.
                   </td></tr>
                 )}
                 {marketExpenses.map((exp) => {
                   const stats = kitchenRevenueByExpense[exp.id] ?? { revenue: 0, vat: 0, discounts: 0 }
+                  // Gross Sales (what would've been charged at full price)
+                  // is revenue + discounts, added back — revenue is already
+                  // the actual charged amount, so discounts doesn't sit
+                  // inside it waiting to be subtracted a second time.
+                  const grossSales = stats.revenue + stats.discounts
                   // Same rule as Daily POS Summary: revenue is already the
                   // actual charged amount (post-discount), so discounts
                   // isn't subtracted again here — it's shown for visibility,
@@ -1849,6 +1855,7 @@ export default function Kitchen() {
                     <tr key={exp.id} className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-4 py-3">{exp.week_start} to {exp.week_end}</td>
                       <td className="px-4 py-3">{Number(exp.amount).toFixed(2)}</td>
+                      <td className="px-4 py-3">{grossSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.revenue.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.vat.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.discounts.toFixed(2)}</td>
