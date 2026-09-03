@@ -949,6 +949,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [terminalGroups, setTerminalGroups] = useState([]) // [{ terminal, rows: [...], totals: {...} }]
+  const [retailOnly, setRetailOnly] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -958,7 +959,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       try {
         const { data, error } = await fetchAllRows(
           'sale_lines',
-          'sale_id, quantity, unit_price, fifo_cost, is_discounted, discount_amount, sale:sales(sale_date, pos_terminal, status)'
+          'sale_id, quantity, unit_price, fifo_cost, is_discounted, discount_amount, sale:sales(sale_date, pos_terminal, status), product:products(business_unit, category)'
         )
         if (error) throw error
 
@@ -966,6 +967,8 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         const byGroup = {}
         for (const l of data ?? []) {
           if (l.sale?.status === 'voided') continue
+          const isKitchen = l.product?.business_unit === 'KITCHEN' || l.product?.category === 'KITCHEN'
+          if (retailOnly && isKitchen) continue
           const day = toDateOnly(l.sale?.sale_date)
           if (!day || !withinRange(day, dateFrom, dateTo)) continue
           const terminal = l.sale?.pos_terminal?.trim() || 'Unspecified'
@@ -1031,7 +1034,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     return () => {
       cancelled = true
     }
-  }, [dateFrom, dateTo])
+  }, [dateFrom, dateTo, retailOnly])
 
   function exportCsv() {
     const sections = []
@@ -1059,6 +1062,10 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           <label className="text-sm">
             <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">To</span>
             <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
+          </label>
+          <label className="flex items-center gap-1.5 pb-2 text-sm">
+            <input type="checkbox" checked={retailOnly} onChange={(e) => setRetailOnly(e.target.checked)} />
+            Retail items only (excludes Kitchen)
           </label>
         </div>
         <div className="flex gap-2">

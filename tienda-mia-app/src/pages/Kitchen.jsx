@@ -121,6 +121,16 @@ export default function Kitchen() {
   const [weeklyPurchaseImportOpen, setWeeklyPurchaseImportOpen] = useState(false)
   const [weeklyPurchaseImportSkipped, setWeeklyPurchaseImportSkipped] = useState([])
   const ingredientProductFileInputRef = useRef(null)
+
+  // Market Expenses — a simple lump-sum weekly spend figure, for when only a
+  // total ("spent this much at the market") number is available rather than
+  // itemized ingredient-by-ingredient costs. Used to compute Kitchen's real
+  // profit against actual sales revenue for the same period.
+  const [marketExpenses, setMarketExpenses] = useState([])
+  const [marketExpenseForm, setMarketExpenseForm] = useState({ week_start: '', week_end: '', amount: '', notes: '' })
+  const [marketExpenseSaving, setMarketExpenseSaving] = useState(false)
+  const [marketExpenseError, setMarketExpenseError] = useState('')
+  const [kitchenRevenueByExpense, setKitchenRevenueByExpense] = useState({}) // expense id -> revenue for that week
   const [ingredientProductImportOpen, setIngredientProductImportOpen] = useState(false)
   const [ingredientProductImportValid, setIngredientProductImportValid] = useState([])
   const [ingredientProductImportSkipped, setIngredientProductImportSkipped] = useState([])
@@ -290,8 +300,83 @@ export default function Kitchen() {
     setLoading(false)
   }
 
+  // ---------- Market Expenses ----------
+  async function loadMarketExpenses() {
+    const { data, error } = await fetchAllRows('kitchen_market_expenses', '*', 'week_start', { ascending: false })
+    if (error) {
+      setMarketExpenseError(error.message)
+      return
+    }
+    const expenses = data ?? []
+    setMarketExpenses(expenses)
+
+    if (expenses.length === 0) {
+      setKitchenRevenueByExpense({})
+      return
+    }
+
+    // One bulk fetch of every Kitchen sale line ever made, rather than one
+    // query per expense row — cheap since this only runs when the tab loads,
+    // and avoids N separate round trips as the expense log grows.
+    const { data: lines, error: linesErr } = await fetchAllRows(
+      'sale_lines',
+      'quantity, unit_price, sale:sales(sale_date, status), product:products(business_unit, category)'
+    )
+    if (linesErr) {
+      setMarketExpenseError(linesErr.message)
+      return
+    }
+    const kitchenLines = (lines ?? []).filter(
+      (l) => l.sale?.status !== 'voided' && (l.product?.business_unit === 'KITCHEN' || l.product?.category === 'KITCHEN')
+    )
+
+    const revenueByExpense = {}
+    for (const exp of expenses) {
+      let revenue = 0
+      for (const l of kitchenLines) {
+        const day = l.sale?.sale_date
+        if (day && day >= exp.week_start && day <= exp.week_end) {
+          revenue += Number(l.quantity) * Number(l.unit_price)
+        }
+      }
+      revenueByExpense[exp.id] = revenue
+    }
+    setKitchenRevenueByExpense(revenueByExpense)
+  }
+
+  async function addMarketExpense(e) {
+    e.preventDefault()
+    if (!marketExpenseForm.week_start || !marketExpenseForm.week_end || !marketExpenseForm.amount) return
+    setMarketExpenseSaving(true)
+    setMarketExpenseError('')
+    const { error } = await supabase.from('kitchen_market_expenses').insert({
+      week_start: marketExpenseForm.week_start,
+      week_end: marketExpenseForm.week_end,
+      amount: Number(marketExpenseForm.amount),
+      notes: marketExpenseForm.notes.trim() || null,
+    })
+    setMarketExpenseSaving(false)
+    if (error) {
+      setMarketExpenseError(error.message)
+      return
+    }
+    setMarketExpenseForm({ week_start: '', week_end: '', amount: '', notes: '' })
+    loadMarketExpenses()
+  }
+
+  async function deleteMarketExpense(id) {
+    if (!confirm('Delete this expense entry? This only removes the logged expense — it has no effect on inventory or sales.')) return
+    const { error } = await supabase.from('kitchen_market_expenses').delete().eq('id', id)
+    if (error) {
+      setMarketExpenseError(error.message)
+      return
+    }
+    loadMarketExpenses()
+  }
+
   useEffect(() => {
     loadAll()
+    loadMarketExpenses()
   }, [])
 
   // ---------- Recipe builder ----------
@@ -1400,6 +1485,7 @@ export default function Kitchen() {
           ['recipes', 'Recipes'],
           ['ingredients', 'Ingredients'],
           ['weeklyPurchases', 'Weekly Purchases'],
+          ['marketExpenses', 'Market Expenses'],
           ['dailyMeals', 'Daily Meals'],
           ['leftovers', 'Leftovers'],
         ].map(([t, label]) => (
@@ -1659,6 +1745,112 @@ export default function Kitchen() {
               ? 'Saving…'
               : `Save ${weeklyPurchaseLines.length} line${weeklyPurchaseLines.length === 1 ? '' : 's'} across ${new Set(weeklyPurchaseLines.map((l) => l.purchase_date)).size} date${new Set(weeklyPurchaseLines.map((l) => l.purchase_date)).size === 1 ? '' : 's'}`}
           </button>
+        </div>
+      ) : tab === 'marketExpenses' ? (
+        <div>
+          <p className="mb-4 text-sm text-[var(--color-ink-soft)]">
+            A simple total per week — enter what was actually spent at the market, and this shows Kitchen's real sales
+            revenue for the same dates alongside it, so profit is based on real numbers instead of FIFO cost, which
+            doesn't reflect how Kitchen actually buys and cooks.
+          </p>
+
+          {marketExpenseError && (
+            <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+              {marketExpenseError}
+            </div>
+          )}
+
+          <form onSubmit={addMarketExpense} className="mb-6 grid grid-cols-5 gap-3 rounded-md border border-dashed border-[var(--color-line)] p-4">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Week start</span>
+              <input
+                type="date" required
+                value={marketExpenseForm.week_start}
+                onChange={(e) => setMarketExpenseForm({ ...marketExpenseForm, week_start: e.target.value })}
+                className="input"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Week end</span>
+              <input
+                type="date" required
+                value={marketExpenseForm.week_end}
+                onChange={(e) => setMarketExpenseForm({ ...marketExpenseForm, week_end: e.target.value })}
+                className="input"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Amount spent</span>
+              <input
+                type="number" step="0.01" min="0" required
+                value={marketExpenseForm.amount}
+                onChange={(e) => setMarketExpenseForm({ ...marketExpenseForm, amount: e.target.value })}
+                className="input"
+              />
+            </label>
+            <label className="col-span-1 block">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Notes (optional)</span>
+              <input
+                value={marketExpenseForm.notes}
+                onChange={(e) => setMarketExpenseForm({ ...marketExpenseForm, notes: e.target.value })}
+                placeholder="e.g. included extra order for fiesta"
+                className="input"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={marketExpenseSaving}
+              className="flex items-end justify-center gap-1.5 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-60"
+            >
+              <Plus size={15} />
+              {marketExpenseSaving ? 'Saving…' : 'Add'}
+            </button>
+          </form>
+
+          <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                <tr>
+                  <th className="px-4 py-3">Week</th>
+                  <th className="px-4 py-3">Market Expense</th>
+                  <th className="px-4 py-3">Kitchen Sales Revenue</th>
+                  <th className="px-4 py-3">Profit</th>
+                  <th className="px-4 py-3">Notes</th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody>
+                {marketExpenses.length === 0 && (
+                  <tr><td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                    No weekly expenses logged yet.
+                  </td></tr>
+                )}
+                {marketExpenses.map((exp) => {
+                  const revenue = kitchenRevenueByExpense[exp.id] ?? 0
+                  const profit = revenue - Number(exp.amount)
+                  return (
+                    <tr key={exp.id} className="border-b border-[var(--color-line)] last:border-0">
+                      <td className="px-4 py-3">{exp.week_start} to {exp.week_end}</td>
+                      <td className="px-4 py-3">{Number(exp.amount).toFixed(2)}</td>
+                      <td className="px-4 py-3">{revenue.toFixed(2)}</td>
+                      <td className="px-4 py-3">
+                        <StatusChip tone={profit >= 0 ? 'ok' : 'critical'}>{profit.toFixed(2)}</StatusChip>
+                      </td>
+                      <td className="px-4 py-3 text-[var(--color-ink-soft)]">{exp.notes || '—'}</td>
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => deleteMarketExpense(exp.id)}
+                          className="text-[var(--color-ink-soft)] hover:text-[var(--color-rust)]"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : tab === 'dailyMeals' ? (
         <div>
