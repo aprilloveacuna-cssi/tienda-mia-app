@@ -385,6 +385,10 @@ export default function Kitchen() {
   }
 
   useEffect(() => {
+    if (tab === 'marketExpenses') loadMarketExpenses()
+  }, [tab])
+
+  useEffect(() => {
     loadAll()
     loadMarketExpenses()
   }, [])
