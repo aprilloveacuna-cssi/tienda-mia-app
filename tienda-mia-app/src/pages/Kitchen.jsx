@@ -337,7 +337,14 @@ export default function Kitchen() {
       let vat = 0
       let discounts = 0
       for (const l of kitchenLines) {
-        const day = l.sale?.sale_date
+        // sale_date is a timestamptz, so it comes back with a time/timezone
+        // suffix (e.g. "2026-09-04T00:00:00+00:00"). Comparing that directly
+        // against week_start/week_end (plain dates, no time) as strings
+        // silently drops the last day of every range — the timestamp's
+        // extra characters make it sort as "later" than the bare date, so
+        // day <= week_end fails on exactly the boundary day. Truncating to
+        // just the date portion first fixes that.
+        const day = l.sale?.sale_date ? String(l.sale.sale_date).slice(0, 10) : null
         if (day && day >= exp.week_start && day <= exp.week_end) {
           const lineTotal = Number(l.quantity) * Number(l.unit_price)
           revenue += lineTotal
