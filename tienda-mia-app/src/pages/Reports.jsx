@@ -962,6 +962,28 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           'sale_id, quantity, unit_price, fifo_cost, is_discounted, discount_amount, sale:sales(sale_date, pos_terminal, status), product:products(business_unit, category)'
         )
         if (error) throw error
+        const { data: marketExpenses, error: expError } = await fetchAllRows('kitchen_market_expenses', 'week_start, week_end, amount')
+        if (expError) throw expError
+
+        // Same reasoning as the Velocity & ABC report: Kitchen items don't
+        // have a meaningful per-unit FIFO cost, since they're never
+        // individually purchased. The real cost data that exists is the
+        // weekly lump-sum market expense, attributed per line in proportion
+        // to that line's share of total Kitchen revenue in the same
+        // expense period — a line responsible for 10% of that week's
+        // Kitchen revenue is charged 10% of that week's spend. This always
+        // sums to the real total spent; it's an allocation, not a guess.
+        const kitchenTotalRevenueByPeriod = (marketExpenses ?? []).map(() => 0)
+        for (const l of data ?? []) {
+          if (l.sale?.status === 'voided') continue
+          const isKitchen = l.product?.business_unit === 'KITCHEN' || l.product?.category === 'KITCHEN'
+          if (!isKitchen) continue
+          const day = toDateOnly(l.sale?.sale_date)
+          if (!day) continue
+          const periodIdx = (marketExpenses ?? []).findIndex((e) => day >= e.week_start && day <= e.week_end)
+          if (periodIdx === -1) continue
+          kitchenTotalRevenueByPeriod[periodIdx] += Number(l.quantity) * Number(l.unit_price)
+        }
 
         const VAT_RATE = 0.12
         const byGroup = {}
@@ -984,7 +1006,14 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           // the portion above the VAT-exclusive amount.
           byGroup[key].vat += l.is_discounted ? 0 : lineTotal * (VAT_RATE / (1 + VAT_RATE))
           byGroup[key].discounts += Number(l.discount_amount ?? 0)
-          byGroup[key].cost += Number(l.fifo_cost ?? 0)
+
+          if (isKitchen) {
+            const periodIdx = (marketExpenses ?? []).findIndex((e) => day >= e.week_start && day <= e.week_end)
+            const totalRevenue = periodIdx >= 0 ? kitchenTotalRevenueByPeriod[periodIdx] : 0
+            byGroup[key].cost += periodIdx >= 0 && totalRevenue > 0 ? Number(marketExpenses[periodIdx].amount) * (lineTotal / totalRevenue) : 0
+          } else {
+            byGroup[key].cost += Number(l.fifo_cost ?? 0)
+          }
         }
 
         // "Sales" is already what was actually charged — for a discounted

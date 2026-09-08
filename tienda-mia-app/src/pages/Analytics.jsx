@@ -37,18 +37,20 @@ export default function Analytics() {
       setLoading(true)
       setErrorMsg('')
       try {
-        const [settingsRes, productsRes, saleLinesRes] = await Promise.all([
+        const [settingsRes, productsRes, saleLinesRes, marketExpensesRes] = await Promise.all([
           supabase.from('settings').select('key, value'),
           fetchAllRows(
             'products',
             'id, sku, name, category, business_unit, product_type, unit, current_cost, selling_price, reorder_point, status, inventory_cache(current_stock, inventory_value)'
           ),
           fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date)'),
+          fetchAllRows('kitchen_market_expenses', 'week_start, week_end, amount'),
         ])
 
         if (settingsRes.error) throw settingsRes.error
         if (productsRes.error) throw productsRes.error
         if (saleLinesRes.error) throw saleLinesRes.error
+        if (marketExpensesRes.error) throw marketExpensesRes.error
 
         productsRes.data = (productsRes.data ?? []).filter((p) => p.status === 'active')
 
@@ -68,6 +70,13 @@ export default function Analytics() {
           (l) => l.sale?.sale_date && new Date(l.sale.sale_date) >= windowStart
         )
 
+        const productById = {}
+        for (const p of productsRes.data ?? []) productById[p.id] = p
+
+        function isKitchenProduct(p) {
+          return p?.business_unit === 'KITCHEN' || p?.category === 'KITCHEN'
+        }
+
         const byProduct = {}
         for (const l of salesInWindow) {
           byProduct[l.product_id] = byProduct[l.product_id] ?? { qty: 0, revenue: 0, cost: 0 }
@@ -75,6 +84,49 @@ export default function Analytics() {
           byProduct[l.product_id].revenue += Number(l.quantity) * Number(l.unit_price)
           byProduct[l.product_id].cost += Number(l.fifo_cost)
         }
+
+        // Kitchen items don't have a meaningful per-unit FIFO cost — they're
+        // never individually purchased, so fifo_cost on their lines is
+        // mostly just current_cost (often 0 or stale) times quantity. The
+        // real cost data that exists is the weekly lump-sum market expense.
+        // Since that number covers every dish combined, not one product, the
+        // only honest way to attribute it per product is to split each
+        // week's expense in proportion to that week's Kitchen revenue share
+        // — a dish responsible for 10% of that week's Kitchen revenue gets
+        // charged 10% of that week's spend. This always adds up to the real
+        // total spent; it's an allocation, not a guess at the total.
+        const marketExpenses = marketExpensesRes.data ?? []
+        const kitchenRevenueByProductByPeriod = {} // expenseIdx -> { productId -> revenue }
+        const kitchenTotalRevenueByPeriod = {} // expenseIdx -> total revenue
+        const kitchenUncoveredRevenueByProduct = {} // productId -> revenue with no matching expense period
+
+        for (const l of salesInWindow) {
+          const p = productById[l.product_id]
+          if (!isKitchenProduct(p)) continue
+          const day = l.sale?.sale_date ? String(l.sale.sale_date).slice(0, 10) : null
+          if (!day) continue
+          const lineRevenue = Number(l.quantity) * Number(l.unit_price)
+          const periodIdx = marketExpenses.findIndex((e) => day >= e.week_start && day <= e.week_end)
+          if (periodIdx === -1) {
+            kitchenUncoveredRevenueByProduct[l.product_id] = (kitchenUncoveredRevenueByProduct[l.product_id] ?? 0) + lineRevenue
+            continue
+          }
+          kitchenRevenueByProductByPeriod[periodIdx] = kitchenRevenueByProductByPeriod[periodIdx] ?? {}
+          kitchenRevenueByProductByPeriod[periodIdx][l.product_id] =
+            (kitchenRevenueByProductByPeriod[periodIdx][l.product_id] ?? 0) + lineRevenue
+          kitchenTotalRevenueByPeriod[periodIdx] = (kitchenTotalRevenueByPeriod[periodIdx] ?? 0) + lineRevenue
+        }
+
+        const kitchenAllocatedCostByProduct = {}
+        marketExpenses.forEach((exp, idx) => {
+          const totalRevenue = kitchenTotalRevenueByPeriod[idx] ?? 0
+          if (totalRevenue <= 0) return
+          const revenueByProduct = kitchenRevenueByProductByPeriod[idx] ?? {}
+          for (const [productId, rev] of Object.entries(revenueByProduct)) {
+            const share = rev / totalRevenue
+            kitchenAllocatedCostByProduct[productId] = (kitchenAllocatedCostByProduct[productId] ?? 0) + Number(exp.amount) * share
+          }
+        })
 
         const products = (productsRes.data ?? []).map((p) => {
           const cache = Array.isArray(p.inventory_cache) ? p.inventory_cache[0] : p.inventory_cache
@@ -99,7 +151,23 @@ export default function Analytics() {
           const daysOfStockRemaining = avgDailyDemand > 0 ? currentStock / avgDailyDemand : null
 
           const revenue = sold?.revenue ?? 0
-          const fifoCost = sold?.cost ?? 0
+          const isKitchen = isKitchenProduct(p)
+          const uncoveredRevenue = kitchenUncoveredRevenueByProduct[p.id] ?? 0
+          // Kitchen cost comes from the market-expense allocation above, not
+          // FIFO — see the comment where kitchenAllocatedCostByProduct is
+          // built for why. costBasis tells the UI whether that allocation
+          // actually had expense data to work with for this product's full
+          // window, so an incomplete estimate isn't mistaken for a solid one.
+          const fifoCost = isKitchen ? (kitchenAllocatedCostByProduct[p.id] ?? 0) : (sold?.cost ?? 0)
+          const costBasis = !isKitchen
+            ? 'fifo'
+            : uncoveredRevenue > 0 && kitchenAllocatedCostByProduct[p.id] > 0
+              ? 'market-partial'
+              : uncoveredRevenue > 0
+                ? 'market-missing'
+                : hasSales
+                  ? 'market-allocated'
+                  : 'fifo'
           const grossProfit = revenue - fifoCost
           const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : null
 
@@ -111,6 +179,7 @@ export default function Analytics() {
             qtySold: sold?.qty ?? 0,
             revenue,
             fifoCost,
+            costBasis,
             grossProfit,
             marginPct,
             avgDailyDemand,
@@ -285,7 +354,31 @@ function VelocityTab({ products }) {
     },
     { key: 'qty', label: 'Qty sold', render: (p) => `${p.qtySold} ${p.unit}`, sortValue: (p) => p.qtySold },
     { key: 'revenue', label: 'Revenue', render: (p) => p.revenue.toFixed(2), sortValue: (p) => p.revenue },
-    { key: 'profit', label: 'Gross profit', render: (p) => p.grossProfit.toFixed(2), sortValue: (p) => p.grossProfit },
+    {
+      key: 'profit',
+      label: 'Gross profit',
+      render: (p) => (
+        <span>
+          {p.grossProfit.toFixed(2)}
+          {p.costBasis === 'market-allocated' && (
+            <span title="Kitchen items don't have a real per-unit cost — this is estimated from the weekly market expense you've logged, split by revenue share." className="ml-1 text-xs text-[var(--color-ink-soft)]">
+              (est.)
+            </span>
+          )}
+          {p.costBasis === 'market-partial' && (
+            <span title="Estimated from market expense, but only part of this item's sales window has a logged expense to allocate from — treat as a rough figure." className="ml-1 text-xs text-[var(--color-amber)]">
+              (est., partial)
+            </span>
+          )}
+          {p.costBasis === 'market-missing' && (
+            <span title="No market expense logged for this item's sales window — cost and profit shown are not meaningful yet." className="ml-1 text-xs text-[var(--color-rust)]">
+              (no cost data)
+            </span>
+          )}
+        </span>
+      ),
+      sortValue: (p) => p.grossProfit,
+    },
     { key: 'margin', label: 'Margin %', render: (p) => (p.marginPct !== null ? `${p.marginPct.toFixed(1)}%` : '—'), sortValue: (p) => p.marginPct ?? -Infinity },
     { key: 'daily', label: 'Avg / day', render: (p) => p.avgDailyDemand.toFixed(2), sortValue: (p) => p.avgDailyDemand },
     {
@@ -300,6 +393,7 @@ function VelocityTab({ products }) {
       <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
         Class A = top 80% of revenue, B = next 15%, C = the long tail — the classic Pareto cut, computed from products with any sales in the window.
         Click any column to sort — Revenue or Qty sold for best-sellers, Gross profit or Margin % (ascending) for the least profitable.
+        Kitchen items don't have a real purchase cost, so their profit is estimated by splitting your logged weekly market expense across dishes by revenue share — marked "(est.)" below.
       </p>
       <Table columns={columns} rows={withSales} emptyText="No sales yet to rank." defaultSortKey="revenue" />
     </div>

@@ -168,7 +168,12 @@ export default function Adjustments() {
   )
 
   async function loadPhysicalCounts() {
-    const { data, error } = await fetchAllRows('physical_counts', '*, physical_count_lines(id, posted)', 'updated_at', { ascending: false })
+    const { data, error } = await fetchAllRows(
+      'physical_counts',
+      '*, physical_count_lines(id, posted, counted_qty, product:products(current_cost))',
+      'updated_at',
+      { ascending: false }
+    )
     if (!error) setPhysicalCounts(data ?? [])
   }
 
@@ -681,11 +686,13 @@ export default function Adjustments() {
   const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Expiration', 'Variance', 'Value Impact', 'Status']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Inventory Cost', 'Expiration', 'Variance', 'Value Impact', 'Status']
     const rows = sortedCountRows.map((row) => {
       const systemQty = inventoryCacheMap[row.product_id] ?? 0
       const variance = row.counted_qty - systemQty
-      const valueImpact = variance * Number(row.product?.current_cost ?? 0)
+      const unitCost = Number(row.product?.current_cost ?? 0)
+      const inventoryCost = Number(row.counted_qty ?? 0) * unitCost
+      const valueImpact = variance * unitCost
       return [
         new Date(row.created_at).toLocaleString(),
         row.product?.barcode ?? '',
@@ -693,13 +700,16 @@ export default function Adjustments() {
         row.product?.category ?? '',
         systemQty,
         row.counted_qty,
+        inventoryCost.toFixed(2),
         row.expiration_date ?? '',
         variance,
         valueImpact.toFixed(2),
         row.posted ? 'posted' : variance === 0 ? 'matches' : 'pending',
       ]
     })
-    const csv = [headers, ...rows]
+    const totalInventoryCost = sortedCountRows.reduce((sum, l) => sum + Number(l.counted_qty ?? 0) * Number(l.product?.current_cost ?? 0), 0)
+    const totalRow = ['', '', '', '', '', '', totalInventoryCost.toFixed(2), '', '', '', 'TOTAL']
+    const csv = [headers, ...rows, totalRow]
       .map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
       .join('\n')
     downloadFile(`${selectedCount.count_number}-variance.csv`, csv, 'text/csv;charset=utf-8;')
@@ -831,6 +841,7 @@ export default function Adjustments() {
                   <th className="px-4 py-3">Count date</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Items</th>
+                  <th className="px-4 py-3">Total Inventory Cost</th>
                   <th className="px-4 py-3">Posted</th>
                   <th className="px-4 py-3">Last updated</th>
                   <th className="px-4 py-3" />
@@ -838,7 +849,7 @@ export default function Adjustments() {
               </thead>
               <tbody>
                 {physicalCounts.length === 0 && (
-                  <tr><td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No physical counts yet — start one when you're ready.</td></tr>
+                  <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">No physical counts yet — start one when you're ready.</td></tr>
                 )}
                 {physicalCounts.map((c) => (
                   <tr
@@ -851,6 +862,11 @@ export default function Adjustments() {
                     <td className="px-4 py-3">{c.count_date}</td>
                     <td className="px-4 py-3"><StatusChip tone={c.status === 'completed' ? 'ok' : 'attention'}>{c.status}</StatusChip></td>
                     <td className="px-4 py-3">{(c.physical_count_lines ?? []).length}</td>
+                    <td className="px-4 py-3">
+                      {(c.physical_count_lines ?? [])
+                        .reduce((sum, l) => sum + Number(l.counted_qty ?? 0) * Number(l.product?.current_cost ?? 0), 0)
+                        .toFixed(2)}
+                    </td>
                     <td className="px-4 py-3">{(c.physical_count_lines ?? []).filter((l) => l.posted).length}</td>
                     <td className="px-4 py-3 text-[var(--color-ink-soft)]">{new Date(c.updated_at).toLocaleString()}</td>
                     <td className="px-4 py-3">
@@ -992,6 +1008,20 @@ export default function Adjustments() {
 
           {countLines.length > 0 && (
             <>
+              <div className="mb-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-4 py-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
+                  Total Inventory Cost — this count
+                </div>
+                <div className="mt-0.5 text-lg font-semibold">
+                  {countLines
+                    .reduce((sum, l) => sum + Number(l.counted_qty ?? 0) * Number(l.product?.current_cost ?? 0), 0)
+                    .toFixed(2)}
+                </div>
+                <p className="mt-0.5 text-xs text-[var(--color-ink-soft)]">
+                  Counted quantity × each product's current cost, summed across every line in this count — draft or completed.
+                </p>
+              </div>
+
               <SearchBar value={countSearch} onChange={setCountSearch} placeholder="Search this count by product name, SKU, or barcode" />
 
               <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
