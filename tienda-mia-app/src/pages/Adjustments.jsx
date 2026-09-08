@@ -662,6 +662,7 @@ export default function Adjustments() {
     if (key === 'category') return row.product?.category
     if (key === 'systemQty') return systemQty
     if (key === 'countedQty') return row.counted_qty
+    if (key === 'unitCost') return Number(row.product?.current_cost ?? 0)
     if (key === 'inventoryCost') return Number(row.counted_qty ?? 0) * Number(row.product?.current_cost ?? 0)
     if (key === 'expiration') return row.expiration_date ?? ''
     if (key === 'variance') return Math.abs(row.counted_qty - systemQty)
@@ -687,7 +688,7 @@ export default function Adjustments() {
   const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Inventory Cost', 'Expiration', 'Variance', 'Value Impact', 'Status']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance', 'Value Impact', 'Status']
     const rows = sortedCountRows.map((row) => {
       const systemQty = inventoryCacheMap[row.product_id] ?? 0
       const variance = row.counted_qty - systemQty
@@ -701,6 +702,7 @@ export default function Adjustments() {
         row.product?.category ?? '',
         systemQty,
         row.counted_qty,
+        unitCost.toFixed(2),
         inventoryCost.toFixed(2),
         row.expiration_date ?? '',
         variance,
@@ -709,7 +711,7 @@ export default function Adjustments() {
       ]
     })
     const totalInventoryCost = sortedCountRows.reduce((sum, l) => sum + Number(l.counted_qty ?? 0) * Number(l.product?.current_cost ?? 0), 0)
-    const totalRow = ['', '', '', '', '', '', totalInventoryCost.toFixed(2), '', '', '', 'TOTAL']
+    const totalRow = ['', '', '', '', '', '', '', totalInventoryCost.toFixed(2), '', '', '', 'TOTAL']
     const csv = [headers, ...rows, totalRow]
       .map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
       .join('\n')
@@ -1067,6 +1069,7 @@ export default function Adjustments() {
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label={`System Qty (as of ${selectedCount.count_date})`} sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Cost" sortKey="unitCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Inventory Cost" sortKey="inventoryCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Expiration" sortKey="expiration" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Variance" sortKey="variance" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
@@ -1076,7 +1079,7 @@ export default function Adjustments() {
                   </thead>
                   <tbody>
                     {sortedCountRows.length === 0 && (
-                      <tr><td colSpan={10} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                      <tr><td colSpan={11} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                         {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing matches this search.'}
                       </td></tr>
                     )}
@@ -1091,6 +1094,7 @@ export default function Adjustments() {
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product?.category || '—'}</td>
                           <td className="px-4 py-3">{systemQty} {row.product?.unit}</td>
                           <td className="px-4 py-3">{row.counted_qty} {row.product?.unit}</td>
+                          <td className="px-4 py-3 text-[var(--color-ink-soft)]">{Number(row.product?.current_cost ?? 0).toFixed(2)}</td>
                           <td className="px-4 py-3">{(Number(row.counted_qty ?? 0) * Number(row.product?.current_cost ?? 0)).toFixed(2)}</td>
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.expiration_date || '—'}</td>
                           <td className="px-4 py-3">
