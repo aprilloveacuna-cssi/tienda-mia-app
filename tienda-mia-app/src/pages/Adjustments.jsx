@@ -426,27 +426,44 @@ export default function Adjustments() {
     if (!selectedCount || !countForm.product_id || countForm.counted_qty === '') return
     const p = products.find((x) => x.id === countForm.product_id)
     const newDate = countForm.expiration_date || null
-    // A product can appear more than once here as long as each line has its
-    // own expiration date — that's how "20 expire July, 10 expire August"
-    // gets represented. Only a genuine duplicate (same product, same date,
-    // or both with no date at all) gets blocked.
-    if (countLines.some((r) => r.product_id === p.id && (r.expiration_date ?? null) === newDate)) {
+    const addedQty = Number(countForm.counted_qty)
+
+    // A product can appear more than once with different expiration dates —
+    // those are genuinely different physical batches and stay separate
+    // lines. But the same product with the same date (or no date at all,
+    // when expiry isn't being tracked for this count) just means counting
+    // it again — a different aisle, a missed shelf, a second pass — so it
+    // combines into the existing line's total instead of being blocked or
+    // creating a confusing duplicate row.
+    const existing = countLines.find((r) => r.product_id === p.id && (r.expiration_date ?? null) === newDate)
+
+    if (existing?.posted) {
       setCountError(
-        newDate
-          ? `${p.name} already has a line for ${newDate} — edit that one instead, or use a different date.`
-          : `${p.name} is already in this list without a date — add an expiration date to enter it as a separate batch.`
+        `${p.name}'s count for this date was already posted as an adjustment — its quantity can't be combined into silently. Use Adjustments directly if the count needs correcting now.`
       )
       return
     }
-    const { error } = await supabase.from('physical_count_lines').insert({
-      physical_count_id: selectedCount.id,
-      product_id: p.id,
-      counted_qty: Number(countForm.counted_qty),
-      expiration_date: countForm.expiration_date || null,
-    })
-    if (error) {
-      setCountError(error.message)
-      return
+
+    if (existing) {
+      const { error } = await supabase
+        .from('physical_count_lines')
+        .update({ counted_qty: Number(existing.counted_qty) + addedQty })
+        .eq('id', existing.id)
+      if (error) {
+        setCountError(error.message)
+        return
+      }
+    } else {
+      const { error } = await supabase.from('physical_count_lines').insert({
+        physical_count_id: selectedCount.id,
+        product_id: p.id,
+        counted_qty: addedQty,
+        expiration_date: newDate,
+      })
+      if (error) {
+        setCountError(error.message)
+        return
+      }
     }
     setCountForm({ product_id: '', counted_qty: '', expiration_date: '' })
     setCountError('')
@@ -497,8 +514,19 @@ export default function Adjustments() {
         }
         const canonicalKeys = headerRow.map((h) => aliases[normalizeHeader(h)] ?? null)
 
-        const existingKeys = new Set(countLines.map((r) => `${r.product_id}|${r.expiration_date ?? ''}`))
-        const newLines = []
+        // Tracks the running counted_qty for each product+expiration-date
+        // combo as rows are processed — a key existing in countLines starts
+        // from that line's real DB id and current total; a key seen for the
+        // first time in this file starts fresh as a new line. Either way,
+        // a second row with the same key adds to the same running total
+        // instead of being skipped as a duplicate — see addCountRow for why
+        // (counting the same product twice, in a different aisle or a
+        // second pass, should combine, not conflict).
+        const runningByKey = {}
+        for (const r of countLines) {
+          const key = `${r.product_id}|${r.expiration_date ?? ''}`
+          runningByKey[key] = { id: r.id, counted_qty: Number(r.counted_qty), posted: r.posted, isNew: false }
+        }
         const skipped = []
 
         rows.slice(1).forEach((r, idx) => {
@@ -522,32 +550,61 @@ export default function Adjustments() {
             skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
             return
           }
-          const rowKey = `${product.id}|${obj.expiration_date || ''}`
-          if (existingKeys.has(rowKey)) {
-            skipped.push({
-              rowNum,
-              reason: obj.expiration_date
-                ? `${product.name} already has a line for ${obj.expiration_date}`
-                : `${product.name} is already in this list without a date — give each row its own expiration date to enter multiple`,
-            })
-            return
-          }
           if (obj.counted_qty === '' || isNaN(Number(obj.counted_qty))) {
             skipped.push({ rowNum, reason: 'Missing or invalid counted quantity' })
             return
           }
+          const rowKey = `${product.id}|${obj.expiration_date || ''}`
+          const existing = runningByKey[rowKey]
 
-          existingKeys.add(rowKey)
-          newLines.push({
+          if (existing?.posted) {
+            skipped.push({
+              rowNum,
+              reason: `${product.name}'s count for this date was already posted as an adjustment — can't combine into it here.`,
+            })
+            return
+          }
+
+          if (existing) {
+            existing.counted_qty += Number(obj.counted_qty)
+          } else {
+            runningByKey[rowKey] = {
+              id: null,
+              counted_qty: Number(obj.counted_qty),
+              posted: false,
+              isNew: true,
+              product_id: product.id,
+              expiration_date: obj.expiration_date || null,
+            }
+          }
+        })
+
+        const newLines = Object.values(runningByKey)
+          .filter((l) => l.isNew)
+          .map((l) => ({
             physical_count_id: selectedCount.id,
-            product_id: product.id,
-            counted_qty: Number(obj.counted_qty),
-            expiration_date: obj.expiration_date || null,
-          })
+            product_id: l.product_id,
+            counted_qty: l.counted_qty,
+            expiration_date: l.expiration_date,
+          }))
+        const updatedLines = countLines.filter((r) => {
+          const key = `${r.product_id}|${r.expiration_date ?? ''}`
+          return !r.posted && runningByKey[key].counted_qty !== Number(r.counted_qty)
         })
 
         if (newLines.length > 0) {
           const { error } = await supabase.from('physical_count_lines').insert(newLines)
+          if (error) {
+            setCountError(error.message)
+            return
+          }
+        }
+        for (const r of updatedLines) {
+          const key = `${r.product_id}|${r.expiration_date ?? ''}`
+          const { error } = await supabase
+            .from('physical_count_lines')
+            .update({ counted_qty: runningByKey[key].counted_qty })
+            .eq('id', r.id)
           if (error) {
             setCountError(error.message)
             return

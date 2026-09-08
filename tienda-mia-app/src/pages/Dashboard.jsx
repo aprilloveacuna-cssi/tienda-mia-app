@@ -116,7 +116,7 @@ export default function Dashboard() {
         supabase.from('products').select('*', { count: 'exact', head: true }),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'active'),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'archived'),
-        fetchAllRows('inventory_cache', '*, product:products(name, sku, reorder_point)', null, { tiebreaker: 'product_id' }),
+        fetchAllRows('inventory_cache', '*, product:products(name, sku, reorder_point, business_unit, category, unlimited_stock)', null, { tiebreaker: 'product_id' }),
       ])
 
       const firstError = totalRes.error || activeRes.error || archivedRes.error || invRes.error
@@ -132,7 +132,11 @@ export default function Dashboard() {
       setInventoryValue(invRows.reduce((sum, r) => sum + Number(r.inventory_value ?? 0), 0))
 
       const lowStock = invRows
-        .filter((r) => r.current_stock <= 0 || (r.product.reorder_point && r.current_stock <= r.product.reorder_point))
+        .filter((r) => {
+          const isKitchen = r.product.business_unit === 'KITCHEN' || r.product.category === 'KITCHEN'
+          if (isKitchen || r.product.unlimited_stock) return false
+          return r.current_stock <= 0 || (r.product.reorder_point && r.current_stock <= r.product.reorder_point)
+        })
         .sort((a, b) => a.current_stock - b.current_stock)
       setAlerts(lowStock)
 
