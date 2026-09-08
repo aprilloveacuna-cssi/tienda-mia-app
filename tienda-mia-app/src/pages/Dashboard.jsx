@@ -37,12 +37,24 @@ export default function Dashboard() {
     const cutoff = new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10)
     const { data, error } = await supabase
       .from('batch_cache')
-      .select('*, batch:batches(batch_number, received_date), product:products(name, unit)')
+      .select('*, batch:batches(batch_number, received_date), product:products(name, unit, inventory_cache(current_stock))')
       .gt('remaining_quantity', 0)
       .not('expiration_date', 'is', null)
       .lte('expiration_date', cutoff)
       .order('expiration_date', { ascending: true })
-    if (!error) setExpiryAlerts(data ?? [])
+    if (!error) {
+      // A product-level adjustment (not tied to one batch) corrects the
+      // product's overall total but never reaches into individual batch
+      // records — so an old, expired batch can keep claiming stock it no
+      // longer has even after the product's real total is back to zero.
+      // Cross-checking the product's actual current_stock filters those
+      // stale, already-corrected batches back out.
+      const realStock = (data ?? []).filter((row) => {
+        const cache = Array.isArray(row.product?.inventory_cache) ? row.product.inventory_cache[0] : row.product?.inventory_cache
+        return Number(cache?.current_stock ?? 0) > 0
+      })
+      setExpiryAlerts(realStock)
+    }
   }
 
   async function loadMealUnaccounted() {
