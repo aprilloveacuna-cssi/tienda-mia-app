@@ -87,6 +87,7 @@ export default function Sales() {
   const [quickReceiveError, setQuickReceiveError] = useState('')
   const [saving, setSaving] = useState(false)
   const [discountPct, setDiscountPct] = useState(20)
+  const [vatRatePct, setVatRatePct] = useState(12)
 
   // Manual add-line price mismatch resolution
   const [priceMismatch, setPriceMismatch] = useState(null) // { recordedPrice, givenPrice }
@@ -125,6 +126,11 @@ export default function Sales() {
     if (data) setDiscountPct(Number(data.value))
   }
 
+  async function loadVatRateSetting() {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'VAT_RATE_PCT').maybeSingle()
+    if (data) setVatRatePct(Number(data.value))
+  }
+
   async function loadExtraBarcodes() {
     const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
     if (error) {
@@ -147,6 +153,7 @@ export default function Sales() {
     loadSales()
     loadProducts()
     loadDiscountSetting()
+    loadVatRateSetting()
     loadExtraBarcodes()
   }, [])
 
@@ -311,9 +318,10 @@ export default function Sales() {
     // Standard BIR Senior/PWD computation: VAT is backed out of the
     // (VAT-inclusive) selling price first, then the discount applies to
     // that VAT-exclusive amount — not a flat percentage off the sticker
-    // price. VAT_RATE is the national rate, not a business setting.
-    const VAT_RATE = 0.12
-    const vatExclusivePrice = Number(product.selling_price) / (1 + VAT_RATE)
+    // price. VAT_RATE_PCT comes from Settings — a national rate, not a
+    // business preference, but editable there (with a clear warning) in
+    // case the actual government rate ever changes.
+    const vatExclusivePrice = Number(product.selling_price) / (1 + vatRatePct / 100)
     const discountedUnitPrice = Math.round(vatExclusivePrice * (1 - discountPct / 100) * 100) / 100
     await ensureKitchenStock(product, totalQty, headerForm.sale_date)
     const stockGroupIds = resolveStockGroupIds(product)

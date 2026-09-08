@@ -57,9 +57,20 @@ const FIELD_META = {
     suffix: 'days before expiration — controls Dashboard Expiry Alerts and the amber warning color in Inventory',
     group: 'Alerts',
   },
+  VAT_RATE_PCT: {
+    label: 'VAT rate',
+    type: 'number',
+    suffix: '% — this is a national tax rate, not a business setting. Changing it affects every VAT and discount figure across Sales, Reports, and Kitchen at once.',
+    group: 'Tax & VAT',
+    warnOnChange: true,
+    formulas: [
+      'Regular sale — VAT portion of the price charged:\nVAT = price × (rate ÷ (100 + rate))',
+      'Senior/PWD discounted sale — VAT-exclusive price, then the discount applies to that:\nVAT-exclusive price = price ÷ (1 + rate ÷ 100)\nFinal price = VAT-exclusive price × (1 − discount%)',
+    ],
+  },
 }
 
-const GROUP_ORDER = ['Purchasing & Forecasting', 'Sales & Discounts', 'Alerts']
+const GROUP_ORDER = ['Purchasing & Forecasting', 'Sales & Discounts', 'Alerts', 'Tax & VAT']
 
 function prettifyKey(key) {
   return key
@@ -107,9 +118,19 @@ export default function Settings() {
   }
 
   async function handleSave() {
+    const changed = settings.filter((s) => values[s.key] !== s.value)
+
+    const riskyChange = changed.find((s) => FIELD_META[s.key]?.warnOnChange)
+    if (riskyChange) {
+      const meta = FIELD_META[riskyChange.key]
+      const confirmed = confirm(
+        `You're changing ${meta.label} from ${riskyChange.value}${meta.suffix?.startsWith('%') ? '%' : ''} to ${values[riskyChange.key]}${meta.suffix?.startsWith('%') ? '%' : ''}.\n\nThis is a national tax rate, not a business preference — changing it immediately changes every VAT and discount figure calculated anywhere in the app from now on, including past reports you re-open. Only proceed if the actual government rate has changed.\n\nContinue?`
+      )
+      if (!confirmed) return
+    }
+
     setSaving(true)
     setErrorMsg('')
-    const changed = settings.filter((s) => values[s.key] !== s.value)
 
     for (const s of changed) {
       const { error } = await supabase
@@ -176,16 +197,23 @@ export default function Settings() {
                               ))}
                             </select>
                           ) : (
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-start gap-2">
                               <input
                                 type={meta.type}
                                 value={values[s.key] ?? ''}
                                 onChange={(e) => handleChange(s.key, e.target.value)}
-                                className="input"
+                                className="input w-24 shrink-0"
                               />
                               {meta.suffix && (
-                                <span className="whitespace-nowrap text-xs text-[var(--color-ink-soft)]">{meta.suffix}</span>
+                                <span className="pt-2 text-xs text-[var(--color-ink-soft)]">{meta.suffix}</span>
                               )}
+                            </div>
+                          )}
+                          {meta.formulas && (
+                            <div className="mt-3 space-y-2 rounded-md bg-[var(--color-paper)] p-3">
+                              {meta.formulas.map((f, i) => (
+                                <pre key={i} className="whitespace-pre-wrap font-mono text-xs text-[var(--color-ink-soft)]">{f}</pre>
+                              ))}
                             </div>
                           )}
                         </label>

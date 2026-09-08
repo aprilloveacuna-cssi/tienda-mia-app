@@ -330,7 +330,8 @@ export default function Kitchen() {
       (l) => l.sale?.status !== 'voided' && (l.product?.business_unit === 'KITCHEN' || l.product?.category === 'KITCHEN')
     )
 
-    const VAT_RATE = 0.12
+    const { data: vatSetting } = await supabase.from('settings').select('value').eq('key', 'VAT_RATE_PCT').maybeSingle()
+    const vatRatePct = Number(vatSetting?.value ?? 12)
     const statsByExpense = {}
     for (const exp of expenses) {
       let revenue = 0
@@ -352,7 +353,7 @@ export default function Kitchen() {
           // (Senior/PWD) lines are VAT-exempt by law and already charged
           // at the VAT-exclusive price, so there's no VAT to back out of
           // those — only regular lines carry embedded VAT.
-          vat += l.is_discounted ? 0 : lineTotal * (VAT_RATE / (1 + VAT_RATE))
+          vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
           discounts += Number(l.discount_amount ?? 0)
         }
       }

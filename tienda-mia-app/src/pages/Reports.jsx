@@ -964,6 +964,8 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
         if (error) throw error
         const { data: marketExpenses, error: expError } = await fetchAllRows('kitchen_market_expenses', 'week_start, week_end, amount')
         if (expError) throw expError
+        const { data: vatSetting } = await supabase.from('settings').select('value').eq('key', 'VAT_RATE_PCT').maybeSingle()
+        const vatRatePct = Number(vatSetting?.value ?? 12)
 
         // Same reasoning as the Velocity & ABC report: Kitchen items don't
         // have a meaningful per-unit FIFO cost, since they're never
@@ -985,7 +987,6 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           kitchenTotalRevenueByPeriod[periodIdx] += Number(l.quantity) * Number(l.unit_price)
         }
 
-        const VAT_RATE = 0.12
         const byGroup = {}
         for (const l of data ?? []) {
           if (l.sale?.status === 'voided') continue
@@ -1004,7 +1005,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           // charged at the VAT-exclusive price, so there's no VAT to back out
           // of those. Regular lines charge the VAT-inclusive price, so VAT is
           // the portion above the VAT-exclusive amount.
-          byGroup[key].vat += l.is_discounted ? 0 : lineTotal * (VAT_RATE / (1 + VAT_RATE))
+          byGroup[key].vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
           byGroup[key].discounts += Number(l.discount_amount ?? 0)
 
           if (isKitchen) {
