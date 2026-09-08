@@ -21,6 +21,7 @@ export default function Dashboard() {
   const [inventoryValue, setInventoryValue] = useState(null)
   const [alerts, setAlerts] = useState([])
   const [expiryAlerts, setExpiryAlerts] = useState([])
+  const [expiryAlertDays, setExpiryAlertDays] = useState(15)
   const [hasAnyStock, setHasAnyStock] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [disposeBatch, setDisposeBatch] = useState(null)
@@ -34,7 +35,10 @@ export default function Dashboard() {
   const [mealLogSaving, setMealLogSaving] = useState(false)
 
   async function loadExpiryAlerts() {
-    const cutoff = new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10)
+    const { data: setting } = await supabase.from('settings').select('value').eq('key', 'EXPIRY_ALERT_DAYS').maybeSingle()
+    const alertDays = Number(setting?.value ?? 15)
+    setExpiryAlertDays(alertDays)
+    const cutoff = new Date(Date.now() + alertDays * 86400000).toISOString().slice(0, 10)
     const { data, error } = await supabase
       .from('batch_cache')
       .select('*, batch:batches(batch_number, received_date), product:products(name, unit, inventory_cache(current_stock))')
@@ -247,7 +251,7 @@ export default function Dashboard() {
             </button>
           )}
           {expiryAlerts.length === 0 ? (
-            <EmptyRow text="Nothing expired or expiring within 15 days — good shape." />
+            <EmptyRow text={`Nothing expired or expiring within ${expiryAlertDays} days — good shape.`} />
           ) : (
             <div className="space-y-2">
               {expiryAlerts.map((row) => (

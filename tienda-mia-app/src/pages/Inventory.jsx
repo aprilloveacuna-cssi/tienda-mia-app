@@ -25,11 +25,11 @@ function stockLabel(stock, reorderPoint) {
   return 'ok'
 }
 
-function expiryTone(expirationDate) {
+function expiryTone(expirationDate, alertDays = 15) {
   if (!expirationDate) return 'neutral'
   const days = (new Date(expirationDate) - new Date()) / (1000 * 60 * 60 * 24)
   if (days < 0) return 'critical'
-  if (days <= 15) return 'attention'
+  if (days <= alertDays) return 'attention'
   return 'ok'
 }
 
@@ -43,6 +43,7 @@ function expiryLabel(expirationDate) {
 
 export default function Inventory() {
   const [rows, setRows] = useState([])
+  const [expiryAlertDays, setExpiryAlertDays] = useState(15)
   const [batchesByProduct, setBatchesByProduct] = useState({})
   const [expanded, setExpanded] = useState(new Set())
   const [loading, setLoading] = useState(true)
@@ -148,9 +149,15 @@ export default function Inventory() {
     setExtraBarcodesByProduct(map)
   }
 
+  async function loadExpiryAlertDays() {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'EXPIRY_ALERT_DAYS').maybeSingle()
+    if (data?.value) setExpiryAlertDays(Number(data.value))
+  }
+
   useEffect(() => {
     load()
     loadExtraBarcodes()
+    loadExpiryAlertDays()
   }, [])
 
   async function fetchBatches(productId) {
@@ -488,7 +495,7 @@ export default function Inventory() {
                                 ) : (
                                   <>
                                     <div className="mt-1 flex items-center gap-1.5">
-                                      <StatusChip tone={expiryTone(b.expiration_date)}>
+                                      <StatusChip tone={expiryTone(b.expiration_date, expiryAlertDays)}>
                                         {expiryLabel(b.expiration_date)}
                                       </StatusChip>
                                       {b.expiration_date && (

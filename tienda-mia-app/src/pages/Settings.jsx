@@ -7,43 +7,59 @@ const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
 // Known settings get a friendlier label, description, and the right input type.
 // Anything else in the table still renders, just with a generic text field —
 // so adding a new setting later doesn't require touching this screen.
+// `group` controls which section it's shown under below.
 const FIELD_META = {
   PURCHASING_DAY: {
     label: 'Purchasing day',
     type: 'select',
     options: DAYS,
+    group: 'Purchasing & Forecasting',
   },
   DEFAULT_SAFETY_STOCK_PCT: {
     label: 'Default safety stock',
     type: 'number',
     suffix: '% of average weekly demand',
+    group: 'Purchasing & Forecasting',
   },
   FORECAST_WINDOW_WEEKS: {
     label: 'Forecast window',
     type: 'number',
     suffix: 'weeks of history',
+    group: 'Purchasing & Forecasting',
   },
   DEFAULT_LEAD_TIME_DAYS: {
     label: 'Default lead time',
     type: 'number',
     suffix: 'days',
-  },
-  SENIOR_PWD_DISCOUNT_PCT: {
-    label: 'Senior / PWD discount',
-    type: 'number',
-    suffix: '% off the VAT-exclusive price — applied identically to both, since they compute the same',
+    group: 'Purchasing & Forecasting',
   },
   EOQ_ORDERING_COST: {
     label: 'EOQ ordering cost',
     type: 'number',
     suffix: '₱ per purchase order — used to compute Economic Order Quantity in Analytics',
+    group: 'Purchasing & Forecasting',
   },
   EOQ_HOLDING_COST_PCT: {
     label: 'EOQ holding cost',
     type: 'number',
     suffix: '% of unit cost per year — the cost of tying up capital and shelf space in stock',
+    group: 'Purchasing & Forecasting',
+  },
+  SENIOR_PWD_DISCOUNT_PCT: {
+    label: 'Senior / PWD discount',
+    type: 'number',
+    suffix: '% off the VAT-exclusive price — applied identically to both, since they compute the same',
+    group: 'Sales & Discounts',
+  },
+  EXPIRY_ALERT_DAYS: {
+    label: 'Expiry alert window',
+    type: 'number',
+    suffix: 'days before expiration — controls Dashboard Expiry Alerts and the amber warning color in Inventory',
+    group: 'Alerts',
   },
 }
+
+const GROUP_ORDER = ['Purchasing & Forecasting', 'Sales & Discounts', 'Alerts']
 
 function prettifyKey(key) {
   return key
@@ -132,40 +148,51 @@ export default function Settings() {
           Loading settings…
         </div>
       ) : (
-        <div className="max-w-md space-y-4">
-          {settings.map((s) => {
-            const meta = FIELD_META[s.key] ?? { label: prettifyKey(s.key), type: 'text' }
+        <div className="max-w-md space-y-6">
+          {[...GROUP_ORDER, 'Other'].map((groupName) => {
+            const groupSettings = settings.filter((s) => (FIELD_META[s.key]?.group ?? 'Other') === groupName)
+            if (groupSettings.length === 0) return null
             return (
-              <div key={s.key} className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
-                <label className="block">
-                  <span className="mb-1 block text-sm font-medium">{meta.label}</span>
-                  {s.description && (
-                    <span className="mb-2 block text-xs text-[var(--color-ink-soft)]">{s.description}</span>
-                  )}
-                  {meta.type === 'select' ? (
-                    <select
-                      value={values[s.key] ?? ''}
-                      onChange={(e) => handleChange(s.key, e.target.value)}
-                      className="input"
-                    >
-                      {meta.options.map((o) => (
-                        <option key={o} value={o}>{o}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type={meta.type}
-                        value={values[s.key] ?? ''}
-                        onChange={(e) => handleChange(s.key, e.target.value)}
-                        className="input"
-                      />
-                      {meta.suffix && (
-                        <span className="whitespace-nowrap text-xs text-[var(--color-ink-soft)]">{meta.suffix}</span>
-                      )}
-                    </div>
-                  )}
-                </label>
+              <div key={groupName}>
+                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-ink-soft)]">{groupName}</h2>
+                <div className="space-y-4">
+                  {groupSettings.map((s) => {
+                    const meta = FIELD_META[s.key] ?? { label: prettifyKey(s.key), type: 'text' }
+                    return (
+                      <div key={s.key} className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
+                        <label className="block">
+                          <span className="mb-1 block text-sm font-medium">{meta.label}</span>
+                          {s.description && (
+                            <span className="mb-2 block text-xs text-[var(--color-ink-soft)]">{s.description}</span>
+                          )}
+                          {meta.type === 'select' ? (
+                            <select
+                              value={values[s.key] ?? ''}
+                              onChange={(e) => handleChange(s.key, e.target.value)}
+                              className="input"
+                            >
+                              {meta.options.map((o) => (
+                                <option key={o} value={o}>{o}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <input
+                                type={meta.type}
+                                value={values[s.key] ?? ''}
+                                onChange={(e) => handleChange(s.key, e.target.value)}
+                                className="input"
+                              />
+                              {meta.suffix && (
+                                <span className="whitespace-nowrap text-xs text-[var(--color-ink-soft)]">{meta.suffix}</span>
+                              )}
+                            </div>
+                          )}
+                        </label>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             )
           })}
