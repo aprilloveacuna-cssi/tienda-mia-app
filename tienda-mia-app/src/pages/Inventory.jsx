@@ -64,6 +64,7 @@ export default function Inventory() {
     if (key === 'stock') return Number(row.current_stock ?? 0)
     if (key === 'value') return Number(row.inventory_value ?? 0)
     if (key === 'status') return stockLabel(row.current_stock, row.product?.reorder_point)
+    if (key === 'lastMovement') return row.last_movement_at ? new Date(row.last_movement_at).getTime() : 0
     return row[key]
   }
   const sortedRows = sortRows(rows, sortKey, sortDir, sortAccessor)
@@ -92,7 +93,7 @@ export default function Inventory() {
   )
 
   function exportInventoryCsv() {
-    const headers = ['SKU', 'Barcode', 'Product', 'Category', 'Stock', 'Unit', 'Value', 'Status']
+    const headers = ['SKU', 'Barcode', 'Product', 'Category', 'Stock', 'Unit', 'Value', 'Status', 'Last Movement']
     const rows = filteredRows.map((r) => [
       r.product?.sku ?? '',
       r.product?.barcode ?? '',
@@ -102,6 +103,7 @@ export default function Inventory() {
       r.product?.unit ?? '',
       Number(r.inventory_value ?? 0).toFixed(2),
       stockLabel(r.current_stock, r.product?.reorder_point),
+      r.last_movement_at ? new Date(r.last_movement_at).toISOString().slice(0, 10) : '',
     ])
     const csv = [headers, ...rows]
       .map((row) => row.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
@@ -392,12 +394,13 @@ export default function Inventory() {
               <SortableTh label="Stock" sortKey="stock" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Value" sortKey="value" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Last Movement" sortKey="lastMovement" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
             </tr>
           </thead>
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={8} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
                   Loading inventory…
                 </td>
               </tr>
@@ -405,7 +408,7 @@ export default function Inventory() {
 
             {!loading && filteredRows.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={8} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No stock movements yet — post a purchase to see inventory appear here.
                 </td>
               </tr>
@@ -434,11 +437,14 @@ export default function Inventory() {
                       {stockLabel(r.current_stock, r.product.reorder_point)}
                     </StatusChip>
                   </td>
+                  <td className="px-4 py-3 text-[var(--color-ink-soft)]">
+                    {r.last_movement_at ? new Date(r.last_movement_at).toLocaleDateString() : '—'}
+                  </td>
                 </tr>
                 {expanded.has(r.product_id) && (
                   <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)] last:border-0">
                     <td />
-                    <td colSpan={6} className="px-4 py-3">
+                    <td colSpan={7} className="px-4 py-3">
                       <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
                         Batches (oldest first — FIFO order)
                       </div>
