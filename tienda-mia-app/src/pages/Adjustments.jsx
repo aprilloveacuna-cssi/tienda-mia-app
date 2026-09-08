@@ -662,6 +662,7 @@ export default function Adjustments() {
     if (key === 'category') return row.product?.category
     if (key === 'systemQty') return systemQty
     if (key === 'countedQty') return row.counted_qty
+    if (key === 'inventoryCost') return Number(row.counted_qty ?? 0) * Number(row.product?.current_cost ?? 0)
     if (key === 'expiration') return row.expiration_date ?? ''
     if (key === 'variance') return Math.abs(row.counted_qty - systemQty)
     if (key === 'valueImpact') return (row.counted_qty - systemQty) * Number(row.product?.current_cost ?? 0)
@@ -1066,6 +1067,7 @@ export default function Adjustments() {
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label={`System Qty (as of ${selectedCount.count_date})`} sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="Inventory Cost" sortKey="inventoryCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Expiration" sortKey="expiration" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Variance" sortKey="variance" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Value Impact" sortKey="valueImpact" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
@@ -1074,7 +1076,7 @@ export default function Adjustments() {
                   </thead>
                   <tbody>
                     {sortedCountRows.length === 0 && (
-                      <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                      <tr><td colSpan={10} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                         {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing matches this search.'}
                       </td></tr>
                     )}
@@ -1089,6 +1091,7 @@ export default function Adjustments() {
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product?.category || '—'}</td>
                           <td className="px-4 py-3">{systemQty} {row.product?.unit}</td>
                           <td className="px-4 py-3">{row.counted_qty} {row.product?.unit}</td>
+                          <td className="px-4 py-3">{(Number(row.counted_qty ?? 0) * Number(row.product?.current_cost ?? 0)).toFixed(2)}</td>
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.expiration_date || '—'}</td>
                           <td className="px-4 py-3">
                             {variance === 0 ? (
