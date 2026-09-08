@@ -7,7 +7,10 @@ const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
 // Known settings get a friendlier label, description, and the right input type.
 // Anything else in the table still renders, just with a generic text field —
 // so adding a new setting later doesn't require touching this screen.
-// `group` controls which section it's shown under below.
+// `group` controls which section it's shown under below. `unit` is the short
+// label that sits right beside the input (e.g. "days", "%") — keep these
+// short, since they share a row with a fixed-width input. Anything longer
+// goes in `note` instead, which gets its own full-width line below.
 const FIELD_META = {
   PURCHASING_DAY: {
     label: 'Purchasing day',
@@ -18,49 +21,54 @@ const FIELD_META = {
   DEFAULT_SAFETY_STOCK_PCT: {
     label: 'Default safety stock',
     type: 'number',
-    suffix: '% of average weekly demand',
+    unit: '% of average weekly demand',
     group: 'Purchasing & Forecasting',
   },
   FORECAST_WINDOW_WEEKS: {
     label: 'Forecast window',
     type: 'number',
-    suffix: 'weeks of history',
+    unit: 'weeks of history',
     group: 'Purchasing & Forecasting',
   },
   DEFAULT_LEAD_TIME_DAYS: {
     label: 'Default lead time',
     type: 'number',
-    suffix: 'days',
+    unit: 'days',
     group: 'Purchasing & Forecasting',
   },
   EOQ_ORDERING_COST: {
     label: 'EOQ ordering cost',
     type: 'number',
-    suffix: '₱ per purchase order — used to compute Economic Order Quantity in Analytics',
+    unit: '₱ per PO',
+    note: 'Used to compute Economic Order Quantity in Analytics.',
     group: 'Purchasing & Forecasting',
   },
   EOQ_HOLDING_COST_PCT: {
     label: 'EOQ holding cost',
     type: 'number',
-    suffix: '% of unit cost per year — the cost of tying up capital and shelf space in stock',
+    unit: '% of unit cost / year',
+    note: 'The cost of tying up capital and shelf space in stock — used alongside EOQ ordering cost.',
     group: 'Purchasing & Forecasting',
   },
   SENIOR_PWD_DISCOUNT_PCT: {
     label: 'Senior / PWD discount',
     type: 'number',
-    suffix: '% off the VAT-exclusive price — applied identically to both, since they compute the same',
+    unit: '% off VAT-exclusive price',
+    note: 'Applied identically to both Senior and PWD, since the math is the same.',
     group: 'Sales & Discounts',
   },
   EXPIRY_ALERT_DAYS: {
     label: 'Expiry alert window',
     type: 'number',
-    suffix: 'days before expiration — controls Dashboard Expiry Alerts and the amber warning color in Inventory',
+    unit: 'days before expiration',
+    note: 'Controls Dashboard Expiry Alerts and the amber warning color in Inventory.',
     group: 'Alerts',
   },
   VAT_RATE_PCT: {
     label: 'VAT rate',
     type: 'number',
-    suffix: '% — this is a national tax rate, not a business setting. Changing it affects every VAT and discount figure across Sales, Reports, and Kitchen at once.',
+    unit: '%',
+    note: 'This is a national tax rate, not a business setting. Changing it affects every VAT and discount figure across Sales, Reports, and Kitchen at once.',
     group: 'Tax & VAT',
     warnOnChange: true,
     formulas: [
@@ -124,7 +132,7 @@ export default function Settings() {
     if (riskyChange) {
       const meta = FIELD_META[riskyChange.key]
       const confirmed = confirm(
-        `You're changing ${meta.label} from ${riskyChange.value}${meta.suffix?.startsWith('%') ? '%' : ''} to ${values[riskyChange.key]}${meta.suffix?.startsWith('%') ? '%' : ''}.\n\nThis is a national tax rate, not a business preference — changing it immediately changes every VAT and discount figure calculated anywhere in the app from now on, including past reports you re-open. Only proceed if the actual government rate has changed.\n\nContinue?`
+        `You're changing ${meta.label} from ${riskyChange.value}${meta.unit?.startsWith('%') ? '%' : ''} to ${values[riskyChange.key]}${meta.unit?.startsWith('%') ? '%' : ''}.\n\nThis is a national tax rate, not a business preference — changing it immediately changes every VAT and discount figure calculated anywhere in the app from now on, including past reports you re-open. Only proceed if the actual government rate has changed.\n\nContinue?`
       )
       if (!confirmed) return
     }
@@ -197,17 +205,21 @@ export default function Settings() {
                               ))}
                             </select>
                           ) : (
-                            <div className="flex items-start gap-2">
+                            <div className="flex items-center gap-2">
                               <input
                                 type={meta.type}
                                 value={values[s.key] ?? ''}
                                 onChange={(e) => handleChange(s.key, e.target.value)}
-                                className="input w-24 shrink-0"
+                                className="input shrink-0"
+                                style={{ width: '6rem' }}
                               />
-                              {meta.suffix && (
-                                <span className="pt-2 text-xs text-[var(--color-ink-soft)]">{meta.suffix}</span>
+                              {meta.unit && (
+                                <span className="flex-1 text-xs text-[var(--color-ink-soft)]">{meta.unit}</span>
                               )}
                             </div>
+                          )}
+                          {meta.note && (
+                            <p className="mt-2 text-xs text-[var(--color-ink-soft)]">{meta.note}</p>
                           )}
                           {meta.formulas && (
                             <div className="mt-3 space-y-2 rounded-md bg-[var(--color-paper)] p-3">
