@@ -1475,12 +1475,14 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       setLoading(true)
       setErrorMsg('')
       try {
-        const [productsRes, saleLinesRes] = await Promise.all([
+        const [productsRes, saleLinesRes, marketExpensesRes] = await Promise.all([
           fetchAllRows('products', 'id, name, unit, category, business_unit, product_type, status'),
           fetchAllRows('sale_lines', 'product_id, quantity, unit_price, fifo_cost, sale:sales(sale_date, status)'),
+          fetchAllRows('kitchen_market_expenses', 'week_start, week_end, amount'),
         ])
         if (productsRes.error) throw productsRes.error
         if (saleLinesRes.error) throw saleLinesRes.error
+        if (marketExpensesRes.error) throw marketExpensesRes.error
 
         // Ingredients aren't sold on their own — excluded outright, not just filtered.
         const products = (productsRes.data ?? []).filter((p) => p.product_type !== 'RAW MATERIAL')
@@ -1490,16 +1492,50 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           (l) => l.sale?.status !== 'voided' && withinRange(l.sale?.sale_date, dateFrom, dateTo) && productsById[l.product_id]
         )
 
+        function isKitchenProduct(p) {
+          return p?.business_unit === 'KITCHEN' || p?.category === 'KITCHEN'
+        }
+
+        // Same reasoning as Daily POS Summary and Velocity & ABC: Kitchen
+        // items don't have a meaningful per-unit FIFO cost, since they're
+        // never individually purchased. The real cost data that exists is
+        // the weekly lump-sum market expense, attributed per line in
+        // proportion to that line's share of total Kitchen revenue in the
+        // same expense period. Retail lines keep using their real FIFO cost.
+        const marketExpenses = marketExpensesRes.data ?? []
+        const kitchenTotalRevenueByPeriod = marketExpenses.map(() => 0)
+        for (const l of lines) {
+          if (!isKitchenProduct(productsById[l.product_id])) continue
+          const day = toDateOnly(l.sale?.sale_date)
+          if (!day) continue
+          const periodIdx = marketExpenses.findIndex((e) => day >= e.week_start && day <= e.week_end)
+          if (periodIdx === -1) continue
+          kitchenTotalRevenueByPeriod[periodIdx] += Number(l.quantity) * Number(l.unit_price)
+        }
+
         const byProduct = {}
         for (const l of lines) {
           const p = productsById[l.product_id]
           byProduct[p.id] = byProduct[p.id] ?? { product: p, qty: 0, revenue: 0, cost: 0 }
+          const lineRevenue = Number(l.quantity) * Number(l.unit_price)
           byProduct[p.id].qty += Number(l.quantity)
-          byProduct[p.id].revenue += Number(l.quantity) * Number(l.unit_price)
-          byProduct[p.id].cost += Number(l.fifo_cost)
+          byProduct[p.id].revenue += lineRevenue
+
+          if (isKitchenProduct(p)) {
+            const day = toDateOnly(l.sale?.sale_date)
+            const periodIdx = day ? marketExpenses.findIndex((e) => day >= e.week_start && day <= e.week_end) : -1
+            const totalRevenue = periodIdx >= 0 ? kitchenTotalRevenueByPeriod[periodIdx] : 0
+            byProduct[p.id].cost += periodIdx >= 0 && totalRevenue > 0 ? Number(marketExpenses[periodIdx].amount) * (lineRevenue / totalRevenue) : 0
+          } else {
+            byProduct[p.id].cost += Number(l.fifo_cost)
+          }
         }
 
-        const summaries = Object.values(byProduct).map((item) => ({ ...item, profit: item.revenue - item.cost }))
+        const summaries = Object.values(byProduct).map((item) => ({
+          ...item,
+          profit: item.revenue - item.cost,
+          isKitchen: isKitchenProduct(item.product),
+        }))
 
         if (!cancelled) setProductSummaries(summaries)
       } catch (err) {
@@ -1523,10 +1559,11 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const byCategory = {}
   for (const item of filteredSummaries) {
     const cat = item.product.category || '(none)'
-    byCategory[cat] = byCategory[cat] ?? { category: cat, items: [], totalQty: 0, totalRevenue: 0, totalProfit: 0 }
+    byCategory[cat] = byCategory[cat] ?? { category: cat, items: [], totalQty: 0, totalRevenue: 0, totalCost: 0, totalProfit: 0 }
     byCategory[cat].items.push(item)
     byCategory[cat].totalQty += item.qty
     byCategory[cat].totalRevenue += item.revenue
+    byCategory[cat].totalCost += item.cost
     byCategory[cat].totalProfit += item.profit
   }
   // Categories ordered by revenue (biggest first); items within each category
@@ -1537,17 +1574,26 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
 
   const grandTotalQty = categoryGroups.reduce((s, g) => s + g.totalQty, 0)
   const grandTotalRevenue = categoryGroups.reduce((s, g) => s + g.totalRevenue, 0)
+  const grandTotalCost = categoryGroups.reduce((s, g) => s + g.totalCost, 0)
   const grandTotalProfit = categoryGroups.reduce((s, g) => s + g.totalProfit, 0)
 
   function exportCsv() {
-    const rows = [['Category', 'Product', 'Type', 'Qty Sold', 'Revenue', 'Profit']]
+    const rows = [['Category', 'Product', 'Type', 'Qty Sold', 'Revenue', 'Cost', 'Profit']]
     for (const g of categoryGroups) {
-      rows.push([g.category, `TOTAL (${g.items.length} item${g.items.length === 1 ? '' : 's'})`, '', g.totalQty, g.totalRevenue.toFixed(2), g.totalProfit.toFixed(2)])
+      rows.push([g.category, `TOTAL (${g.items.length} item${g.items.length === 1 ? '' : 's'})`, '', g.totalQty, g.totalRevenue.toFixed(2), g.totalCost.toFixed(2), g.totalProfit.toFixed(2)])
       for (const item of g.items) {
-        rows.push(['', item.product.name, productTypeGroup(item.product), item.qty, item.revenue.toFixed(2), item.profit.toFixed(2)])
+        rows.push([
+          '',
+          item.product.name,
+          productTypeGroup(item.product),
+          item.qty,
+          item.revenue.toFixed(2),
+          item.cost.toFixed(2) + (item.isKitchen ? ' (est.)' : ''),
+          item.profit.toFixed(2),
+        ])
       }
     }
-    rows.push(['', 'GRAND TOTAL', '', grandTotalQty, grandTotalRevenue.toFixed(2), grandTotalProfit.toFixed(2)])
+    rows.push(['', 'GRAND TOTAL', '', grandTotalQty, grandTotalRevenue.toFixed(2), grandTotalCost.toFixed(2), grandTotalProfit.toFixed(2)])
     const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
     downloadFile(`best-sellers-by-category_${dateFrom}_to_${dateTo}.csv`, csv, 'text/csv;charset=utf-8;')
   }
@@ -1623,6 +1669,7 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                 <div className="flex gap-4 text-xs text-[var(--color-ink-soft)]">
                   <span>{g.totalQty.toFixed(0)} units sold</span>
                   <span>Revenue {g.totalRevenue.toFixed(2)}</span>
+                  <span>Cost {g.totalCost.toFixed(2)}</span>
                   <span>Profit {g.totalProfit.toFixed(2)}</span>
                 </div>
               </div>
@@ -1634,6 +1681,7 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                       <th className="px-4 py-2">Type</th>
                       <th className="px-4 py-2">Qty Sold</th>
                       <th className="px-4 py-2">Revenue</th>
+                      <th className="px-4 py-2">Cost</th>
                       <th className="px-4 py-2">Profit</th>
                     </tr>
                   </thead>
@@ -1648,6 +1696,17 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                         </td>
                         <td className="px-4 py-2">{item.qty} {item.product.unit}</td>
                         <td className="px-4 py-2">{item.revenue.toFixed(2)}</td>
+                        <td className="px-4 py-2">
+                          {item.cost.toFixed(2)}
+                          {item.isKitchen && (
+                            <span
+                              title="Kitchen items don't have a real per-unit cost — this is estimated from the weekly market expense you've logged, split by revenue share."
+                              className="ml-1 text-xs text-[var(--color-ink-soft)]"
+                            >
+                              (est.)
+                            </span>
+                          )}
+                        </td>
                         <td className="px-4 py-2">{item.profit.toFixed(2)}</td>
                       </tr>
                     ))}
@@ -1664,6 +1723,7 @@ function BestSellersByCategory({ dateFrom, dateTo, setDateFrom, setDateTo }) {
               <div className="flex gap-4">
                 <span>{grandTotalQty.toFixed(0)} units</span>
                 <span>Revenue {grandTotalRevenue.toFixed(2)}</span>
+                <span>Cost {grandTotalCost.toFixed(2)}</span>
                 <span>Profit {grandTotalProfit.toFixed(2)}</span>
               </div>
             </div>
