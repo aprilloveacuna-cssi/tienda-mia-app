@@ -126,20 +126,30 @@ export default function Inventory() {
     setTrendLoading(true)
     setTrendError('')
     // Passing the currently-filtered product IDs keeps this consistent with
-    // the Total Qty figure above — if Type/Category is filtered to Retail
-    // only, the trend reflects that same filter, not everything combined.
+    // the Total Qty / Total Value figures above — if Type/Category is
+    // filtered to Retail only, the trend reflects that same filter, not
+    // everything combined.
     const productIds = filteredRows.map((r) => r.product_id)
-    const { data, error } = await supabase.rpc('get_daily_inventory_totals', {
-      date_from: trendFrom,
-      date_to: trendTo,
-      product_ids: productIds,
-    })
+    const [qtyRes, valueRes] = await Promise.all([
+      supabase.rpc('get_daily_inventory_totals', { date_from: trendFrom, date_to: trendTo, product_ids: productIds }),
+      supabase.rpc('get_daily_inventory_value', { date_from: trendFrom, date_to: trendTo, product_ids: productIds }),
+    ])
     setTrendLoading(false)
-    if (error) {
-      setTrendError(error.message)
+    if (qtyRes.error) {
+      setTrendError(qtyRes.error.message)
       return
     }
-    setTrendRows(data ?? [])
+    if (valueRes.error) {
+      setTrendError(valueRes.error.message)
+      return
+    }
+    const valueByDay = Object.fromEntries((valueRes.data ?? []).map((r) => [r.day, r.total_value]))
+    const merged = (qtyRes.data ?? []).map((r) => ({
+      day: r.day,
+      total_qty: r.total_qty,
+      total_value: valueByDay[r.day] ?? 0,
+    }))
+    setTrendRows(merged)
   }
 
   async function load() {
@@ -428,12 +438,14 @@ export default function Inventory() {
           onClick={() => setTrendOpen((v) => !v)}
           className="text-sm font-medium text-[var(--color-ink)] underline underline-offset-2"
         >
-          {trendOpen ? 'Hide' : 'Show'} daily quantity trend
+          {trendOpen ? 'Hide' : 'Show'} daily quantity & value trend
         </button>
         {trendOpen && (
           <div className="mt-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
             <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
-              Total quantity as of each day in the range, for whatever Type/Category filter is currently active below.
+              Total quantity and value as of each day in the range, for whatever Type/Category filter is currently active below.
+              Value uses the real recorded cost where available (Purchases, Sales, and Adjustments posted going forward);
+              older Adjustments never recorded a cost, so those fall back to today's cost as an approximation.
             </p>
             <div className="flex flex-wrap items-end gap-3">
               <label className="text-sm">
@@ -465,19 +477,27 @@ export default function Inventory() {
                   <tr>
                     <th className="px-3 py-2">Date</th>
                     <th className="px-3 py-2">Total Qty</th>
-                    <th className="px-3 py-2">Change vs Previous Day</th>
+                    <th className="px-3 py-2">Qty Change</th>
+                    <th className="px-3 py-2">Total Value</th>
+                    <th className="px-3 py-2">Value Change</th>
                   </tr>
                 </thead>
                 <tbody>
                   {trendRows.map((row, i) => {
-                    const prev = i > 0 ? Number(trendRows[i - 1].total_qty) : null
-                    const change = prev !== null ? Number(row.total_qty) - prev : null
+                    const prevQty = i > 0 ? Number(trendRows[i - 1].total_qty) : null
+                    const qtyChange = prevQty !== null ? Number(row.total_qty) - prevQty : null
+                    const prevValue = i > 0 ? Number(trendRows[i - 1].total_value) : null
+                    const valueChange = prevValue !== null ? Number(row.total_value) - prevValue : null
                     return (
                       <tr key={row.day} className="border-b border-[var(--color-line)] last:border-0">
                         <td className="px-3 py-2">{row.day}</td>
                         <td className="px-3 py-2">{Number(row.total_qty).toLocaleString()}</td>
                         <td className="px-3 py-2">
-                          {change === null ? '—' : (change > 0 ? '+' : '') + change.toLocaleString()}
+                          {qtyChange === null ? '—' : (qtyChange > 0 ? '+' : '') + qtyChange.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2">{Number(row.total_value).toFixed(2)}</td>
+                        <td className="px-3 py-2">
+                          {valueChange === null ? '—' : (valueChange > 0 ? '+' : '') + valueChange.toFixed(2)}
                         </td>
                       </tr>
                     )
