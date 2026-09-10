@@ -207,6 +207,16 @@ export default function Inventory() {
     loadExpiryAlertDays()
   }, [])
 
+  useEffect(() => {
+    // The trend only fetches when "Show trend" is clicked, using whatever
+    // filter was active at that moment — if the filter changes afterward,
+    // those numbers would silently stop matching the live-updating Total
+    // Qty/Value cards above. Clearing it here makes the staleness obvious
+    // (the table disappears) rather than leaving mismatched numbers on
+    // screen next to each other.
+    setTrendRows([])
+  }, [selectedTypes, selectedCategories])
+
   async function fetchBatches(productId) {
     const { data } = await supabase
       .from('batch_cache')
