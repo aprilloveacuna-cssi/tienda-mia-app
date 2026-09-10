@@ -148,12 +148,13 @@ export default function Inventory() {
       setTrendError(expiryRes.error.message)
       return
     }
-    const valueByDay = Object.fromEntries((valueRes.data ?? []).map((r) => [r.day, r.total_value]))
+    const valueByDay = Object.fromEntries((valueRes.data ?? []).map((r) => [r.day, { value: r.total_value, hasEstimate: r.has_estimate }]))
     const nearExpiryByDay = Object.fromEntries((expiryRes.data ?? []).map((r) => [r.day, r.near_expiry_qty]))
     const merged = (qtyRes.data ?? []).map((r) => ({
       day: r.day,
       total_qty: r.total_qty,
-      total_value: valueByDay[r.day] ?? 0,
+      total_value: valueByDay[r.day]?.value ?? 0,
+      value_has_estimate: valueByDay[r.day]?.hasEstimate ?? false,
       near_expiry_qty: nearExpiryByDay[r.day] ?? 0,
     }))
     setTrendRows(merged)
@@ -461,8 +462,11 @@ export default function Inventory() {
           <div className="mt-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
             <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
               Total quantity and value as of each day in the range, for whatever Type/Category filter is currently active below.
-              Value uses the real recorded cost where available (Purchases, Sales, and Adjustments posted going forward);
-              older Adjustments never recorded a cost, so those fall back to today's cost as an approximation.
+              Value uses the real recorded cost where available (Purchases, Sales, and Adjustments posted going forward).
+              Older Adjustments never recorded a cost — those fall back to today's cost as an approximation, and any day
+              built on top of one is marked <span className="font-medium text-[var(--color-rust)]">(est.)</span> below, since
+              that number can't be treated as exact. Today's <strong>Total inventory value</strong> card above is always exact,
+              regardless of this — it's computed from current stock and cost directly, not from ledger history.
               Near-Expiry Units Sold is units actually sold that day from a batch that was within your expiry alert window
               ({expiryAlertDays} days) of expiring at the time — not a running total, a per-day figure.
             </p>
@@ -491,40 +495,62 @@ export default function Inventory() {
             )}
 
             {trendRows.length > 0 && (
-              <table className="mt-4 w-full text-left text-sm">
-                <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
-                  <tr>
-                    <th className="px-3 py-2">Date</th>
-                    <th className="px-3 py-2">Total Qty</th>
-                    <th className="px-3 py-2">Qty Change</th>
-                    <th className="px-3 py-2">Total Value</th>
-                    <th className="px-3 py-2">Value Change</th>
-                    <th className="px-3 py-2">Near-Expiry Units Sold</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trendRows.map((row, i) => {
-                    const prevQty = i > 0 ? Number(trendRows[i - 1].total_qty) : null
-                    const qtyChange = prevQty !== null ? Number(row.total_qty) - prevQty : null
-                    const prevValue = i > 0 ? Number(trendRows[i - 1].total_value) : null
-                    const valueChange = prevValue !== null ? Number(row.total_value) - prevValue : null
-                    return (
-                      <tr key={row.day} className="border-b border-[var(--color-line)] last:border-0">
-                        <td className="px-3 py-2">{row.day}</td>
-                        <td className="px-3 py-2">{Number(row.total_qty).toLocaleString()}</td>
-                        <td className="px-3 py-2">
-                          {qtyChange === null ? '—' : (qtyChange > 0 ? '+' : '') + qtyChange.toLocaleString()}
-                        </td>
-                        <td className="px-3 py-2">{Number(row.total_value).toFixed(2)}</td>
-                        <td className="px-3 py-2">
-                          {valueChange === null ? '—' : (valueChange > 0 ? '+' : '') + valueChange.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2">{Number(row.near_expiry_qty).toLocaleString()}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+              <>
+                <div className="mt-4 rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-3">
+                  <div className="text-xs font-medium text-[var(--color-ink-soft)]">
+                    Initial inventory value — {trendRows[0].day}
+                  </div>
+                  <div className="mt-0.5 text-lg font-semibold">
+                    {Number(trendRows[0].total_value).toFixed(2)}
+                    {trendRows[0].value_has_estimate && <span className="ml-1 text-sm font-normal text-[var(--color-rust)]">(est.)</span>}
+                  </div>
+                </div>
+
+                <table className="mt-3 w-full text-left text-sm">
+                  <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                    <tr>
+                      <th className="px-3 py-2">Date</th>
+                      <th className="px-3 py-2">Total Qty</th>
+                      <th className="px-3 py-2">Qty Change</th>
+                      <th className="px-3 py-2">Total Value</th>
+                      <th className="px-3 py-2">Value Change</th>
+                      <th className="px-3 py-2">Near-Expiry Units Sold</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trendRows.map((row, i) => {
+                      const prevQty = i > 0 ? Number(trendRows[i - 1].total_qty) : null
+                      const qtyChange = prevQty !== null ? Number(row.total_qty) - prevQty : null
+                      const prevValue = i > 0 ? Number(trendRows[i - 1].total_value) : null
+                      const valueChange = prevValue !== null ? Number(row.total_value) - prevValue : null
+                      return (
+                        <tr key={row.day} className="border-b border-[var(--color-line)] last:border-0">
+                          <td className="px-3 py-2">{row.day}</td>
+                          <td className="px-3 py-2">{Number(row.total_qty).toLocaleString()}</td>
+                          <td className="px-3 py-2">
+                            {qtyChange === null ? '—' : (qtyChange > 0 ? '+' : '') + qtyChange.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2">
+                            {Number(row.total_value).toFixed(2)}
+                            {row.value_has_estimate && (
+                              <span
+                                title="This total includes at least one Adjustment posted before cost tracking was added — that portion is an approximation using today's cost, not the real historical cost."
+                                className="ml-1 text-xs text-[var(--color-rust)]"
+                              >
+                                (est.)
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">
+                            {valueChange === null ? '—' : (valueChange > 0 ? '+' : '') + valueChange.toFixed(2)}
+                          </td>
+                          <td className="px-3 py-2">{Number(row.near_expiry_qty).toLocaleString()}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </>
             )}
           </div>
         )}
