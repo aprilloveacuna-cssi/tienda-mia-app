@@ -44,6 +44,12 @@ function expiryLabel(expirationDate) {
 export default function Inventory() {
   const [rows, setRows] = useState([])
   const [expiryAlertDays, setExpiryAlertDays] = useState(15)
+  const [trendOpen, setTrendOpen] = useState(false)
+  const [trendFrom, setTrendFrom] = useState('')
+  const [trendTo, setTrendTo] = useState('')
+  const [trendRows, setTrendRows] = useState([])
+  const [trendLoading, setTrendLoading] = useState(false)
+  const [trendError, setTrendError] = useState('')
   const [batchesByProduct, setBatchesByProduct] = useState({})
   const [expanded, setExpanded] = useState(new Set())
   const [loading, setLoading] = useState(true)
@@ -110,6 +116,30 @@ export default function Inventory() {
       .map((row) => row.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
       .join('\n')
     downloadFile(`inventory_${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv;charset=utf-8;')
+  }
+
+  async function loadTrend() {
+    if (!trendFrom || !trendTo) {
+      setTrendError('Pick both a From and To date.')
+      return
+    }
+    setTrendLoading(true)
+    setTrendError('')
+    // Passing the currently-filtered product IDs keeps this consistent with
+    // the Total Qty figure above — if Type/Category is filtered to Retail
+    // only, the trend reflects that same filter, not everything combined.
+    const productIds = filteredRows.map((r) => r.product_id)
+    const { data, error } = await supabase.rpc('get_daily_inventory_totals', {
+      date_from: trendFrom,
+      date_to: trendTo,
+      product_ids: productIds,
+    })
+    setTrendLoading(false)
+    if (error) {
+      setTrendError(error.message)
+      return
+    }
+    setTrendRows(data ?? [])
   }
 
   async function load() {
@@ -347,6 +377,10 @@ export default function Inventory() {
     () => filteredRows.reduce((sum, r) => sum + Number(r.inventory_value ?? 0), 0),
     [filteredRows]
   )
+  const totalQty = useMemo(
+    () => filteredRows.reduce((sum, r) => sum + Number(r.current_stock ?? 0), 0),
+    [filteredRows]
+  )
 
   return (
     <div>
@@ -374,11 +408,86 @@ export default function Inventory() {
       )}
 
       {!loading && rows.length > 0 && (
-        <div className="mb-4 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
-          <div className="text-xs font-medium text-[var(--color-ink-soft)]">Total inventory value</div>
-          <div className="font-display mt-1 text-2xl font-semibold">{totalValue.toFixed(2)}</div>
+        <div className="mb-4 flex flex-wrap gap-3">
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
+            <div className="text-xs font-medium text-[var(--color-ink-soft)]">Total inventory value</div>
+            <div className="font-display mt-1 text-2xl font-semibold">{totalValue.toFixed(2)}</div>
+          </div>
+          <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
+            <div className="text-xs font-medium text-[var(--color-ink-soft)]">Total inventory qty</div>
+            <div className="font-display mt-1 text-2xl font-semibold">{totalQty.toLocaleString()}</div>
+            <div className="mt-0.5 text-xs text-[var(--color-ink-soft)]">
+              Raw units summed across everything currently shown — mixes pcs, kg, L etc. if your filter spans more than one unit.
+            </div>
+          </div>
         </div>
       )}
+
+      <div className="mb-4">
+        <button
+          onClick={() => setTrendOpen((v) => !v)}
+          className="text-sm font-medium text-[var(--color-ink)] underline underline-offset-2"
+        >
+          {trendOpen ? 'Hide' : 'Show'} daily quantity trend
+        </button>
+        {trendOpen && (
+          <div className="mt-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4">
+            <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
+              Total quantity as of each day in the range, for whatever Type/Category filter is currently active below.
+            </p>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">From</span>
+                <input type="date" value={trendFrom} onChange={(e) => setTrendFrom(e.target.value)} className="input" />
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">To</span>
+                <input type="date" value={trendTo} onChange={(e) => setTrendTo(e.target.value)} className="input" />
+              </label>
+              <button
+                onClick={loadTrend}
+                disabled={trendLoading}
+                className="rounded-md bg-[var(--color-ink)] px-3.5 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {trendLoading ? 'Loading…' : 'Show trend'}
+              </button>
+            </div>
+
+            {trendError && (
+              <div className="mt-3 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+                {trendError}
+              </div>
+            )}
+
+            {trendRows.length > 0 && (
+              <table className="mt-4 w-full text-left text-sm">
+                <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
+                  <tr>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Total Qty</th>
+                    <th className="px-3 py-2">Change vs Previous Day</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trendRows.map((row, i) => {
+                    const prev = i > 0 ? Number(trendRows[i - 1].total_qty) : null
+                    const change = prev !== null ? Number(row.total_qty) - prev : null
+                    return (
+                      <tr key={row.day} className="border-b border-[var(--color-line)] last:border-0">
+                        <td className="px-3 py-2">{row.day}</td>
+                        <td className="px-3 py-2">{Number(row.total_qty).toLocaleString()}</td>
+                        <td className="px-3 py-2">
+                          {change === null ? '—' : (change > 0 ? '+' : '') + change.toLocaleString()}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
 
       <TypeCategoryFilter
         products={rows.map((r) => r.product ?? {})}
