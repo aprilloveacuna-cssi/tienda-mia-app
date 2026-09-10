@@ -130,9 +130,10 @@ export default function Inventory() {
     // filtered to Retail only, the trend reflects that same filter, not
     // everything combined.
     const productIds = filteredRows.map((r) => r.product_id)
-    const [qtyRes, valueRes] = await Promise.all([
+    const [qtyRes, valueRes, expiryRes] = await Promise.all([
       supabase.rpc('get_daily_inventory_totals', { date_from: trendFrom, date_to: trendTo, product_ids: productIds }),
       supabase.rpc('get_daily_inventory_value', { date_from: trendFrom, date_to: trendTo, product_ids: productIds }),
+      supabase.rpc('get_daily_near_expiry_sales', { date_from: trendFrom, date_to: trendTo, alert_days: expiryAlertDays, product_ids: productIds }),
     ])
     setTrendLoading(false)
     if (qtyRes.error) {
@@ -143,11 +144,17 @@ export default function Inventory() {
       setTrendError(valueRes.error.message)
       return
     }
+    if (expiryRes.error) {
+      setTrendError(expiryRes.error.message)
+      return
+    }
     const valueByDay = Object.fromEntries((valueRes.data ?? []).map((r) => [r.day, r.total_value]))
+    const nearExpiryByDay = Object.fromEntries((expiryRes.data ?? []).map((r) => [r.day, r.near_expiry_qty]))
     const merged = (qtyRes.data ?? []).map((r) => ({
       day: r.day,
       total_qty: r.total_qty,
       total_value: valueByDay[r.day] ?? 0,
+      near_expiry_qty: nearExpiryByDay[r.day] ?? 0,
     }))
     setTrendRows(merged)
   }
@@ -446,6 +453,8 @@ export default function Inventory() {
               Total quantity and value as of each day in the range, for whatever Type/Category filter is currently active below.
               Value uses the real recorded cost where available (Purchases, Sales, and Adjustments posted going forward);
               older Adjustments never recorded a cost, so those fall back to today's cost as an approximation.
+              Near-Expiry Units Sold is units actually sold that day from a batch that was within your expiry alert window
+              ({expiryAlertDays} days) of expiring at the time — not a running total, a per-day figure.
             </p>
             <div className="flex flex-wrap items-end gap-3">
               <label className="text-sm">
@@ -480,6 +489,7 @@ export default function Inventory() {
                     <th className="px-3 py-2">Qty Change</th>
                     <th className="px-3 py-2">Total Value</th>
                     <th className="px-3 py-2">Value Change</th>
+                    <th className="px-3 py-2">Near-Expiry Units Sold</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -499,6 +509,7 @@ export default function Inventory() {
                         <td className="px-3 py-2">
                           {valueChange === null ? '—' : (valueChange > 0 ? '+' : '') + valueChange.toFixed(2)}
                         </td>
+                        <td className="px-3 py-2">{Number(row.near_expiry_qty).toLocaleString()}</td>
                       </tr>
                     )
                   })}
