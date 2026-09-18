@@ -94,6 +94,13 @@ export default function Sales() {
   const [discountMode, setDiscountMode] = useState(false)
   const [discountQtyDraft, setDiscountQtyDraft] = useState('')
 
+  // Buy 1 Take 1 — a separate mode from the Senior/PWD discount flow above,
+  // since it isn't triggered by a price mismatch: the cashier picks it
+  // deliberately, usually to move near-expiry stock. See migration 0032 for
+  // why this stays off is_discounted.
+  const [b1t1Mode, setB1t1Mode] = useState(false)
+  const [b1t1PriceDraft, setB1t1PriceDraft] = useState('')
+
   // Bulk import price mismatch resolution
   const [importMismatches, setImportMismatches] = useState([])
 
@@ -186,6 +193,9 @@ export default function Sales() {
   function onProductPick(productId) {
     const p = products.find((x) => x.id === productId)
     setLineForm({ product_id: productId, quantity: '', unit_price: p?.selling_price ?? '' })
+    // Same convention as unit_price above: reset to the new product's price
+    // whenever a product is (re)picked, regardless of any prior edit.
+    if (b1t1Mode) setB1t1PriceDraft(p?.selling_price != null ? String(p.selling_price) : '')
     setLineWarning('')
   }
 
@@ -784,7 +794,86 @@ export default function Sales() {
     return true
   }
 
+  // Buy 1 Take 1: quantity is the real physical units taken (always even —
+  // 2 per set), b1t1Price is what's charged for one whole set. unit_price is
+  // still stored as charged-total ÷ quantity, so line_total (quantity ×
+  // unit_price) comes out to exactly what was collected — every existing
+  // rollup that sums line_total or quantity keeps working untouched.
+  async function proceedAddB1T1Line(product, qty, b1t1Price) {
+    await ensureKitchenStock(product, qty, headerForm.sale_date)
+    const stockGroupIds = resolveStockGroupIds(product)
+    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, qty)
+
+    const sets = qty / 2
+    const chargedTotal = sets * b1t1Price
+    const fullValue = qty * Number(product.selling_price)
+    const effectiveUnitPrice = chargedTotal / qty
+
+    const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+    const openQty = qty - consumedQty
+    const fifoCost =
+      consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
+
+    const isOversold = !satisfied && !product.unlimited_stock
+    if (isOversold) {
+      setLineWarning(
+        `${product.name}: only ${totalAvailable} ${product.unit} available — sold anyway. ${openQty} ${product.unit} will show as negative stock until corrected.`
+      )
+    }
+
+    setPendingLines([
+      ...pendingLines,
+      {
+        tempId: crypto.randomUUID(),
+        product_id: product.id,
+        product_name: product.name,
+        category: product.category,
+        unit: product.unit,
+        quantity: qty,
+        unit_price: effectiveUnitPrice,
+        line_total: chargedTotal,
+        fifo_cost: fifoCost,
+        gross_profit: chargedTotal - fifoCost,
+        consumption,
+        openQty,
+        isOversold,
+        is_discounted: false,
+        is_b1t1: true,
+        b1t1_price: b1t1Price,
+        discount_amount: fullValue - chargedTotal,
+      },
+    ])
+    return true
+  }
+
+  async function handleAddB1T1Line(e) {
+    e.preventDefault()
+    setLineWarning('')
+    if (!lineForm.product_id || !lineForm.quantity || !b1t1PriceDraft) return
+
+    const qty = Number(lineForm.quantity)
+    const product = products.find((p) => p.id === lineForm.product_id)
+    const b1t1Price = Number(b1t1PriceDraft)
+
+    if (qty % 2 !== 0 || qty <= 0) {
+      setLineWarning('Buy 1 Take 1 needs an even quantity — 2 units per set.')
+      return
+    }
+
+    try {
+      const added = await proceedAddB1T1Line(product, qty, b1t1Price)
+      if (added) {
+        setLineForm(EMPTY_LINE_FORM)
+        setB1t1Mode(false)
+        setB1t1PriceDraft('')
+      }
+    } catch {
+      setLineWarning('Could not check available stock — try again.')
+    }
+  }
+
   async function handleAddLine(e) {
+    if (b1t1Mode) return handleAddB1T1Line(e)
     e.preventDefault()
     setLineWarning('')
     if (!lineForm.product_id || !lineForm.quantity || !lineForm.unit_price) return
@@ -888,6 +977,8 @@ export default function Sales() {
     // the form below recomputes FIFO fresh, correctly seeing that stock again.
     setPendingLines(pendingLines.filter((l) => l.tempId !== line.tempId))
     setLineForm({ product_id: line.product_id, quantity: String(line.quantity), unit_price: String(line.unit_price) })
+    setB1t1Mode(Boolean(line.is_b1t1))
+    setB1t1PriceDraft(line.is_b1t1 ? String(line.b1t1_price ?? '') : '')
     setLineWarning('')
   }
 
@@ -957,6 +1048,14 @@ export default function Sales() {
     () => pendingLines.reduce((sum, l) => sum + (l.discount_amount ?? 0), 0),
     [pendingLines]
   )
+  const runningSeniorPwdDiscount = useMemo(
+    () => pendingLines.filter((l) => l.is_discounted).reduce((sum, l) => sum + (l.discount_amount ?? 0), 0),
+    [pendingLines]
+  )
+  const runningB1t1Discount = useMemo(
+    () => pendingLines.filter((l) => l.is_b1t1).reduce((sum, l) => sum + (l.discount_amount ?? 0), 0),
+    [pendingLines]
+  )
 
   async function completeSale() {
     if (pendingLines.length === 0) {
@@ -1001,6 +1100,8 @@ export default function Sales() {
           fifo_cost: line.fifo_cost,
           gross_profit: line.gross_profit,
           is_discounted: line.is_discounted ?? false,
+          is_b1t1: line.is_b1t1 ?? false,
+          b1t1_price: line.b1t1_price ?? null,
           discount_amount: line.discount_amount ?? 0,
         })
         .select()
@@ -1300,6 +1401,14 @@ export default function Sales() {
                             discounted
                           </span>
                         )}
+                        {l.is_b1t1 && (
+                          <span
+                            title={`Buy 1 Take 1 — ₱${Number(l.b1t1_price).toFixed(2)} per set, ₱${l.discount_amount.toFixed(2)} given away`}
+                            className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
+                          >
+                            B1T1
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.unit}</td>
@@ -1340,7 +1449,10 @@ export default function Sales() {
 
             {runningDiscount > 0 && (
               <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3 py-2 text-xs text-[var(--color-herb)]">
-                Senior/PWD discounts this sale: ₱{runningDiscount.toFixed(2)} — factor this into remittance, since it's a real reduction from gross.
+                Discounts this sale: ₱{runningDiscount.toFixed(2)} — factor this into remittance, since it's a real reduction from gross.
+                {runningSeniorPwdDiscount > 0 && runningB1t1Discount > 0 && (
+                  <> (Senior/PWD ₱{runningSeniorPwdDiscount.toFixed(2)}, Buy 1 Take 1 ₱{runningB1t1Discount.toFixed(2)})</>
+                )}
               </div>
             )}
 
@@ -1393,11 +1505,32 @@ export default function Sales() {
                   onChange={onProductPick}
                 />
               </Field>
+              <label className="flex items-center gap-2 text-xs font-medium text-[var(--color-ink-soft)]">
+                <input
+                  type="checkbox"
+                  checked={b1t1Mode}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setB1t1Mode(checked)
+                    setPriceMismatch(null)
+                    setDiscountMode(false)
+                    setDiscountQtyDraft('')
+                    setLineWarning('')
+                    if (checked) {
+                      const p = products.find((x) => x.id === lineForm.product_id)
+                      setB1t1PriceDraft(p?.selling_price != null ? String(p.selling_price) : '')
+                    } else {
+                      setB1t1PriceDraft('')
+                    }
+                  }}
+                />
+                Buy 1 Take 1 (near-expiry)
+              </label>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Quantity" required>
+                <Field label={b1t1Mode ? 'Quantity (units, even)' : 'Quantity'} required>
                   <input
                     type="number"
-                    step="0.001"
+                    step={b1t1Mode ? '2' : '0.001'}
                     min="0"
                     required
                     value={lineForm.quantity}
@@ -1405,18 +1538,38 @@ export default function Sales() {
                     className="input"
                   />
                 </Field>
-                <Field label="Unit price" required>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    required
-                    value={lineForm.unit_price}
-                    onChange={(e) => setLineForm({ ...lineForm, unit_price: e.target.value })}
-                    className="input"
-                  />
-                </Field>
+                {b1t1Mode ? (
+                  <Field label="Price per set" required>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      required
+                      value={b1t1PriceDraft}
+                      onChange={(e) => setB1t1PriceDraft(e.target.value)}
+                      className="input"
+                    />
+                  </Field>
+                ) : (
+                  <Field label="Unit price" required>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      required
+                      value={lineForm.unit_price}
+                      onChange={(e) => setLineForm({ ...lineForm, unit_price: e.target.value })}
+                      className="input"
+                    />
+                  </Field>
+                )}
               </div>
+              {b1t1Mode && lineForm.quantity && b1t1PriceDraft && Number(lineForm.quantity) % 2 === 0 && (
+                <p className="text-xs text-[var(--color-ink-soft)]">
+                  = {Number(lineForm.quantity) / 2} set(s) × ₱{Number(b1t1PriceDraft).toFixed(2)} = ₱
+                  {((Number(lineForm.quantity) / 2) * Number(b1t1PriceDraft)).toFixed(2)} collected
+                </p>
+              )}
               {lineWarning && (
                 <div className="rounded-md bg-[var(--color-amber-soft)] px-3 py-2 text-xs text-[var(--color-amber)]">
                   <div className="flex items-start gap-1.5">
@@ -1599,7 +1752,25 @@ export default function Sales() {
                 <tbody>
                   {viewedLines.map((l) => (
                     <tr key={l.id} className="border-b border-[var(--color-line)] last:border-0">
-                      <td className="px-3 py-2">{l.product?.name}</td>
+                      <td className="px-3 py-2">
+                        {l.product?.name}
+                        {l.is_discounted && (
+                          <span
+                            title={`Senior/PWD discount — ₱${Number(l.discount_amount).toFixed(2)} off`}
+                            className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
+                          >
+                            discounted
+                          </span>
+                        )}
+                        {l.is_b1t1 && (
+                          <span
+                            title={`Buy 1 Take 1 — ₱${Number(l.b1t1_price).toFixed(2)} per set, ₱${Number(l.discount_amount).toFixed(2)} given away`}
+                            className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
+                          >
+                            B1T1
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.product?.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.product?.unit}</td>
                       <td className="px-3 py-2">{Number(l.unit_price).toFixed(2)}</td>
