@@ -64,6 +64,27 @@ const FIELD_META = {
     note: 'Controls Dashboard Expiry Alerts and the amber warning color in Inventory.',
     group: 'Alerts',
   },
+  B1T1_ALERT_DAYS: {
+    label: 'Buy 1 Take 1 alert window',
+    type: 'number',
+    unit: 'days before expiration',
+    note: 'Controls the Buy 1 Take 1 recommendations on Dashboard — separate from the Expiry alert window above, since this one is meant to trigger a firmer "act now" recommendation.',
+    group: 'Alerts',
+  },
+  B1T1_COST_RECOVERY_MIN_PCT: {
+    label: 'Buy 1 Take 1 min cost recovery',
+    type: 'number',
+    unit: '% of the pair\'s cost',
+    note: 'The lower end of the price band the recommended Buy 1 Take 1 price aims for, per 2 units.',
+    group: 'Sales & Discounts',
+  },
+  B1T1_COST_RECOVERY_MAX_PCT: {
+    label: 'Buy 1 Take 1 max cost recovery',
+    type: 'number',
+    unit: '% of the pair\'s cost',
+    note: 'The upper end of that band. The recommendation targets the midpoint, capped so it never exceeds the item\'s normal price.',
+    group: 'Sales & Discounts',
+  },
   VAT_RATE_PCT: {
     label: 'VAT rate',
     type: 'number',

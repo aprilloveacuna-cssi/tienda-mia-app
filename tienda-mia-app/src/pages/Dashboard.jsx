@@ -22,6 +22,9 @@ export default function Dashboard() {
   const [alerts, setAlerts] = useState([])
   const [expiryAlerts, setExpiryAlerts] = useState([])
   const [expiryAlertDays, setExpiryAlertDays] = useState(15)
+  const [b1t1Recs, setB1t1Recs] = useState([])
+  const [b1t1AlertDays, setB1t1AlertDays] = useState(7)
+  const [b1t1RecoveryPct, setB1t1RecoveryPct] = useState({ min: 70, max: 80 })
   const [hasAnyStock, setHasAnyStock] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [disposeBatch, setDisposeBatch] = useState(null)
@@ -59,6 +62,83 @@ export default function Dashboard() {
       })
       setExpiryAlerts(realStock)
     }
+  }
+
+  // Recommends a per-set (2-unit) Buy 1 Take 1 price for stock nearing
+  // expiry — a firmer, shorter window than the general Expiry Alerts above,
+  // since this is meant to prompt actually running the promo, not just
+  // watching the item. The recommendation targets the midpoint of the
+  // cost-recovery band from Settings, applied to the pair's real cost (that
+  // specific batch's unit_cost, not just the product's current cost — the
+  // batch actually about to expire may have been bought at a different
+  // price), then capped at the item's normal selling price: recommending
+  // more than one unit's normal price would defeat the point of a "buy 1
+  // take 1" — the customer would be paying more for the pair than one unit
+  // alone costs today.
+  async function loadB1t1Recommendations() {
+    const { data: settingsRows } = await supabase
+      .from('settings')
+      .select('key, value')
+      .in('key', ['B1T1_ALERT_DAYS', 'B1T1_COST_RECOVERY_MIN_PCT', 'B1T1_COST_RECOVERY_MAX_PCT'])
+    const settingsByKey = Object.fromEntries((settingsRows ?? []).map((s) => [s.key, s.value]))
+    const alertDays = Number(settingsByKey.B1T1_ALERT_DAYS ?? 7)
+    const minPct = Number(settingsByKey.B1T1_COST_RECOVERY_MIN_PCT ?? 70)
+    const maxPct = Number(settingsByKey.B1T1_COST_RECOVERY_MAX_PCT ?? 80)
+    setB1t1AlertDays(alertDays)
+    setB1t1RecoveryPct({ min: minPct, max: maxPct })
+
+    const todayStr = new Date().toISOString().slice(0, 10)
+    const cutoff = new Date(Date.now() + alertDays * 86400000).toISOString().slice(0, 10)
+    const { data, error } = await supabase
+      .from('batch_cache')
+      .select(
+        '*, batch:batches(batch_number), product:products(name, unit, selling_price, business_unit, category, unlimited_stock, inventory_cache(current_stock))'
+      )
+      .gt('remaining_quantity', 0)
+      .not('expiration_date', 'is', null)
+      .gte('expiration_date', todayStr)
+      .lte('expiration_date', cutoff)
+      .order('expiration_date', { ascending: true })
+    if (error) return
+
+    const rows = (data ?? []).filter((row) => {
+      const p = row.product
+      if (!p) return false
+      const isKitchen = p.business_unit === 'KITCHEN' || p.category === 'KITCHEN'
+      // Same reasoning as Stock Alerts excluding Kitchen/unlimited_stock —
+      // a made-to-order item doesn't have a meaningful per-unit cost to
+      // recover against, and isn't sitting in stock the same way.
+      if (isKitchen || p.unlimited_stock) return false
+      // Same stale-batch cross-check as Expiry Alerts: a product-level
+      // Adjustment can zero out real stock without updating this specific
+      // batch record.
+      const cache = Array.isArray(p.inventory_cache) ? p.inventory_cache[0] : p.inventory_cache
+      return Number(cache?.current_stock ?? 0) > 0
+    })
+
+    const withRecommendation = rows.map((row) => {
+      const unitCost = Number(row.unit_cost ?? 0)
+      const sellingPrice = Number(row.product?.selling_price ?? 0)
+      const costForPair = 2 * unitCost
+      const targetLow = costForPair * (minPct / 100)
+      const targetHigh = costForPair * (maxPct / 100)
+      let recommended = (targetLow + targetHigh) / 2
+      let cappedAtSellingPrice = false
+      if (recommended > sellingPrice) {
+        recommended = sellingPrice
+        cappedAtSellingPrice = true
+      }
+      recommended = Math.round(recommended * 100) / 100
+      return {
+        ...row,
+        recommendedPrice: recommended,
+        targetLow: Math.round(targetLow * 100) / 100,
+        targetHigh: Math.round(targetHigh * 100) / 100,
+        cappedAtSellingPrice,
+      }
+    })
+
+    setB1t1Recs(withRecommendation)
   }
 
   async function loadMealUnaccounted() {
@@ -145,6 +225,7 @@ export default function Dashboard() {
       setAlerts(lowStock)
 
       await loadExpiryAlerts()
+      await loadB1t1Recommendations()
       await loadMealUnaccounted()
     } catch {
       setErrorMsg('Could not reach Supabase — check your .env values.')
@@ -312,6 +393,44 @@ export default function Dashboard() {
           )}
         </Panel>
       </div>
+
+      <Panel title="Buy 1 Take 1 recommendations" className="mt-4">
+        <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
+          Targeting {b1t1RecoveryPct.min}–{b1t1RecoveryPct.max}% of cost recovered per pair, for stock expiring within {b1t1AlertDays} days.
+        </p>
+        {b1t1Recs.length === 0 ? (
+          <EmptyRow text={`Nothing expiring within ${b1t1AlertDays} days needs this right now.`} />
+        ) : (
+          <div className="space-y-2">
+            {b1t1Recs.map((row) => (
+              <div key={row.batch_id} className="flex items-center justify-between gap-2 text-sm">
+                <div className="min-w-0">
+                  <div className="truncate">{row.product?.name}</div>
+                  <div className="text-xs text-[var(--color-ink-soft)]">
+                    {row.remaining_quantity} {row.product?.unit} left · cost ₱{Number(row.unit_cost ?? 0).toFixed(2)}/unit ·
+                    normally ₱{Number(row.product?.selling_price ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <StatusChip tone={daysUntil(row.expiration_date) <= 2 ? 'critical' : 'attention'}>
+                    {expiryLabel(row.expiration_date)}
+                  </StatusChip>
+                  <span
+                    title={
+                      row.cappedAtSellingPrice
+                        ? `Capped at the normal per-unit price — reaching the full ${b1t1RecoveryPct.min}–${b1t1RecoveryPct.max}% cost-recovery band would mean charging more than one unit's price, which would defeat the point of Buy 1 Take 1.`
+                        : `Targets ₱${row.targetLow.toFixed(2)}–₱${row.targetHigh.toFixed(2)} recovered on this pair's ₱${(2 * Number(row.unit_cost ?? 0)).toFixed(2)} cost.`
+                    }
+                    className="rounded-md bg-[var(--color-herb-soft)] px-2 py-1 text-xs font-medium text-[var(--color-herb)]"
+                  >
+                    ₱{row.recommendedPrice.toFixed(2)}/set
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
 
       {mealProduct && (
         <Panel title="MEAL@100 monitoring" className="mt-4">
