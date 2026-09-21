@@ -50,6 +50,13 @@ const FIELD_META = {
     note: 'The cost of tying up capital and shelf space in stock — used alongside EOQ ordering cost.',
     group: 'Purchasing & Forecasting',
   },
+  AUTO_ARCHIVE_ZERO_STOCK_DAYS: {
+    label: 'Auto-archive after zero stock',
+    type: 'number',
+    unit: 'days at 0 stock, uninterrupted',
+    note: 'Runs whenever Dashboard loads. Only trips after a full, unbroken stretch at 0 (or negative) stock — a brief out-of-stock while waiting on a reorder won\'t trigger it. Kitchen and unlimited-stock items are never auto-archived.',
+    group: 'Purchasing & Forecasting',
+  },
   SENIOR_PWD_DISCOUNT_PCT: {
     label: 'Senior / PWD discount',
     type: 'number',
@@ -67,8 +74,8 @@ const FIELD_META = {
   B1T1_ALERT_DAYS: {
     label: 'Buy 1 Take 1 alert window',
     type: 'number',
-    unit: 'days before expiration',
-    note: 'Controls the Buy 1 Take 1 recommendations on Dashboard — separate from the Expiry alert window above, since this one is meant to trigger a firmer "act now" recommendation.',
+    unit: 'store days before expiration',
+    note: 'Controls the Buy 1 Take 1 recommendations on Dashboard — separate from the Expiry alert window above, since this one is meant to trigger a firmer "act now" recommendation. Counted in store days (Mon–Fri only, since the store is closed weekends), not calendar days.',
     group: 'Alerts',
   },
   B1T1_COST_RECOVERY_MIN_PCT: {

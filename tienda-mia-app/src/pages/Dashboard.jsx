@@ -44,6 +44,7 @@ export default function Dashboard() {
   const [b1t1RecoveryPct, setB1t1RecoveryPct] = useState({ min: 70, max: 80 })
   const [hasAnyStock, setHasAnyStock] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+  const [autoArchived, setAutoArchived] = useState([])
   const [disposeBatch, setDisposeBatch] = useState(null)
   const [editingExpiryBatchId, setEditingExpiryBatchId] = useState(null)
   const [expiryDraft, setExpiryDraft] = useState('')
@@ -226,8 +227,20 @@ export default function Dashboard() {
     }
   }
 
+  async function runAutoArchive() {
+    // Archives products that have sat at 0 (or negative) stock for
+    // AUTO_ARCHIVE_ZERO_STOCK_DAYS straight (default 21) — see migration
+    // 0034. Kitchen and unlimited_stock items are excluded on the database
+    // side, same reasoning as Stock Alerts and the B1T1 recommendations:
+    // a made-to-order item being at 0 isn't a meaningful "discontinue" signal.
+    const { data, error } = await supabase.rpc('auto_archive_stale_zero_stock')
+    setAutoArchived(!error && data ? data : [])
+  }
+
   async function loadAll() {
     try {
+      await runAutoArchive()
+
       const [totalRes, activeRes, archivedRes, invRes] = await Promise.all([
         supabase.from('products').select('*', { count: 'exact', head: true }),
         supabase.from('products').select('*', { count: 'exact', head: true }).eq('status', 'active'),
@@ -315,6 +328,17 @@ export default function Dashboard() {
       {errorMsg && (
         <div className="mt-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
           {errorMsg}
+        </div>
+      )}
+
+      {autoArchived.length > 0 && (
+        <div className="mt-4 flex items-start justify-between gap-3 rounded-md bg-[var(--color-amber-soft)] px-3.5 py-2.5 text-sm text-[var(--color-amber)]">
+          <span>
+            Just archived, out of stock for 3+ weeks straight: {autoArchived.map((p) => p.name).join(', ')}. Restore any of these from the Inactive tab on Products if that's wrong.
+          </span>
+          <button onClick={() => setAutoArchived([])} className="shrink-0 text-xs font-medium underline">
+            Dismiss
+          </button>
         </div>
       )}
 
