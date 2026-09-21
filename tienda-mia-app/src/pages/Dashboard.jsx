@@ -9,6 +9,23 @@ function daysUntil(dateStr) {
   return Math.ceil((new Date(dateStr) - new Date()) / (1000 * 60 * 60 * 24))
 }
 
+// The store doesn't open Saturday or Sunday, so "N days" for the B1T1
+// window means N days it's actually open to sell something — a batch
+// expiring next Monday still needs to show up even if that's more than N
+// calendar days away, since none of the weekend gave a chance to move it.
+// Walks forward one calendar day at a time from today, only counting
+// weekdays, until storeDays of them have been counted.
+function addStoreDays(startDate, storeDays) {
+  const d = new Date(startDate)
+  let counted = 0
+  while (counted < storeDays) {
+    d.setDate(d.getDate() + 1)
+    const dayOfWeek = d.getDay() // 0 = Sunday, 6 = Saturday
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) counted++
+  }
+  return d
+}
+
 function expiryLabel(dateStr) {
   const d = daysUntil(dateStr)
   if (d < 0) return `expired ${Math.abs(d)}d ago`
@@ -88,11 +105,11 @@ export default function Dashboard() {
     setB1t1RecoveryPct({ min: minPct, max: maxPct })
 
     const todayStr = new Date().toISOString().slice(0, 10)
-    const cutoff = new Date(Date.now() + alertDays * 86400000).toISOString().slice(0, 10)
+    const cutoff = addStoreDays(new Date(), alertDays).toISOString().slice(0, 10)
     const { data, error } = await supabase
       .from('batch_cache')
       .select(
-        '*, batch:batches(batch_number), product:products(name, unit, selling_price, business_unit, category, unlimited_stock, inventory_cache(current_stock))'
+        '*, batch:batches(batch_number), product:products(name, unit, selling_price, current_cost, business_unit, category, unlimited_stock, inventory_cache(current_stock))'
       )
       .gt('remaining_quantity', 0)
       .not('expiration_date', 'is', null)
@@ -117,7 +134,19 @@ export default function Dashboard() {
     })
 
     const withRecommendation = rows.map((row) => {
-      const unitCost = Number(row.unit_cost ?? 0)
+      // batch_cache.unit_cost is only ever set once, from that batch's very
+      // first ledger entry (see apply_ledger_entry() in 0003_inventory.sql —
+      // the on-conflict path only ever updates remaining_quantity). A batch
+      // whose first entry was an Adjustment posted before migration 0029
+      // shipped had no recorded cost, so it got permanently cached at 0 —
+      // the same historical gap already documented for
+      // get_daily_inventory_value, surfacing here for the same reason.
+      // Falling back to the product's current cost is that same fix,
+      // flagged honestly as an estimate rather than showing a confident but
+      // wrong ₱0.00 recommendation.
+      const rawUnitCost = Number(row.unit_cost ?? 0)
+      const costIsEstimate = rawUnitCost === 0
+      const unitCost = costIsEstimate ? Number(row.product?.current_cost ?? 0) : rawUnitCost
       const sellingPrice = Number(row.product?.selling_price ?? 0)
       const costForPair = 2 * unitCost
       const targetLow = costForPair * (minPct / 100)
@@ -131,6 +160,9 @@ export default function Dashboard() {
       recommended = Math.round(recommended * 100) / 100
       return {
         ...row,
+        unitCost,
+        costIsEstimate,
+        noCostData: unitCost === 0,
         recommendedPrice: recommended,
         targetLow: Math.round(targetLow * 100) / 100,
         targetHigh: Math.round(targetHigh * 100) / 100,
@@ -396,10 +428,10 @@ export default function Dashboard() {
 
       <Panel title="Buy 1 Take 1 recommendations" className="mt-4">
         <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
-          Targeting {b1t1RecoveryPct.min}–{b1t1RecoveryPct.max}% of cost recovered per pair, for stock expiring within {b1t1AlertDays} days.
+          Targeting {b1t1RecoveryPct.min}–{b1t1RecoveryPct.max}% of cost recovered per pair, for stock expiring within {b1t1AlertDays} store days (Mon–Fri — the store's closed weekends).
         </p>
         {b1t1Recs.length === 0 ? (
-          <EmptyRow text={`Nothing expiring within ${b1t1AlertDays} days needs this right now.`} />
+          <EmptyRow text={`Nothing expiring within the next ${b1t1AlertDays} store days needs this right now.`} />
         ) : (
           <div className="space-y-2">
             {b1t1Recs.map((row) => (
@@ -407,8 +439,16 @@ export default function Dashboard() {
                 <div className="min-w-0">
                   <div className="truncate">{row.product?.name}</div>
                   <div className="text-xs text-[var(--color-ink-soft)]">
-                    {row.remaining_quantity} {row.product?.unit} left · cost ₱{Number(row.unit_cost ?? 0).toFixed(2)}/unit ·
-                    normally ₱{Number(row.product?.selling_price ?? 0).toFixed(2)}
+                    {row.remaining_quantity} {row.product?.unit} left · cost{' '}
+                    {row.noCostData ? (
+                      'unknown'
+                    ) : (
+                      <>
+                        ₱{row.unitCost.toFixed(2)}/unit
+                        {row.costIsEstimate && <span className="text-[var(--color-rust)]"> (est.)</span>}
+                      </>
+                    )}{' '}
+                    · normally ₱{Number(row.product?.selling_price ?? 0).toFixed(2)}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
@@ -417,9 +457,11 @@ export default function Dashboard() {
                   </StatusChip>
                   <span
                     title={
-                      row.cappedAtSellingPrice
-                        ? `Capped at the normal per-unit price — reaching the full ${b1t1RecoveryPct.min}–${b1t1RecoveryPct.max}% cost-recovery band would mean charging more than one unit's price, which would defeat the point of Buy 1 Take 1.`
-                        : `Targets ₱${row.targetLow.toFixed(2)}–₱${row.targetHigh.toFixed(2)} recovered on this pair's ₱${(2 * Number(row.unit_cost ?? 0)).toFixed(2)} cost.`
+                      row.noCostData
+                        ? 'No cost on record for this item at all (not even the current product cost) — this recommendation is ₱0.00 until a real cost is entered.'
+                        : row.cappedAtSellingPrice
+                        ? `Capped at the normal per-unit price — reaching the full ${b1t1RecoveryPct.min}–${b1t1RecoveryPct.max}% cost-recovery band would mean charging more than one unit's price, which would defeat the point of Buy 1 Take 1.${row.costIsEstimate ? ' Cost is estimated from the product\'s current cost — this batch\'s real cost was never recorded.' : ''}`
+                        : `Targets ₱${row.targetLow.toFixed(2)}–₱${row.targetHigh.toFixed(2)} recovered on this pair's ₱${(2 * row.unitCost).toFixed(2)} cost.${row.costIsEstimate ? ' Cost is estimated from the product\'s current cost — this batch\'s real cost was never recorded.' : ''}`
                     }
                     className="rounded-md bg-[var(--color-herb-soft)] px-2 py-1 text-xs font-medium text-[var(--color-herb)]"
                   >

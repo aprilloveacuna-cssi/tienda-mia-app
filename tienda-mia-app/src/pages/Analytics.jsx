@@ -24,6 +24,140 @@ function fmtDate(d) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+function toCsv(columns, rows) {
+  const header = columns.map((c) => `"${c.label.replace(/"/g, '""')}"`).join(',')
+  const lines = rows.map((r) =>
+    columns.map((c) => `"${String(c.csvValue ? c.csvValue(r) : c.sortValue ? c.sortValue(r) : r[c.key] ?? '').replace(/"/g, '""')}"`).join(',')
+  )
+  return [header, ...lines].join('\n')
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function isKitchenProduct(p) {
+  return p?.business_unit === 'KITCHEN' || p?.category === 'KITCHEN'
+}
+
+// Same qty/revenue/cost/ABC/movement math as the main analytics load below,
+// but scoped to just what Velocity & ABC needs and driven by an explicit
+// [fromDate, toDate] instead of the shared FORECAST_WINDOW_WEEKS window —
+// see the comment on velocityFrom/velocityTo in Analytics() for why. Runs
+// entirely client-side against already-fetched sale lines, so changing the
+// range is instant — no refetch needed.
+function computeVelocityRows(products, saleLines, marketExpenses, fromDate, toDate) {
+  const from = new Date(fromDate + 'T00:00:00')
+  const to = new Date(toDate + 'T23:59:59.999')
+  const rangeDays = Math.max(1, Math.round((to - from) / 86400000) + 1)
+
+  const productById = {}
+  for (const p of products) productById[p.id] = p
+
+  const inRange = saleLines.filter((l) => {
+    const d = l.sale?.sale_date ? new Date(l.sale.sale_date) : null
+    return d && d >= from && d <= to
+  })
+
+  const byProduct = {}
+  for (const l of inRange) {
+    byProduct[l.product_id] = byProduct[l.product_id] ?? { qty: 0, revenue: 0, cost: 0 }
+    byProduct[l.product_id].qty += Number(l.quantity)
+    byProduct[l.product_id].revenue += Number(l.quantity) * Number(l.unit_price)
+    byProduct[l.product_id].cost += Number(l.fifo_cost)
+  }
+
+  // Kitchen market-expense allocation — same approach as the main load, see
+  // the comment there for why Kitchen items can't use FIFO cost directly.
+  const kitchenRevenueByProductByPeriod = {}
+  const kitchenTotalRevenueByPeriod = {}
+  const kitchenUncoveredRevenueByProduct = {}
+  for (const l of inRange) {
+    const p = productById[l.product_id]
+    if (!isKitchenProduct(p)) continue
+    const day = l.sale?.sale_date ? String(l.sale.sale_date).slice(0, 10) : null
+    if (!day) continue
+    const lineRevenue = Number(l.quantity) * Number(l.unit_price)
+    const periodIdx = marketExpenses.findIndex((e) => day >= e.week_start && day <= e.week_end)
+    if (periodIdx === -1) {
+      kitchenUncoveredRevenueByProduct[l.product_id] = (kitchenUncoveredRevenueByProduct[l.product_id] ?? 0) + lineRevenue
+      continue
+    }
+    kitchenRevenueByProductByPeriod[periodIdx] = kitchenRevenueByProductByPeriod[periodIdx] ?? {}
+    kitchenRevenueByProductByPeriod[periodIdx][l.product_id] =
+      (kitchenRevenueByProductByPeriod[periodIdx][l.product_id] ?? 0) + lineRevenue
+    kitchenTotalRevenueByPeriod[periodIdx] = (kitchenTotalRevenueByPeriod[periodIdx] ?? 0) + lineRevenue
+  }
+  const kitchenAllocatedCostByProduct = {}
+  marketExpenses.forEach((exp, idx) => {
+    const totalRevenue = kitchenTotalRevenueByPeriod[idx] ?? 0
+    if (totalRevenue <= 0) return
+    const revenueByProduct = kitchenRevenueByProductByPeriod[idx] ?? {}
+    for (const [productId, rev] of Object.entries(revenueByProduct)) {
+      const share = rev / totalRevenue
+      kitchenAllocatedCostByProduct[productId] = (kitchenAllocatedCostByProduct[productId] ?? 0) + Number(exp.amount) * share
+    }
+  })
+
+  const rows = products.map((p) => {
+    const sold = byProduct[p.id]
+    const hasSales = !!sold && sold.qty > 0
+    const avgDailyDemand = hasSales ? sold.qty / rangeDays : 0
+    const revenue = sold?.revenue ?? 0
+    const isKitchen = isKitchenProduct(p)
+    const uncoveredRevenue = kitchenUncoveredRevenueByProduct[p.id] ?? 0
+    const fifoCost = isKitchen ? (kitchenAllocatedCostByProduct[p.id] ?? 0) : (sold?.cost ?? 0)
+    const costBasis = !isKitchen
+      ? 'fifo'
+      : uncoveredRevenue > 0 && kitchenAllocatedCostByProduct[p.id] > 0
+        ? 'market-partial'
+        : uncoveredRevenue > 0
+          ? 'market-missing'
+          : hasSales
+            ? 'market-allocated'
+            : 'fifo'
+    const grossProfit = revenue - fifoCost
+    const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : null
+
+    return {
+      ...p,
+      hasSales,
+      qtySold: sold?.qty ?? 0,
+      revenue,
+      fifoCost,
+      costBasis,
+      grossProfit,
+      marginPct,
+      avgDailyDemand,
+    }
+  })
+
+  const withSales = rows.filter((p) => p.hasSales).sort((a, b) => b.revenue - a.revenue)
+  const totalRevenue = withSales.reduce((s, p) => s + p.revenue, 0)
+  let cumulative = 0
+  const abcMap = {}
+  for (const p of withSales) {
+    cumulative += p.revenue
+    const pct = totalRevenue > 0 ? cumulative / totalRevenue : 0
+    abcMap[p.id] = pct <= 0.8 ? 'A' : pct <= 0.95 ? 'B' : 'C'
+  }
+  const avgDemandAcrossActive = withSales.length
+    ? withSales.reduce((s, p) => s + p.avgDailyDemand, 0) / withSales.length
+    : 0
+
+  return rows.map((p) => ({
+    ...p,
+    abcClass: abcMap[p.id] ?? null,
+    movement: !p.hasSales ? 'No Movement' : p.avgDailyDemand >= avgDemandAcrossActive ? 'Fast Moving' : 'Slow Moving',
+  }))
+}
+
 export default function Analytics() {
   const [tab, setTab] = useState('velocity')
   const [loading, setLoading] = useState(true)
@@ -31,6 +165,15 @@ export default function Analytics() {
   const [analytics, setAnalytics] = useState(null)
   const [selectedTypes, setSelectedTypes] = useState([])
   const [selectedCategories, setSelectedCategories] = useState([])
+
+  // Velocity & ABC gets its own date range, independent of the
+  // FORECAST_WINDOW_WEEKS-driven window every other tab uses — that window
+  // is a purchasing/forecasting assumption (tied to lead time & safety
+  // stock), not a reporting period, so it shouldn't be the only lens for
+  // "what sold well recently." Defaults to the same window on first load so
+  // nothing changes until you pick a different range yourself.
+  const [velocityFrom, setVelocityFrom] = useState('')
+  const [velocityTo, setVelocityTo] = useState('')
 
   useEffect(() => {
     async function load() {
@@ -72,10 +215,6 @@ export default function Analytics() {
 
         const productById = {}
         for (const p of productsRes.data ?? []) productById[p.id] = p
-
-        function isKitchenProduct(p) {
-          return p?.business_unit === 'KITCHEN' || p?.category === 'KITCHEN'
-        }
 
         const byProduct = {}
         for (const l of salesInWindow) {
@@ -216,6 +355,8 @@ export default function Analytics() {
 
         setAnalytics({
           products: withClassification,
+          allSaleLines: saleLinesRes.data ?? [],
+          marketExpenses,
           windowDays,
           leadTimeDays,
           safetyStockPct,
@@ -226,6 +367,8 @@ export default function Analytics() {
           productsWithSales: withSales.length,
           totalProducts: products.length,
         })
+        setVelocityFrom(windowStart.toISOString().slice(0, 10))
+        setVelocityTo(new Date().toISOString().slice(0, 10))
       } catch (err) {
         setErrorMsg(err.message ?? 'Could not load analytics.')
       }
@@ -250,12 +393,39 @@ export default function Analytics() {
       (selectedCategories.length === 0 || selectedCategories.includes(p.category || '(none)'))
   )
 
+  const velocityRows = velocityFrom && velocityTo
+    ? computeVelocityRows(products, analytics.allSaleLines, analytics.marketExpenses, velocityFrom, velocityTo).filter(
+        (p) =>
+          (selectedTypes.length === 0 || selectedTypes.includes(productTypeGroup(p))) &&
+          (selectedCategories.length === 0 || selectedCategories.includes(p.category || '(none)'))
+      )
+    : []
+
+  function exportVelocityCsv() {
+    const withSales = velocityRows.filter((p) => p.hasSales)
+    const columns = [
+      { key: 'sku', label: 'SKU' },
+      { key: 'name', label: 'Product' },
+      { key: 'category', label: 'Category', csvValue: (p) => p.category || '' },
+      { key: 'abcClass', label: 'ABC class' },
+      { key: 'qtySold', label: 'Qty sold' },
+      { key: 'unit', label: 'Unit' },
+      { key: 'revenue', label: 'Revenue', csvValue: (p) => p.revenue.toFixed(2) },
+      { key: 'grossProfit', label: 'Gross profit', csvValue: (p) => p.grossProfit.toFixed(2) },
+      { key: 'costBasis', label: 'Cost basis' },
+      { key: 'marginPct', label: 'Margin %', csvValue: (p) => (p.marginPct !== null ? p.marginPct.toFixed(1) : '') },
+      { key: 'avgDailyDemand', label: 'Avg / day', csvValue: (p) => p.avgDailyDemand.toFixed(2) },
+      { key: 'movement', label: 'Movement' },
+    ]
+    downloadFile(`velocity-abc_${velocityFrom}_to_${velocityTo}.csv`, toCsv(columns, withSales), 'text/csv')
+  }
+
   return (
     <div>
       <div className="mb-2">
         <h1 className="font-display text-2xl font-semibold">Analytics</h1>
         <p className="mt-0.5 text-sm text-[var(--color-ink-soft)]">
-          Based on the last {windowDays} days of sales ({productsWithSales} of {totalProducts} active products have sales history so far).
+          Inventory Health, EOQ & Reorder, Purchasing Recs, and Forecast are based on the last {windowDays} days of sales ({productsWithSales} of {totalProducts} active products have sales history so far). Velocity & ABC has its own date range, set within that tab.
         </p>
       </div>
 
@@ -295,7 +465,16 @@ export default function Analytics() {
         ))}
       </div>
 
-      {tab === 'velocity' && <VelocityTab products={filteredProducts} />}
+      {tab === 'velocity' && (
+        <VelocityTab
+          products={velocityRows}
+          dateFrom={velocityFrom}
+          dateTo={velocityTo}
+          onDateFromChange={setVelocityFrom}
+          onDateToChange={setVelocityTo}
+          onExport={exportVelocityCsv}
+        />
+      )}
       {tab === 'inventory' && <InventoryHealthTab products={filteredProducts} />}
       {tab === 'eoq' && <EoqTab products={filteredProducts} leadTimeDays={leadTimeDays} orderingCost={orderingCost} holdingCostRate={holdingCostRate} />}
       {tab === 'purchasing' && (
@@ -341,7 +520,7 @@ function Table({ columns, rows, emptyText, defaultSortKey, defaultSortDir = 'des
   )
 }
 
-function VelocityTab({ products }) {
+function VelocityTab({ products, dateFrom, dateTo, onDateFromChange, onDateToChange, onExport }) {
   const withSales = products.filter((p) => p.hasSales)
   const columns = [
     { key: 'name', label: 'Product', render: (p) => p.name },
@@ -390,12 +569,36 @@ function VelocityTab({ products }) {
   ]
   return (
     <div>
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+            From
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => onDateFromChange(e.target.value)}
+              className="input mt-0.5 block"
+            />
+          </label>
+          <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+            To
+            <input type="date" value={dateTo} onChange={(e) => onDateToChange(e.target.value)} className="input mt-0.5 block" />
+          </label>
+        </div>
+        <button
+          onClick={onExport}
+          disabled={withSales.length === 0}
+          className="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs font-medium text-[var(--color-ink)] disabled:opacity-40"
+        >
+          Export CSV
+        </button>
+      </div>
       <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
-        Class A = top 80% of revenue, B = next 15%, C = the long tail — the classic Pareto cut, computed from products with any sales in the window.
+        Class A = top 80% of revenue, B = next 15%, C = the long tail — the classic Pareto cut, computed fresh for whatever range is picked above, independent of the forecasting window used by the other tabs.
         Click any column to sort — Revenue or Qty sold for best-sellers, Gross profit or Margin % (ascending) for the least profitable.
         Kitchen items don't have a real purchase cost, so their profit is estimated by splitting your logged weekly market expense across dishes by revenue share — marked "(est.)" below.
       </p>
-      <Table columns={columns} rows={withSales} emptyText="No sales yet to rank." defaultSortKey="revenue" />
+      <Table columns={columns} rows={withSales} emptyText="No sales in this range yet to rank." defaultSortKey="revenue" />
     </div>
   )
 }
