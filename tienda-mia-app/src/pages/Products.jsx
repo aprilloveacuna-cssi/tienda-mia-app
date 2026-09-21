@@ -136,7 +136,12 @@ export default function Products() {
   async function loadProducts() {
     setLoading(true)
     setErrorMsg('')
-    const { data, error } = await fetchAllRows('products', '*', 'created_at', { ascending: false })
+    const { data, error } = await fetchAllRows(
+      'products',
+      '*, inventory_cache(current_stock)',
+      'created_at',
+      { ascending: false }
+    )
 
     if (error) {
       setErrorMsg(
@@ -147,7 +152,13 @@ export default function Products() {
     } else {
       // Raw materials (recipe ingredients) aren't sold on their own — they get
       // their own list in Kitchen instead of cluttering this one.
-      setProducts((data ?? []).filter((p) => p.product_type !== 'RAW MATERIAL'))
+      const withStock = (data ?? [])
+        .filter((p) => p.product_type !== 'RAW MATERIAL')
+        .map((p) => {
+          const cache = Array.isArray(p.inventory_cache) ? p.inventory_cache[0] : p.inventory_cache
+          return { ...p, currentStock: Number(cache?.current_stock ?? 0) }
+        })
+      setProducts(withStock)
     }
     setLoading(false)
   }
@@ -190,10 +201,19 @@ export default function Products() {
   }, [])
 
   const [pairingFilter, setPairingFilter] = useState('all') // 'all' | 'needsPairing'
+  // Discontinuing a SKU vs. it just being temporarily out of stock are very
+  // different things, so this is a manual tab, not something derived
+  // automatically from currentStock — a product that's briefly at 0 while
+  // waiting on a reorder shouldn't get treated as discontinued. The Stock
+  // column below is there so it's easy to spot zero-stock candidates and
+  // archive them yourself, on purpose.
+  const [statusTab, setStatusTab] = useState('active') // 'active' | 'archived'
+  const activeCount = useMemo(() => products.filter((p) => p.status === 'active').length, [products])
+  const archivedCount = useMemo(() => products.filter((p) => p.status !== 'active').length, [products])
 
   const filtered = useMemo(() => {
     const q = normalizeSearchText(search)
-    let rows = products
+    let rows = products.filter((p) => (statusTab === 'active' ? p.status === 'active' : p.status !== 'active'))
     if (q) {
       rows = rows.filter((p) => {
         const extraMatch = (extraBarcodesByProduct[p.id] ?? []).some((b) => normalizeSearchText(b).includes(q))
@@ -209,11 +229,12 @@ export default function Products() {
       rows = rows.filter((p) => pairingStatus(p, products) === false)
     }
     return rows
-  }, [products, search, pairingFilter, extraBarcodesByProduct])
+  }, [products, search, pairingFilter, statusTab, extraBarcodesByProduct])
 
   const { sortKey, sortDir, toggleSort } = useSort('name')
   function sortAccessor(row, key) {
     if (key === 'price') return Number(row.selling_price ?? 0)
+    if (key === 'stock') return Number(row.currentStock ?? 0)
     if (key === 'paired') {
       const status = pairingStatus(row, products)
       return status === null ? -1 : status ? 1 : 0
@@ -561,6 +582,29 @@ export default function Products() {
         />
       </div>
 
+      <div className="mb-3 flex gap-1 border-b border-[var(--color-line)]">
+        {[
+          ['active', `Active (${activeCount})`],
+          ['archived', `Inactive (${archivedCount})`],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() => setStatusTab(value)}
+            className={`px-3 py-2 text-sm font-medium ${
+              statusTab === value ? 'border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]' : 'text-[var(--color-ink-soft)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {statusTab === 'active' && (
+        <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
+          Sort by Stock to find zero-stock candidates to discontinue — status only changes when you archive a product yourself, never automatically, since a product at 0 stock might just be waiting on a reorder rather than actually discontinued.
+        </p>
+      )}
+
       <div className="mb-4 flex gap-1">
         {[
           ['all', 'All'],
@@ -596,6 +640,7 @@ export default function Products() {
               <SortableTh label="Category" sortKey="category" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Paired" sortKey="paired" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Unit" sortKey="unit" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
+              <SortableTh label="Stock" sortKey="stock" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Price" sortKey="price" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <SortableTh label="Status" sortKey="status" activeKey={sortKey} activeDir={sortDir} onSort={toggleSort} />
               <th className="px-4 py-3" />
@@ -604,7 +649,7 @@ export default function Products() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={10} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
                   Loading products…
                 </td>
               </tr>
@@ -612,10 +657,12 @@ export default function Products() {
 
             {!loading && sorted.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={10} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   {products.length === 0
                     ? 'No products yet — add your first one to start the master list.'
-                    : 'No products match that search.'}
+                    : statusTab === 'archived'
+                      ? 'No inactive products — nothing archived yet.'
+                      : 'No products match that search.'}
                 </td>
               </tr>
             )}
@@ -642,6 +689,11 @@ export default function Products() {
                   })()}
                 </td>
                 <td className="px-4 py-3 text-[var(--color-ink-soft)]">{p.unit || '—'}</td>
+                <td className="px-4 py-3">
+                  <span className={p.currentStock <= 0 ? 'font-medium text-[var(--color-rust)]' : ''}>
+                    {p.currentStock} {p.unit || ''}
+                  </span>
+                </td>
                 <td className="px-4 py-3">
                   {p.selling_price ? Number(p.selling_price).toFixed(2) : '—'}
                 </td>

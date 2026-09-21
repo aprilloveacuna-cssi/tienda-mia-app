@@ -165,7 +165,7 @@ export default function Inventory() {
     setErrorMsg('')
     const { data, error } = await fetchAllRows(
       'inventory_cache',
-      '*, product:products(name, sku, barcode, unit, reorder_point, category, business_unit, product_type)',
+      '*, product:products(name, sku, barcode, unit, reorder_point, category, business_unit, product_type, status)',
       null,
       { tiebreaker: 'product_id' }
     )
@@ -177,7 +177,11 @@ export default function Inventory() {
     }
 
     const sorted = (data ?? [])
-      .filter((r) => r.product) // guard against orphaned rows
+      // Guard against orphaned rows, and — since discontinuing a product is
+      // a manual decision made on the Products page, not something this
+      // page infers from stock — once something's archived there, it drops
+      // out of Inventory too.
+      .filter((r) => r.product && r.product.status === 'active')
       .sort((a, b) => a.product.name.localeCompare(b.product.name))
     setRows(sorted)
     setLoading(false)
