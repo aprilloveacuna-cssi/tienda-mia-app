@@ -57,6 +57,12 @@ const FIELD_META = {
     note: 'Runs whenever Dashboard loads. Only trips after a full, unbroken stretch at 0 (or negative) stock — a brief out-of-stock while waiting on a reorder won\'t trigger it. Kitchen and unlimited-stock items are never auto-archived.',
     group: 'Purchasing & Forecasting',
   },
+  INVENTORY_TRACKING_START_DATE: {
+    label: 'Inventory tracking start date',
+    type: 'date',
+    note: 'The earliest date real batch/stock data can be trusted from. A sale dated before this (backfilling an old month, say) still records revenue for Reports and Analytics, but skips FIFO consumption entirely and posts no inventory movement — no batches touched, no effect on current stock, Negative Stock, or auto-archiving. Cost on those lines is approximated from today\'s cost, since the real historical cost isn\'t available.',
+    group: 'Purchasing & Forecasting',
+  },
   SENIOR_PWD_DISCOUNT_PCT: {
     label: 'Senior / PWD discount',
     type: 'number',

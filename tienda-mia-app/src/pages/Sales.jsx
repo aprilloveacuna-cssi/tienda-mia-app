@@ -88,6 +88,15 @@ export default function Sales() {
   const [saving, setSaving] = useState(false)
   const [discountPct, setDiscountPct] = useState(20)
   const [vatRatePct, setVatRatePct] = useState(12)
+  // Real batch/inventory tracking only goes back this far — a sale dated
+  // before it (backfilling an old month's report, say) still gets recorded
+  // normally for revenue/Analytics/Reports, but skips FIFO consumption and
+  // posts no inventory_ledger rows at all, since there's no real stock data
+  // from back then to draw from or affect.
+  const [inventoryTrackingStartDate, setInventoryTrackingStartDate] = useState('')
+  const isBackfillSale = Boolean(
+    headerForm.sale_date && inventoryTrackingStartDate && headerForm.sale_date < inventoryTrackingStartDate
+  )
 
   // Manual add-line price mismatch resolution
   const [priceMismatch, setPriceMismatch] = useState(null) // { recordedPrice, givenPrice }
@@ -138,6 +147,11 @@ export default function Sales() {
     if (data) setVatRatePct(Number(data.value))
   }
 
+  async function loadInventoryTrackingStartDate() {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'INVENTORY_TRACKING_START_DATE').maybeSingle()
+    if (data) setInventoryTrackingStartDate(data.value)
+  }
+
   async function loadExtraBarcodes() {
     const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
     if (error) {
@@ -161,6 +175,7 @@ export default function Sales() {
     loadProducts()
     loadDiscountSetting()
     loadVatRateSetting()
+    loadInventoryTrackingStartDate()
     loadExtraBarcodes()
   }, [])
 
@@ -401,7 +416,18 @@ export default function Sales() {
   // 2D array (row[0] = header, matched against SALE_LINE_HEADER_ALIASES) and
   // runs the exact same matching, price-mismatch, and stock-check pipeline
   // either way. Only how `rows` gets built differs between the two formats.
-  async function processSalesImportRows(rows) {
+  async function processSalesImportRows(rows, saleDateOverride) {
+    // Accepts an explicit date because startDateGroupImport calls setHeaderForm
+    // and this in the same tick — React state wouldn't reflect the new date
+    // yet, so isBackfillSale (component-level, from headerForm) would still
+    // reflect the previous date group. Every backfill check below uses this
+    // local value instead, never the outer isBackfillSale, so each date group
+    // in a multi-date import is judged correctly on its own date.
+    const effectiveSaleDate = saleDateOverride ?? headerForm.sale_date
+    const backfillForThisImport = Boolean(
+      effectiveSaleDate && inventoryTrackingStartDate && effectiveSaleDate < inventoryTrackingStartDate
+    )
+
     if (rows.length < 2) {
       setErrorMsg('That file has no data rows.')
       setImportParsing(false)
@@ -492,18 +518,21 @@ export default function Sales() {
     // One rule, applied here per distinct group so a Meal+Silog sharing
     // one Only only gets topped up once for their combined need, not
     // once per row. See ensureKitchenStock for what the rule actually is.
-    const kitchenGroups = new Map()
-    for (const pr of parsedRows) {
-      const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
-      if (!isKitchen || pr.product.unlimited_stock) continue
-      const key = [...resolveStockGroupIds(pr.product)].sort().join(',')
-      if (!kitchenGroups.has(key)) {
-        kitchenGroups.set(key, { neededQty: 0, product: pr.product })
+    // Skipped entirely for a backfilled date — see proceedAddLine for why.
+    if (!backfillForThisImport) {
+      const kitchenGroups = new Map()
+      for (const pr of parsedRows) {
+        const isKitchen = pr.product.business_unit === 'KITCHEN' || pr.product.category === 'KITCHEN'
+        if (!isKitchen || pr.product.unlimited_stock) continue
+        const key = [...resolveStockGroupIds(pr.product)].sort().join(',')
+        if (!kitchenGroups.has(key)) {
+          kitchenGroups.set(key, { neededQty: 0, product: pr.product })
+        }
+        kitchenGroups.get(key).neededQty += pr.qty
       }
-      kitchenGroups.get(key).neededQty += pr.qty
-    }
-    for (const g of kitchenGroups.values()) {
-      await ensureKitchenStock(g.product, g.neededQty, headerForm.sale_date)
+      for (const g of kitchenGroups.values()) {
+        await ensureKitchenStock(g.product, g.neededQty, effectiveSaleDate)
+      }
     }
 
     // ---------- Pass 3: normal per-row FIFO stock check ----------
@@ -515,14 +544,26 @@ export default function Sales() {
 
     for (const pr of parsedRows) {
       try {
-        const stockGroupIds = resolveStockGroupIds(pr.product)
-        const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
         const lineTotal = pr.qty * pr.unitPrice
-        const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-        const openQty = pr.qty - consumedQty
-        const fifoCost =
-          consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(pr.product.current_cost ?? 0)
-        const isOversold = !satisfied && !pr.product.unlimited_stock
+        let consumption = []
+        let isOversold = false
+        let oversoldNote = null
+        let fifoCost
+
+        if (backfillForThisImport) {
+          fifoCost = pr.qty * Number(pr.product.current_cost ?? 0)
+        } else {
+          const stockGroupIds = resolveStockGroupIds(pr.product)
+          const result = await computeFifoConsumption(stockGroupIds, pr.qty, accumulator)
+          consumption = result.consumption
+          const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+          const openQty = pr.qty - consumedQty
+          fifoCost =
+            consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(pr.product.current_cost ?? 0)
+          isOversold = !result.satisfied && !pr.product.unlimited_stock
+          oversoldNote = isOversold ? `only ${result.totalAvailable} ${pr.product.unit} were in stock — sold anyway, now negative` : null
+        }
+
         const newLine = {
           tempId: crypto.randomUUID(),
           product_id: pr.product.id,
@@ -535,9 +576,9 @@ export default function Sales() {
           fifo_cost: fifoCost,
           gross_profit: lineTotal - fifoCost,
           consumption,
-          openQty,
+          openQty: pr.qty - consumption.reduce((sum, c) => sum + c.qty, 0),
           isOversold,
-          oversoldNote: isOversold ? `only ${totalAvailable} ${pr.product.unit} were in stock — sold anyway, now negative` : null,
+          oversoldNote,
         }
         accumulator.push(newLine)
         valid.push(newLine)
@@ -603,7 +644,7 @@ export default function Sales() {
       ['Barcode', 'Quantity', 'Total Price'],
       ...group.rows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
     ]
-    await processSalesImportRows(rows)
+    await processSalesImportRows(rows, group.date)
   }
 
   async function handlePosReportFileChange(e) {
@@ -748,28 +789,43 @@ export default function Sales() {
   }
 
   async function proceedAddLine(product, qty, unitPrice) {
-    await ensureKitchenStock(product, qty, headerForm.sale_date)
-    const stockGroupIds = resolveStockGroupIds(product)
-    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, qty)
+    let consumption = []
+    let isOversold = false
+    let fifoCost
+    let openQty = 0
+
+    if (isBackfillSale) {
+      // No FIFO consumption, no batches touched, no ledger rows at
+      // completeSale (it builds ledgerRows from `consumption`, which is
+      // empty here) — see the note on inventoryTrackingStartDate above.
+      // Cost is necessarily an approximation (today's cost, not whatever it
+      // really was back then), same honesty tradeoff this app already makes
+      // for other cost gaps it can't recover.
+      fifoCost = qty * Number(product.current_cost ?? 0)
+    } else {
+      await ensureKitchenStock(product, qty, headerForm.sale_date)
+      const stockGroupIds = resolveStockGroupIds(product)
+      const result = await computeFifoConsumption(stockGroupIds, qty)
+      consumption = result.consumption
+      const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+      openQty = qty - consumedQty
+      fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
+
+      // Sales never block on insufficient stock. Items flagged "unlimited
+      // stock" already treat the shortfall as an untracked open quantity —
+      // for everything else, the shortfall becomes real, visible negative
+      // stock (a batch-less ledger entry written at completeSale), so it
+      // surfaces in the Negative Stock tab instead of silently vanishing or
+      // stopping the sale.
+      isOversold = !result.satisfied && !product.unlimited_stock
+      if (isOversold) {
+        setLineWarning(
+          `${product.name}: only ${result.totalAvailable} ${product.unit} available — sold anyway. ${openQty} ${product.unit} will show as negative stock until corrected.`
+        )
+      }
+    }
 
     const lineTotal = qty * unitPrice
-    const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-    const openQty = qty - consumedQty
-    const fifoCost =
-      consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
-
-    // Sales never block on insufficient stock. Items flagged "unlimited
-    // stock" already treat the shortfall as an untracked open quantity —
-    // for everything else, the shortfall becomes real, visible negative
-    // stock (a batch-less ledger entry written at completeSale), so it
-    // surfaces in the Negative Stock tab instead of silently vanishing or
-    // stopping the sale.
-    const isOversold = !satisfied && !product.unlimited_stock
-    if (isOversold) {
-      setLineWarning(
-        `${product.name}: only ${totalAvailable} ${product.unit} available — sold anyway. ${openQty} ${product.unit} will show as negative stock until corrected.`
-      )
-    }
 
     setPendingLines([
       ...pendingLines,
@@ -800,25 +856,35 @@ export default function Sales() {
   // unit_price) comes out to exactly what was collected — every existing
   // rollup that sums line_total or quantity keeps working untouched.
   async function proceedAddB1T1Line(product, qty, b1t1Price) {
-    await ensureKitchenStock(product, qty, headerForm.sale_date)
-    const stockGroupIds = resolveStockGroupIds(product)
-    const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, qty)
+    let consumption = []
+    let isOversold = false
+    let openQty = 0
+    let fifoCost
 
     const sets = qty / 2
     const chargedTotal = sets * b1t1Price
     const fullValue = qty * Number(product.selling_price)
     const effectiveUnitPrice = chargedTotal / qty
 
-    const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-    const openQty = qty - consumedQty
-    const fifoCost =
-      consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
+    if (isBackfillSale) {
+      // See the note on inventoryTrackingStartDate / proceedAddLine — same
+      // reasoning applies to a backfilled B1T1 line.
+      fifoCost = qty * Number(product.current_cost ?? 0)
+    } else {
+      await ensureKitchenStock(product, qty, headerForm.sale_date)
+      const stockGroupIds = resolveStockGroupIds(product)
+      const result = await computeFifoConsumption(stockGroupIds, qty)
+      consumption = result.consumption
+      const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+      openQty = qty - consumedQty
+      fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
 
-    const isOversold = !satisfied && !product.unlimited_stock
-    if (isOversold) {
-      setLineWarning(
-        `${product.name}: only ${totalAvailable} ${product.unit} available — sold anyway. ${openQty} ${product.unit} will show as negative stock until corrected.`
-      )
+      isOversold = !result.satisfied && !product.unlimited_stock
+      if (isOversold) {
+        setLineWarning(
+          `${product.name}: only ${result.totalAvailable} ${product.unit} available — sold anyway. ${openQty} ${product.unit} will show as negative stock until corrected.`
+        )
+      }
     }
 
     setPendingLines([
@@ -1320,6 +1386,11 @@ export default function Sales() {
                 Sale {dateImportQueueTotal - dateImportQueue.length} of {dateImportQueueTotal} from this import — completing this one will automatically open the next date.
               </div>
             )}
+            {isBackfillSale && (
+              <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+                Backfilled sale — before {inventoryTrackingStartDate}, so this records revenue for Reports and Analytics only. No stock, batches, or the Negative Stock tab are affected, and cost is approximated from today's cost since real historical cost isn't available.
+              </div>
+            )}
             <div className="mb-4 grid grid-cols-2 gap-3">
               <Field label="Sale date" required>
                 <input
@@ -1806,6 +1877,11 @@ export default function Sales() {
         title="Import sale lines"
         onClose={() => setImportPanelOpen(false)}
       >
+        {isBackfillSale && (
+          <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+            Backfilled sale — before {inventoryTrackingStartDate}, so these lines record revenue for Reports and Analytics only. No stock, batches, or the Negative Stock tab are affected.
+          </div>
+        )}
         {posReportValidationWarning && (
           <div className="mb-4 space-y-2 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
             {posReportValidationWarning.map((w, i) => (
