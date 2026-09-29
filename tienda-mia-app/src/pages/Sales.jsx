@@ -450,10 +450,10 @@ export default function Sales() {
         skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
         continue
       }
-      if (product.status !== 'active') {
-        skipped.push({ rowNum, reason: `${product.name} (${product.barcode}) exists but is archived — restore it in Products first` })
-        continue
-      }
+      // Archived products are no longer skipped here — a real sale for one
+      // is exactly the "movement" that migration 0035's trigger reactivates
+      // a product on, so this just lets the row through like any other and
+      // the reactivation happens naturally once the sale posts.
       const qty = Number(obj.quantity)
       if (!qty || qty <= 0) {
         skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
