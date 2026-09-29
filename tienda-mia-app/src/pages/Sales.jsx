@@ -473,7 +473,13 @@ export default function Sales() {
           : null
 
       if (!product) {
-        skipped.push({ rowNum, reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU' })
+        skipped.push({
+          rowNum,
+          reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU',
+          qty: obj.quantity || null,
+          price: obj.unit_price || obj.total_price || null,
+          priceLabel: obj.unit_price ? 'unit price' : obj.total_price ? 'total price' : null,
+        })
         continue
       }
       // Archived products are no longer skipped here — a real sale for one
@@ -482,7 +488,15 @@ export default function Sales() {
       // the reactivation happens naturally once the sale posts.
       const qty = Number(obj.quantity)
       if (!qty || qty <= 0) {
-        skipped.push({ rowNum, reason: 'Missing or invalid quantity' })
+        skipped.push({
+          rowNum,
+          reason: 'Missing or invalid quantity',
+          productName: product.name,
+          barcode: product.barcode,
+          qty: obj.quantity || null,
+          price: obj.unit_price || obj.total_price || null,
+          priceLabel: obj.unit_price ? 'unit price' : obj.total_price ? 'total price' : null,
+        })
         continue
       }
 
@@ -583,7 +597,15 @@ export default function Sales() {
         accumulator.push(newLine)
         valid.push(newLine)
       } catch {
-        skipped.push({ rowNum: pr.rowNum, reason: 'Could not check stock for this row' })
+        skipped.push({
+          rowNum: pr.rowNum,
+          reason: 'Could not check stock for this row',
+          productName: pr.product.name,
+          barcode: pr.product.barcode,
+          qty: pr.qty,
+          price: pr.unitPrice,
+          priceLabel: 'unit price',
+        })
       }
     }
 
@@ -735,7 +757,18 @@ export default function Sales() {
         },
       ])
     } catch {
-      setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
+      setImportPreviewSkipped([
+        ...importPreviewSkipped,
+        {
+          rowNum: mismatch.rowNum,
+          reason: 'Could not check stock for this row',
+          productName: product.name,
+          barcode: product.barcode,
+          qty: mismatch.qty,
+          price: unitPrice,
+          priceLabel: 'unit price',
+        },
+      ])
     }
     setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
   }
@@ -759,7 +792,18 @@ export default function Sales() {
       const newLines = await buildDiscountSplitLines(mismatch.product, mismatch.qty, discountedQty, reservationSource)
       setImportPreviewValid([...importPreviewValid, ...newLines])
     } catch {
-      setImportPreviewSkipped([...importPreviewSkipped, { rowNum: mismatch.rowNum, reason: 'Could not check stock for this row' }])
+      setImportPreviewSkipped([
+        ...importPreviewSkipped,
+        {
+          rowNum: mismatch.rowNum,
+          reason: 'Could not check stock for this row',
+          productName: mismatch.product.name,
+          barcode: mismatch.product.barcode,
+          qty: mismatch.qty,
+          price: mismatch.givenUnitPrice,
+          priceLabel: 'unit price',
+        },
+      ])
     }
     setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
   }
@@ -1912,11 +1956,22 @@ export default function Sales() {
           <div className="mb-4">
             <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
             <div className="max-h-48 space-y-1 overflow-y-auto">
-              {importPreviewSkipped.map((s, i) => (
-                <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
-                  Row {s.rowNum}: {s.reason}
-                </div>
-              ))}
+              {importPreviewSkipped.map((s, i) => {
+                const details = [
+                  s.productName,
+                  s.barcode,
+                  s.qty ? `qty ${s.qty}` : null,
+                  s.price ? `${s.priceLabel ?? 'price'} ₱${Number(s.price).toFixed(2)}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' — ')
+                return (
+                  <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
+                    Row {s.rowNum}: {s.reason}
+                    {details && <span className="block text-[var(--color-ink-soft)]">{details}</span>}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}
