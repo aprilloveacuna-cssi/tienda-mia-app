@@ -320,7 +320,7 @@ export default function Kitchen() {
     // and avoids N separate round trips as the expense log grows.
     const { data: lines, error: linesErr } = await fetchAllRows(
       'sale_lines',
-      'quantity, unit_price, is_discounted, discount_amount, sale:sales(sale_date, status), product:products(business_unit, category)'
+      'quantity, unit_price, is_discounted, discount_amount, vat_exempt_amount, sale:sales(sale_date, status), product:products(business_unit, category)'
     )
     if (linesErr) {
       setMarketExpenseError(linesErr.message)
@@ -337,6 +337,8 @@ export default function Kitchen() {
       let revenue = 0
       let vat = 0
       let discounts = 0
+      let discountsOther = 0
+      let vatExempt = 0
       for (const l of kitchenLines) {
         // sale_date is a timestamptz, so it comes back with a time/timezone
         // suffix (e.g. "2026-09-04T00:00:00+00:00"). Comparing that directly
@@ -354,10 +356,18 @@ export default function Kitchen() {
           // at the VAT-exclusive price, so there's no VAT to back out of
           // those — only regular lines carry embedded VAT.
           vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
+          // Since migration 0037, discount_amount and vat_exempt_amount are
+          // two separate figures for a Senior/PWD line — tracked separately
+          // here too, same as Daily POS Summary.
           discounts += Number(l.discount_amount ?? 0)
+          vatExempt += Number(l.vat_exempt_amount ?? 0)
+          // Buy 1 Take 1 lines aren't VAT-exempt but do carry a real
+          // discount_amount (the giveaway) — needed separately for Net
+          // Sales below, same reasoning as Daily POS Summary.
+          discountsOther += l.is_discounted ? 0 : Number(l.discount_amount ?? 0)
         }
       }
-      statsByExpense[exp.id] = { revenue, vat, discounts }
+      statsByExpense[exp.id] = { revenue, vat, discounts, vatExempt, discountsOther }
     }
     setKitchenRevenueByExpense(statsByExpense)
   }
@@ -1839,6 +1849,8 @@ export default function Kitchen() {
                   <th className="px-4 py-3">Kitchen Sales Revenue</th>
                   <th className="px-4 py-3">VAT</th>
                   <th className="px-4 py-3">Discounts</th>
+                  <th className="px-4 py-3">VAT Exempt</th>
+                  <th className="px-4 py-3">Net Sales</th>
                   <th className="px-4 py-3">Profit</th>
                   <th className="px-4 py-3">Notes</th>
                   <th className="px-4 py-3" />
@@ -1846,17 +1858,25 @@ export default function Kitchen() {
               </thead>
               <tbody>
                 {marketExpenses.length === 0 && (
-                  <tr><td colSpan={9} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                  <tr><td colSpan={11} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                     No weekly expenses logged yet.
                   </td></tr>
                 )}
                 {marketExpenses.map((exp) => {
-                  const stats = kitchenRevenueByExpense[exp.id] ?? { revenue: 0, vat: 0, discounts: 0 }
+                  const stats = kitchenRevenueByExpense[exp.id] ?? { revenue: 0, vat: 0, discounts: 0, vatExempt: 0, discountsOther: 0 }
                   // Gross Sales (what would've been charged at full price)
-                  // is revenue + discounts, added back — revenue is already
-                  // the actual charged amount, so discounts doesn't sit
-                  // inside it waiting to be subtracted a second time.
-                  const grossSales = stats.revenue + stats.discounts
+                  // is revenue with Discounts and VAT Exempt both added
+                  // back — revenue is already the actual charged amount, so
+                  // neither sits inside it waiting to be subtracted again.
+                  const grossSales = stats.revenue + stats.discounts + stats.vatExempt
+                  // Net Sales: Senior/PWD lines use Gross Sales − VAT Exempt
+                  // − Discount (which works out to exactly what was
+                  // collected, since VAT is already 0 on those); regular
+                  // and Buy 1 Take 1 lines use Gross Sales − VAT. Summed
+                  // together this reduces to revenue − VAT + discountsOther
+                  // (the Buy 1 Take 1 giveaway) — see Reports.jsx for the
+                  // full derivation.
+                  const netSales = stats.revenue - stats.vat + stats.discountsOther
                   // Same rule as Daily POS Summary: revenue is already the
                   // actual charged amount (post-discount), so discounts
                   // isn't subtracted again here — it's shown for visibility,
@@ -1871,6 +1891,8 @@ export default function Kitchen() {
                       <td className="px-4 py-3">{stats.revenue.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.vat.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.discounts.toFixed(2)}</td>
+                      <td className="px-4 py-3">{stats.vatExempt.toFixed(2)}</td>
+                      <td className="px-4 py-3">{netSales.toFixed(2)}</td>
                       <td className="px-4 py-3">
                         <StatusChip tone={profit >= 0 ? 'ok' : 'critical'}>{profit.toFixed(2)}</StatusChip>
                       </td>

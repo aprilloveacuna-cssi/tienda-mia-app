@@ -959,7 +959,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
       try {
         const { data, error } = await fetchAllRows(
           'sale_lines',
-          'sale_id, quantity, unit_price, fifo_cost, is_discounted, discount_amount, sale:sales(sale_date, pos_terminal, status), product:products(business_unit, category)'
+          'sale_id, quantity, unit_price, fifo_cost, is_discounted, discount_amount, vat_exempt_amount, sale:sales(sale_date, pos_terminal, status), product:products(business_unit, category)'
         )
         if (error) throw error
         const { data: marketExpenses, error: expError } = await fetchAllRows('kitchen_market_expenses', 'week_start, week_end, amount')
@@ -997,7 +997,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           if (!day || !withinRange(day, dateFrom, dateTo)) continue
           const terminal = l.sale?.pos_terminal?.trim() || 'Unspecified'
           const key = `${terminal}|${day}`
-          byGroup[key] = byGroup[key] ?? { terminal, date: day, qty: 0, sales: 0, vat: 0, discounts: 0, cost: 0 }
+          byGroup[key] = byGroup[key] ?? { terminal, date: day, qty: 0, sales: 0, vat: 0, discounts: 0, discountsOther: 0, vatExempt: 0, cost: 0 }
           const lineTotal = Number(l.quantity) * Number(l.unit_price)
           byGroup[key].qty += Number(l.quantity)
           byGroup[key].sales += lineTotal
@@ -1006,7 +1006,17 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           // of those. Regular lines charge the VAT-inclusive price, so VAT is
           // the portion above the VAT-exclusive amount.
           byGroup[key].vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
+          // Since migration 0037, discount_amount and vat_exempt_amount are
+          // two separate figures for a Senior/PWD line — tracked separately
+          // here too, rather than folded back into one combined number.
           byGroup[key].discounts += Number(l.discount_amount ?? 0)
+          byGroup[key].vatExempt += Number(l.vat_exempt_amount ?? 0)
+          // Buy 1 Take 1 lines aren't VAT-exempt (is_discounted stays false
+          // for those — see migration 0032) but do carry a real discount_amount
+          // (the giveaway). Needed separately from the Senior/PWD portion for
+          // Net Sales below, since that giveaway isn't backed out by VAT
+          // Exempt the way a Senior/PWD reduction is.
+          byGroup[key].discountsOther += l.is_discounted ? 0 : Number(l.discount_amount ?? 0)
 
           if (isKitchen) {
             const periodIdx = (marketExpenses ?? []).findIndex((e) => day >= e.week_start && day <= e.week_end)
@@ -1019,15 +1029,33 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
 
         // "Sales" is already what was actually charged — for a discounted
         // line, that's the discounted price, not the regular one.
-        // "Discounts" is the separate, informational amount that was given
-        // up — it doesn't sit inside Sales waiting to be subtracted again.
-        // Gross Sales (what would've been charged at full price) is Sales +
-        // Discounts, added back — never Sales minus Discounts.
-        const allRows = Object.values(byGroup).map((g) => ({
-          ...g,
-          grossSales: g.sales + g.discounts,
-          profit: g.sales - g.vat - g.cost,
-        }))
+        // "Discounts" and "VAT Exempt" are separate, informational amounts
+        // given up — neither sits inside Sales waiting to be subtracted
+        // again. Gross Sales (what would've been charged at full price) is
+        // Sales with both added back — never Sales minus either one.
+        //
+        // Net Sales uses two different formulas depending on the line, per
+        // how this report is meant to work:
+        //   Senior/PWD (is_discounted): Gross Sales − VAT Exempt − Discount
+        //     — which works out to exactly what was collected (Sales),
+        //     since VAT is already 0 on these lines.
+        //   Everything else (regular sales, and Buy 1 Take 1 — not
+        //     VAT-exempt, but does carry a real discount): Gross Sales − VAT.
+        // Summed across a mix of both, this reduces to:
+        //   Sales − VAT + discountsOther
+        // (VAT is already 0 on Senior/PWD lines, so subtracting the group's
+        // total VAT only ever affects non-exempt lines; discountsOther adds
+        // back just the non-exempt discount — Buy 1 Take 1's giveaway —
+        // since that one isn't already accounted for by VAT Exempt.)
+        const allRows = Object.values(byGroup).map((g) => {
+          const grossSales = g.sales + g.discounts + g.vatExempt
+          return {
+            ...g,
+            grossSales,
+            netSales: g.sales - g.vat + g.discountsOther,
+            profit: g.sales - g.vat - g.cost,
+          }
+        })
 
         // One section per distinct terminal value actually found. A sale
         // imported with both terminals' files combined into one record ends
@@ -1057,10 +1085,12 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
               sales: acc.sales + r.sales,
               vat: acc.vat + r.vat,
               discounts: acc.discounts + r.discounts,
+              vatExempt: acc.vatExempt + r.vatExempt,
+              netSales: acc.netSales + r.netSales,
               cost: acc.cost + r.cost,
               profit: acc.profit + r.profit,
             }),
-            { qty: 0, grossSales: 0, sales: 0, vat: 0, discounts: 0, cost: 0, profit: 0 }
+            { qty: 0, grossSales: 0, sales: 0, vat: 0, discounts: 0, vatExempt: 0, netSales: 0, cost: 0, profit: 0 }
           )
           return { terminal, rows, totals }
         })
@@ -1082,11 +1112,11 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     const sections = []
     for (const g of terminalGroups) {
       sections.push([`POS ${g.terminal}`])
-      sections.push(['Date', 'Qty Sold', 'Gross Sales', 'Sales', 'VAT', 'Discounts', 'Cost', 'Profit'])
+      sections.push(['Date', 'Qty Sold', 'Gross Sales', 'Sales', 'VAT', 'Discounts', 'VAT Exempt', 'Net Sales', 'Cost', 'Profit'])
       for (const r of g.rows) {
-        sections.push([r.date, r.qty, r.grossSales.toFixed(2), r.sales.toFixed(2), r.vat.toFixed(2), r.discounts.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2)])
+        sections.push([r.date, r.qty, r.grossSales.toFixed(2), r.sales.toFixed(2), r.vat.toFixed(2), r.discounts.toFixed(2), r.vatExempt.toFixed(2), r.netSales.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2)])
       }
-      sections.push(['Total', g.totals.qty, g.totals.grossSales.toFixed(2), g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.discounts.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2)])
+      sections.push(['Total', g.totals.qty, g.totals.grossSales.toFixed(2), g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.discounts.toFixed(2), g.totals.vatExempt.toFixed(2), g.totals.netSales.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2)])
       sections.push([])
     }
     const csv = sections.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -1170,6 +1200,8 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                       <th className="px-4 py-3">Sales</th>
                       <th className="px-4 py-3">VAT</th>
                       <th className="px-4 py-3">Discounts</th>
+                      <th className="px-4 py-3">VAT Exempt</th>
+                      <th className="px-4 py-3">Net Sales</th>
                       <th className="px-4 py-3">Cost</th>
                       <th className="px-4 py-3">Profit</th>
                     </tr>
@@ -1183,6 +1215,8 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                         <td className="px-4 py-3">{r.sales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.vat.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.discounts.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.vatExempt.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.netSales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.cost.toFixed(2)}</td>
                         <td className="px-4 py-3 font-medium">{r.profit.toFixed(2)}</td>
                       </tr>
@@ -1194,6 +1228,8 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                       <td className="px-4 py-3">{g.totals.sales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.vat.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.discounts.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.vatExempt.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.netSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.cost.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.profit.toFixed(2)}</td>
                     </tr>

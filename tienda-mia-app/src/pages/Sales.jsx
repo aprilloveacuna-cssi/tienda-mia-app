@@ -77,6 +77,11 @@ export default function Sales() {
   const [importPanelOpen, setImportPanelOpen] = useState(false)
   const [importPreviewValid, setImportPreviewValid] = useState([])
   const [importPreviewSkipped, setImportPreviewSkipped] = useState([])
+  // Which skipped row (by rowNum) currently has its quick-add form open,
+  // plus that form's draft values.
+  const [quickAddRowNum, setQuickAddRowNum] = useState(null)
+  const [quickAddForm, setQuickAddForm] = useState({ name: '', unit: '', category: '', selling_price: '', current_cost: '' })
+  const [quickAddSaving, setQuickAddSaving] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importParsing, setImportParsing] = useState(false)
   const [lineForm, setLineForm] = useState(EMPTY_LINE_FORM)
@@ -347,8 +352,16 @@ export default function Sales() {
     // price. VAT_RATE_PCT comes from Settings — a national rate, not a
     // business preference, but editable there (with a clear warning) in
     // case the actual government rate ever changes.
+    //
+    // The reduction is recorded as two separate figures, not one combined
+    // number — see migration 0037. vatExemptPerUnit is the VAT backed out
+    // of the sticker price; discountPerUnit is the 20% taken off what's
+    // left after that. Both are needed separately for BIR/Senior-PWD
+    // reporting; their sum is the total reduction from the sticker price.
     const vatExclusivePrice = Number(product.selling_price) / (1 + vatRatePct / 100)
     const discountedUnitPrice = Math.round(vatExclusivePrice * (1 - discountPct / 100) * 100) / 100
+    const vatExemptPerUnit = Number(product.selling_price) - vatExclusivePrice
+    const discountPerUnit = vatExclusivePrice - discountedUnitPrice
     await ensureKitchenStock(product, totalQty, headerForm.sale_date)
     const stockGroupIds = resolveStockGroupIds(product)
 
@@ -369,7 +382,8 @@ export default function Sales() {
         gross_profit: lineTotal - fifoCost,
         consumption,
         is_discounted: true,
-        discount_amount: discountedQty * (Number(product.selling_price) - discountedUnitPrice),
+        discount_amount: discountedQty * discountPerUnit,
+        vat_exempt_amount: discountedQty * vatExemptPerUnit,
       })
     }
 
@@ -474,16 +488,23 @@ export default function Sales() {
           : null
 
       if (!product) {
+        const rawBarcode = obj.barcode || obj.sku || null
+        const rawQty = Number(obj.quantity)
         skipped.push({
           rowNum,
-          reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU',
+          reason: rawBarcode ? `No product matches "${rawBarcode}"` : 'Missing barcode/SKU',
           // The file's own description column — the only way to identify
           // what this row was actually for when the barcode/SKU lookup
           // itself failed, so there's no matched product to name it from.
           productName: obj.description || null,
+          barcode: rawBarcode,
           qty: obj.quantity || null,
           price: obj.unit_price || obj.total_price || null,
           priceLabel: obj.unit_price ? 'unit price' : obj.total_price ? 'total price' : null,
+          // Enough to actually create a product from and re-add this exact
+          // line — see handleQuickAddProduct. Not offered without a real
+          // barcode and a valid qty, since both are required to do that.
+          canQuickAdd: Boolean(rawBarcode) && Boolean(rawQty) && rawQty > 0,
         })
         continue
       }
@@ -837,6 +858,114 @@ export default function Sales() {
     setPosReportValidationWarning(null)
   }
 
+  function startQuickAdd(s) {
+    const qty = Number(s.qty) || 1
+    const rawPrice = Number(s.price) || 0
+    const unitPriceGuess = s.priceLabel === 'total price' ? rawPrice / qty : rawPrice
+    setQuickAddForm({
+      name: s.productName || '',
+      unit: 'pcs',
+      category: '',
+      selling_price: unitPriceGuess ? unitPriceGuess.toFixed(2) : '',
+      current_cost: '',
+    })
+    setQuickAddRowNum(s.rowNum)
+  }
+
+  function cancelQuickAdd() {
+    setQuickAddRowNum(null)
+  }
+
+  // Creates the product this skipped row was actually for, straight from
+  // what the file already told us (barcode, description, qty, price), then
+  // re-adds this exact row as a normal line — no need to re-upload.
+  async function handleQuickAddProduct(s) {
+    if (!quickAddForm.name.trim() || !s.barcode) return
+    setQuickAddSaving(true)
+    setErrorMsg('')
+
+    const { data: newProduct, error } = await supabase
+      .from('products')
+      .insert({
+        barcode: s.barcode,
+        name: quickAddForm.name.trim(),
+        unit: quickAddForm.unit.trim() || null,
+        category: quickAddForm.category.trim() || null,
+        selling_price: quickAddForm.selling_price ? Number(quickAddForm.selling_price) : 0,
+        current_cost: quickAddForm.current_cost ? Number(quickAddForm.current_cost) : 0,
+        // A backfilled sale predates real inventory tracking, so there's no
+        // way to know this product's actual current stock — rather than
+        // leaving it "active" at a phantom 0 stock for three weeks until
+        // auto-archive catches it anyway (migration 0034), archive it right
+        // away; its only known "movement" is this historical sale.
+        status: isBackfillSale ? 'archived' : 'active',
+      })
+      .select()
+      .single()
+
+    if (error) {
+      setErrorMsg(`Could not add product: ${error.message}`)
+      setQuickAddSaving(false)
+      return
+    }
+
+    setProducts([...products, newProduct])
+
+    // Any other skipped row for this exact barcode gets resolved too, not
+    // just the one that was clicked — otherwise adding the product wouldn't
+    // actually clear out every instance of it sold in the same file.
+    const matchingRows = importPreviewSkipped.filter((row) => row.barcode === s.barcode && row.canQuickAdd)
+    const newValidLines = []
+
+    for (const row of matchingRows) {
+      const qty = Number(row.qty)
+      const rawPrice = Number(row.price)
+      const unitPrice = row.price
+        ? row.priceLabel === 'total price'
+          ? rawPrice / qty
+          : rawPrice
+        : Number(quickAddForm.selling_price) || 0
+      const lineTotal = qty * unitPrice
+      let consumption = []
+      let isOversold = false
+      let openQty = 0
+      let fifoCost = qty * Number(quickAddForm.current_cost || 0)
+
+      if (!isBackfillSale) {
+        await ensureKitchenStock(newProduct, qty, headerForm.sale_date)
+        const stockGroupIds = resolveStockGroupIds(newProduct)
+        const result = await computeFifoConsumption(stockGroupIds, qty, [...pendingLines, ...importPreviewValid, ...newValidLines])
+        consumption = result.consumption
+        const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
+        openQty = qty - consumedQty
+        fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(newProduct.current_cost ?? 0)
+        isOversold = !result.satisfied && !newProduct.unlimited_stock
+      }
+
+      newValidLines.push({
+        tempId: crypto.randomUUID(),
+        product_id: newProduct.id,
+        product_name: newProduct.name,
+        category: newProduct.category,
+        unit: newProduct.unit,
+        quantity: qty,
+        unit_price: unitPrice,
+        line_total: lineTotal,
+        fifo_cost: fifoCost,
+        gross_profit: lineTotal - fifoCost,
+        consumption,
+        openQty,
+        isOversold,
+        oversoldNote: isOversold ? 'newly added product — sold beyond available stock, now negative' : null,
+      })
+    }
+
+    setImportPreviewValid([...importPreviewValid, ...newValidLines])
+    setImportPreviewSkipped(importPreviewSkipped.filter((row) => !(row.barcode === s.barcode && row.canQuickAdd)))
+    setQuickAddRowNum(null)
+    setQuickAddSaving(false)
+  }
+
   async function proceedAddLine(product, qty, unitPrice) {
     let consumption = []
     let isOversold = false
@@ -1160,11 +1289,18 @@ export default function Sales() {
     [pendingLines]
   )
   const runningDiscount = useMemo(
-    () => pendingLines.reduce((sum, l) => sum + (l.discount_amount ?? 0), 0),
+    () => pendingLines.reduce((sum, l) => sum + (l.discount_amount ?? 0) + (l.vat_exempt_amount ?? 0), 0),
     [pendingLines]
   )
   const runningSeniorPwdDiscount = useMemo(
-    () => pendingLines.filter((l) => l.is_discounted).reduce((sum, l) => sum + (l.discount_amount ?? 0), 0),
+    () =>
+      pendingLines
+        .filter((l) => l.is_discounted)
+        .reduce((sum, l) => sum + (l.discount_amount ?? 0) + (l.vat_exempt_amount ?? 0), 0),
+    [pendingLines]
+  )
+  const runningVatExempt = useMemo(
+    () => pendingLines.filter((l) => l.is_discounted).reduce((sum, l) => sum + (l.vat_exempt_amount ?? 0), 0),
     [pendingLines]
   )
   const runningB1t1Discount = useMemo(
@@ -1218,6 +1354,7 @@ export default function Sales() {
           is_b1t1: line.is_b1t1 ?? false,
           b1t1_price: line.b1t1_price ?? null,
           discount_amount: line.discount_amount ?? 0,
+          vat_exempt_amount: line.vat_exempt_amount ?? null,
         })
         .select()
         .single()
@@ -1515,7 +1652,7 @@ export default function Sales() {
                         )}
                         {l.is_discounted && (
                           <span
-                            title={`Senior/PWD discount — ₱${l.discount_amount.toFixed(2)} off`}
+                            title={`Senior/PWD — ₱${(l.discount_amount + (l.vat_exempt_amount ?? 0)).toFixed(2)} off (₱${(l.vat_exempt_amount ?? 0).toFixed(2)} VAT exempt + ₱${l.discount_amount.toFixed(2)} discount)`}
                             className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
                           >
                             discounted
@@ -1570,9 +1707,14 @@ export default function Sales() {
             {runningDiscount > 0 && (
               <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3 py-2 text-xs text-[var(--color-herb)]">
                 Discounts this sale: ₱{runningDiscount.toFixed(2)} — factor this into remittance, since it's a real reduction from gross.
-                {runningSeniorPwdDiscount > 0 && runningB1t1Discount > 0 && (
-                  <> (Senior/PWD ₱{runningSeniorPwdDiscount.toFixed(2)}, Buy 1 Take 1 ₱{runningB1t1Discount.toFixed(2)})</>
+                {runningSeniorPwdDiscount > 0 && (
+                  <>
+                    {' '}
+                    (Senior/PWD ₱{runningSeniorPwdDiscount.toFixed(2)} — ₱{runningVatExempt.toFixed(2)} VAT exempt + ₱
+                    {(runningSeniorPwdDiscount - runningVatExempt).toFixed(2)} discount)
+                  </>
                 )}
+                {runningB1t1Discount > 0 && <> · Buy 1 Take 1 ₱{runningB1t1Discount.toFixed(2)}</>}
               </div>
             )}
 
@@ -1876,7 +2018,7 @@ export default function Sales() {
                         {l.product?.name}
                         {l.is_discounted && (
                           <span
-                            title={`Senior/PWD discount — ₱${Number(l.discount_amount).toFixed(2)} off`}
+                            title={`Senior/PWD — ₱${(Number(l.discount_amount) + Number(l.vat_exempt_amount ?? 0)).toFixed(2)} off (₱${Number(l.vat_exempt_amount ?? 0).toFixed(2)} VAT exempt + ₱${Number(l.discount_amount).toFixed(2)} discount)`}
                             className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
                           >
                             discounted
@@ -1960,7 +2102,7 @@ export default function Sales() {
         {importPreviewSkipped.length > 0 && (
           <div className="mb-4">
             <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">Skipped rows</div>
-            <div className="max-h-48 space-y-1 overflow-y-auto">
+            <div className="max-h-72 space-y-1 overflow-y-auto">
               {importPreviewSkipped.map((s, i) => {
                 const details = [
                   s.productName,
@@ -1974,6 +2116,72 @@ export default function Sales() {
                   <div key={i} className="rounded-md bg-[var(--color-rust-soft)] px-2.5 py-1.5 text-xs text-[var(--color-rust)]">
                     Row {s.rowNum}: {s.reason}
                     {details && <span className="block text-[var(--color-ink-soft)]">{details}</span>}
+                    {s.canQuickAdd && quickAddRowNum !== s.rowNum && (
+                      <button
+                        onClick={() => startQuickAdd(s)}
+                        className="mt-1 font-medium text-[var(--color-herb)] underline"
+                      >
+                        Add as product
+                      </button>
+                    )}
+                    {quickAddRowNum === s.rowNum && (
+                      <div className="mt-2 space-y-2 rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] p-2">
+                        <div className="text-[var(--color-ink-soft)]">Barcode {s.barcode} — new product</div>
+                        <input
+                          value={quickAddForm.name}
+                          onChange={(e) => setQuickAddForm({ ...quickAddForm, name: e.target.value })}
+                          placeholder="Product name"
+                          className="input w-full"
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            value={quickAddForm.unit}
+                            onChange={(e) => setQuickAddForm({ ...quickAddForm, unit: e.target.value })}
+                            placeholder="Unit (pcs, kg…)"
+                            className="input"
+                          />
+                          <input
+                            value={quickAddForm.category}
+                            onChange={(e) => setQuickAddForm({ ...quickAddForm, category: e.target.value })}
+                            placeholder="Category"
+                            className="input"
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={quickAddForm.selling_price}
+                            onChange={(e) => setQuickAddForm({ ...quickAddForm, selling_price: e.target.value })}
+                            placeholder="Selling price"
+                            className="input"
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={quickAddForm.current_cost}
+                            onChange={(e) => setQuickAddForm({ ...quickAddForm, current_cost: e.target.value })}
+                            placeholder="Current cost (optional)"
+                            className="input"
+                          />
+                        </div>
+                        {isBackfillSale && (
+                          <div className="text-[var(--color-ink-soft)]">
+                            Before your inventory tracking start date — this product will be created already archived, since there's no way to know its real current stock.
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleQuickAddProduct(s)}
+                            disabled={quickAddSaving || !quickAddForm.name.trim()}
+                            className="rounded-md bg-[var(--color-ink)] px-2.5 py-1 font-medium text-[var(--color-paper)] disabled:opacity-40"
+                          >
+                            {quickAddSaving ? 'Adding…' : 'Save & add line'}
+                          </button>
+                          <button onClick={cancelQuickAdd} className="rounded-md border border-[var(--color-line)] px-2.5 py-1">
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )
               })}
