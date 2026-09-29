@@ -28,23 +28,33 @@ export function parsePosReportWorkbook(arrayBuffer) {
   let codeCol = -1
   let qtyHeaderCol = -1
   let amountCol = -1
+  let descriptionCol = -1
 
   for (let r = 0; r < rows2d.length; r++) {
     const row = rows2d[r] ?? []
     let foundCode = -1
     let foundQty = -1
     let foundAmount = -1
+    let foundDescription = -1
     for (let c = 0; c < row.length; c++) {
       const cell = String(row[c] ?? '').trim().toUpperCase()
       if (cell === 'CODE') foundCode = c
       if (cell.includes('QTY')) foundQty = c
       if (cell === 'AMOUNT') foundAmount = c
+      // Prefer the first DESCRIPTION-labeled column over any later one —
+      // this report has two ("DESCRIPTION 1" and "DESCRIPTION 2"), holding
+      // identical text in every row of the real file this was checked
+      // against, so which one wins shouldn't matter in practice. Fixing on
+      // the first is just for a predictable, deterministic result rather
+      // than leaving it to depend on column order.
+      if (foundDescription === -1 && cell.includes('DESCRIPTION')) foundDescription = c
     }
     if (foundCode >= 0 && foundAmount >= 0) {
       headerRowIdx = r
       codeCol = foundCode
       qtyHeaderCol = foundQty
       amountCol = foundAmount
+      descriptionCol = foundDescription
       break
     }
   }
@@ -88,6 +98,11 @@ export function parsePosReportWorkbook(arrayBuffer) {
       barcode: String(codeVal).trim(),
       qty: Number(qtyVal),
       amount: Number(amountVal),
+      // Read at DESCRIPTION's own header column — verified directly
+      // against a real export (SOLD_ITEM_REPORT_06032026_POS1.xls):
+      // DESCRIPTION 1 and CODE both sit at the same column as their data,
+      // unlike QTY/AMOUNT's confirmed one-column shift.
+      description: descriptionCol >= 0 ? String(row[descriptionCol] ?? '').trim() : '',
     })
   }
 

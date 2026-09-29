@@ -24,6 +24,7 @@ const SALE_LINE_HEADER_ALIASES = {
   quantity: 'quantity', qty: 'quantity',
   unitprice: 'unit_price', price: 'unit_price',
   totalprice: 'total_price', total: 'total_price', saletotal: 'total_price',
+  description: 'description', itemdescription: 'description', productdescription: 'description',
 }
 
 function statusTone(status) {
@@ -476,6 +477,10 @@ export default function Sales() {
         skipped.push({
           rowNum,
           reason: obj.barcode || obj.sku ? `No product matches "${obj.barcode || obj.sku}"` : 'Missing barcode/SKU',
+          // The file's own description column — the only way to identify
+          // what this row was actually for when the barcode/SKU lookup
+          // itself failed, so there's no matched product to name it from.
+          productName: obj.description || null,
           qty: obj.quantity || null,
           price: obj.unit_price || obj.total_price || null,
           priceLabel: obj.unit_price ? 'unit price' : obj.total_price ? 'total price' : null,
@@ -663,8 +668,8 @@ export default function Sales() {
     }))
     if (group.warnings.length > 0) setPosReportValidationWarning(group.warnings)
     const rows = [
-      ['Barcode', 'Quantity', 'Total Price'],
-      ...group.rows.map((r) => [r.barcode, String(r.qty), String(r.amount)]),
+      ['Barcode', 'Description', 'Quantity', 'Total Price'],
+      ...group.rows.map((r) => [r.barcode, r.description ?? '', String(r.qty), String(r.amount)]),
     ]
     await processSalesImportRows(rows, group.date)
   }
