@@ -358,13 +358,16 @@ export default function Kitchen() {
           vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
           // Since migration 0037, discount_amount and vat_exempt_amount are
           // two separate figures for a Senior/PWD line — tracked separately
-          // here too, same as Daily POS Summary.
-          discounts += Number(l.discount_amount ?? 0)
-          vatExempt += Number(l.vat_exempt_amount ?? 0)
+          // here too, same as Daily POS Summary. Guarded to only trust these
+          // on a line actually flagged is_discounted or is_b1t1 — bad
+          // historical data has shown up as a stray non-zero value on plain
+          // lines before (see migration 0040).
+          discounts += l.is_discounted || l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+          vatExempt += l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
           // Buy 1 Take 1 lines aren't VAT-exempt but do carry a real
           // discount_amount (the giveaway) — needed separately for Net
           // Sales below, same reasoning as Daily POS Summary.
-          discountsOther += l.is_discounted ? 0 : Number(l.discount_amount ?? 0)
+          discountsOther += l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
         }
       }
       statsByExpense[exp.id] = { revenue, vat, discounts, vatExempt, discountsOther }

@@ -1009,14 +1009,18 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           // Since migration 0037, discount_amount and vat_exempt_amount are
           // two separate figures for a Senior/PWD line — tracked separately
           // here too, rather than folded back into one combined number.
-          byGroup[key].discounts += Number(l.discount_amount ?? 0)
-          byGroup[key].vatExempt += Number(l.vat_exempt_amount ?? 0)
+          // Guarded to only trust these on a line actually flagged
+          // is_discounted or is_b1t1 — bad historical data has shown up as
+          // a stray non-zero value on plain lines before (see migration
+          // 0040), so this never sums a value that shouldn't be there.
+          byGroup[key].discounts += l.is_discounted || l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+          byGroup[key].vatExempt += l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
           // Buy 1 Take 1 lines aren't VAT-exempt (is_discounted stays false
           // for those — see migration 0032) but do carry a real discount_amount
           // (the giveaway). Needed separately from the Senior/PWD portion for
           // Net Sales below, since that giveaway isn't backed out by VAT
           // Exempt the way a Senior/PWD reduction is.
-          byGroup[key].discountsOther += l.is_discounted ? 0 : Number(l.discount_amount ?? 0)
+          byGroup[key].discountsOther += l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
 
           if (isKitchen) {
             const periodIdx = (marketExpenses ?? []).findIndex((e) => day >= e.week_start && day <= e.week_end)
