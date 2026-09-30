@@ -345,8 +345,15 @@ export default function Sales() {
 
   function startEditDiscountQty(line) {
     setEditingLineId(null) // mutually exclusive with a price edit in progress
+    const sibling = viewedLines.find(
+      (s) =>
+        s.product_id === line.product_id &&
+        s.id !== line.id &&
+        (line.is_discounted ? !s.is_discounted && !s.is_b1t1 : s.is_discounted)
+    )
+    const currentDiscountedQty = line.is_discounted ? line.quantity : sibling?.quantity ?? 0
     setEditingDiscountQtyLineId(line.id)
-    setEditDiscountQtyDraft(String(line.quantity))
+    setEditDiscountQtyDraft(String(currentDiscountedQty))
     setEditDiscountQtyReason('')
   }
 
@@ -355,13 +362,15 @@ export default function Sales() {
   }
 
   // Moves quantity between a discounted line and its regular-price sibling
-  // (same product, same sale) — never changes their combined total, so
-  // inventory and quantity sold are untouched. Cost is reallocated between
-  // the two by weighted average (combined fifo_cost ÷ combined quantity),
-  // not re-traced to specific batches — an honest approximation, since the
-  // physical consumption already happened and wasn't recorded per
-  // discount-status, only per line.
-  async function saveEditDiscountQty(discountedLine) {
+  // (same product, same sale) — works starting from either side, including
+  // a plain regular line with no discount at all yet, in which case the
+  // discounted line gets created fresh. Never changes their combined
+  // total, so inventory and quantity sold are untouched. Cost is
+  // reallocated between the two by weighted average (combined fifo_cost ÷
+  // combined quantity), not re-traced to specific batches — an honest
+  // approximation, since the physical consumption already happened and
+  // wasn't recorded per discount-status, only per line.
+  async function saveEditDiscountQty(line) {
     const newDiscountedQty = Number(editDiscountQtyDraft)
     if (isNaN(newDiscountedQty) || newDiscountedQty < 0) return
     if (!editDiscountQtyReason.trim()) {
@@ -371,94 +380,86 @@ export default function Sales() {
     setEditDiscountQtySaving(true)
     setErrorMsg('')
 
-    const regularLine = viewedLines.find(
-      (l) => l.product_id === discountedLine.product_id && l.id !== discountedLine.id && !l.is_discounted && !l.is_b1t1
-    )
-    const totalQty = Number(discountedLine.quantity) + Number(regularLine?.quantity ?? 0)
+    const existingDiscountedLine = line.is_discounted
+      ? line
+      : viewedLines.find((s) => s.product_id === line.product_id && s.id !== line.id && s.is_discounted)
+    const existingRegularLine = !line.is_discounted
+      ? line
+      : viewedLines.find((s) => s.product_id === line.product_id && s.id !== line.id && !s.is_discounted && !s.is_b1t1)
 
+    const totalQty = Number(existingDiscountedLine?.quantity ?? 0) + Number(existingRegularLine?.quantity ?? 0)
     if (newDiscountedQty > totalQty) {
-      setErrorMsg(`Can't discount more than the ${totalQty} ${discountedLine.product?.unit ?? ''} sold on this line.`)
+      setErrorMsg(`Can't discount more than the ${totalQty} ${line.product?.unit ?? ''} sold on this line.`)
       setEditDiscountQtySaving(false)
       return
     }
 
     const newRegularQty = totalQty - newDiscountedQty
-    const discountPerUnit = Number(discountedLine.discount_amount) / Number(discountedLine.quantity)
-    const vatExemptPerUnit = Number(discountedLine.vat_exempt_amount) / Number(discountedLine.quantity)
-    const combinedFifoCost = Number(discountedLine.fifo_cost ?? 0) + Number(regularLine?.fifo_cost ?? 0)
-    const regularUnitPrice = regularLine ? Number(regularLine.unit_price) : Number(discountedLine.product?.selling_price ?? 0)
+
+    // Per-unit discount/VAT-exempt rate: reuse the existing discounted
+    // line's own rate if one already exists. Starting fresh from a plain
+    // regular line (no discount yet at all), compute it from scratch using
+    // the same BIR formula (VAT backed out of the regular line's own
+    // price, then 20% off that) that every other discount in this app uses.
+    let discountPerUnit, vatExemptPerUnit, discountedUnitPrice
+    if (existingDiscountedLine) {
+      discountPerUnit = Number(existingDiscountedLine.discount_amount) / Number(existingDiscountedLine.quantity)
+      vatExemptPerUnit = Number(existingDiscountedLine.vat_exempt_amount) / Number(existingDiscountedLine.quantity)
+      discountedUnitPrice = Number(existingDiscountedLine.unit_price)
+    } else {
+      const sellingPrice = Number(existingRegularLine.unit_price)
+      const vatExclusive = sellingPrice / (1 + vatRatePct / 100)
+      discountedUnitPrice = Math.round(vatExclusive * (1 - discountPct / 100) * 100) / 100
+      vatExemptPerUnit = sellingPrice - vatExclusive
+      discountPerUnit = vatExclusive - discountedUnitPrice
+    }
+
+    const combinedFifoCost = Number(existingDiscountedLine?.fifo_cost ?? 0) + Number(existingRegularLine?.fifo_cost ?? 0)
+    const regularUnitPrice = existingRegularLine
+      ? Number(existingRegularLine.unit_price)
+      : Number(line.product?.selling_price ?? 0)
+    const avgCostPerUnit = totalQty > 0 ? combinedFifoCost / totalQty : 0
     const now = new Date().toISOString()
     const reason = editDiscountQtyReason.trim()
 
     try {
+      // --- the discounted side ---
       if (newDiscountedQty === 0) {
-        // Fully un-discount: delete the discounted line, fold its total
-        // into the regular line — creating one if it didn't already exist.
-        const { error: delErr } = await supabase.from('sale_lines').delete().eq('id', discountedLine.id)
-        if (delErr) throw delErr
-        const regularPayload = {
-          quantity: totalQty,
-          fifo_cost: combinedFifoCost,
-          gross_profit: totalQty * regularUnitPrice - combinedFifoCost,
+        if (existingDiscountedLine) {
+          const { error } = await supabase.from('sale_lines').delete().eq('id', existingDiscountedLine.id)
+          if (error) throw error
+        }
+      } else {
+        const newDiscountedFifoCost = newDiscountedQty * avgCostPerUnit
+        const discountedPayload = {
+          quantity: newDiscountedQty,
+          unit_price: discountedUnitPrice,
+          discount_amount: newDiscountedQty * discountPerUnit,
+          vat_exempt_amount: newDiscountedQty * vatExemptPerUnit,
+          fifo_cost: newDiscountedFifoCost,
+          gross_profit: newDiscountedQty * discountedUnitPrice - newDiscountedFifoCost,
           discounted_qty_edited_at: now,
           discounted_qty_edit_reason: reason,
         }
-        if (regularLine) {
-          const { error } = await supabase.from('sale_lines').update(regularPayload).eq('id', regularLine.id)
+        if (existingDiscountedLine) {
+          const { error } = await supabase.from('sale_lines').update(discountedPayload).eq('id', existingDiscountedLine.id)
           if (error) throw error
         } else {
-          const { error } = await supabase.from('sale_lines').insert({
-            sale_id: discountedLine.sale_id,
-            product_id: discountedLine.product_id,
-            unit_price: regularUnitPrice,
-            is_discounted: false,
-            is_b1t1: false,
-            discount_amount: 0,
-            vat_exempt_amount: null,
-            ...regularPayload,
-          })
+          const { error } = await supabase
+            .from('sale_lines')
+            .insert({ sale_id: line.sale_id, product_id: line.product_id, is_discounted: true, is_b1t1: false, ...discountedPayload })
           if (error) throw error
         }
-      } else if (newRegularQty === 0) {
-        // Fully discount: delete the regular sibling (if any), expand the
-        // discounted line to the full total.
-        if (regularLine) {
-          const { error: delErr } = await supabase.from('sale_lines').delete().eq('id', regularLine.id)
-          if (delErr) throw delErr
+      }
+
+      // --- the regular side ---
+      if (newRegularQty === 0) {
+        if (existingRegularLine) {
+          const { error } = await supabase.from('sale_lines').delete().eq('id', existingRegularLine.id)
+          if (error) throw error
         }
-        const { error } = await supabase
-          .from('sale_lines')
-          .update({
-            quantity: totalQty,
-            discount_amount: totalQty * discountPerUnit,
-            vat_exempt_amount: totalQty * vatExemptPerUnit,
-            fifo_cost: combinedFifoCost,
-            gross_profit: totalQty * Number(discountedLine.unit_price) - combinedFifoCost,
-            discounted_qty_edited_at: now,
-            discounted_qty_edit_reason: reason,
-          })
-          .eq('id', discountedLine.id)
-        if (error) throw error
       } else {
-        // Genuine split between both.
-        const avgCostPerUnit = totalQty > 0 ? combinedFifoCost / totalQty : 0
-        const newDiscountedFifoCost = newDiscountedQty * avgCostPerUnit
-        const newRegularFifoCost = combinedFifoCost - newDiscountedFifoCost
-
-        const { error: err1 } = await supabase
-          .from('sale_lines')
-          .update({
-            quantity: newDiscountedQty,
-            discount_amount: newDiscountedQty * discountPerUnit,
-            vat_exempt_amount: newDiscountedQty * vatExemptPerUnit,
-            fifo_cost: newDiscountedFifoCost,
-            gross_profit: newDiscountedQty * Number(discountedLine.unit_price) - newDiscountedFifoCost,
-            discounted_qty_edited_at: now,
-            discounted_qty_edit_reason: reason,
-          })
-          .eq('id', discountedLine.id)
-        if (err1) throw err1
-
+        const newRegularFifoCost = combinedFifoCost - newDiscountedQty * avgCostPerUnit
         const regularPayload = {
           quantity: newRegularQty,
           fifo_cost: newRegularFifoCost,
@@ -466,13 +467,13 @@ export default function Sales() {
           discounted_qty_edited_at: now,
           discounted_qty_edit_reason: reason,
         }
-        if (regularLine) {
-          const { error: err2 } = await supabase.from('sale_lines').update(regularPayload).eq('id', regularLine.id)
-          if (err2) throw err2
+        if (existingRegularLine) {
+          const { error } = await supabase.from('sale_lines').update(regularPayload).eq('id', existingRegularLine.id)
+          if (error) throw error
         } else {
-          const { error: err2 } = await supabase.from('sale_lines').insert({
-            sale_id: discountedLine.sale_id,
-            product_id: discountedLine.product_id,
+          const { error } = await supabase.from('sale_lines').insert({
+            sale_id: line.sale_id,
+            product_id: line.product_id,
             unit_price: regularUnitPrice,
             is_discounted: false,
             is_b1t1: false,
@@ -480,7 +481,7 @@ export default function Sales() {
             vat_exempt_amount: null,
             ...regularPayload,
           })
-          if (err2) throw err2
+          if (error) throw error
         }
       }
 
@@ -2341,7 +2342,7 @@ export default function Sales() {
                                 >
                                   Edit price
                                 </button>
-                                {l.is_discounted && (
+                                {!l.is_b1t1 && (
                                   <button
                                     onClick={() => startEditDiscountQty(l)}
                                     className="text-xs font-medium text-[var(--color-ink-soft)] underline"
@@ -2405,7 +2406,10 @@ export default function Sales() {
                               <label className="text-xs font-medium text-[var(--color-ink-soft)]">
                                 New discounted qty (of {(() => {
                                   const sibling = viewedLines.find(
-                                    (s) => s.product_id === l.product_id && s.id !== l.id && !s.is_discounted && !s.is_b1t1
+                                    (s) =>
+                                      s.product_id === l.product_id &&
+                                      s.id !== l.id &&
+                                      (l.is_discounted ? !s.is_discounted && !s.is_b1t1 : s.is_discounted)
                                   )
                                   return Number(l.quantity) + Number(sibling?.quantity ?? 0)
                                 })()} total)
