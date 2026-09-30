@@ -27,6 +27,26 @@ const SALE_LINE_HEADER_ALIASES = {
   description: 'description', itemdescription: 'description', productdescription: 'description',
 }
 
+// Same fallback-to-free-text behavior as Products.jsx's own SelectOrText —
+// a dropdown of known values once any exist, plain text until then, so
+// quick-add never becomes a second, inconsistent way to spell a category
+// or unit that already exists under a different casing/spelling.
+function SelectOrText({ value, onChange, options, placeholder }) {
+  if (options && options.length > 0) {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="input">
+        <option value="">{placeholder || 'Select…'}</option>
+        {options.map((opt) => (
+          <option key={opt} value={opt}>
+            {opt}
+          </option>
+        ))}
+      </select>
+    )
+  }
+  return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="input" />
+}
+
 function statusTone(status) {
   return status === 'voided' ? 'critical' : 'ok'
 }
@@ -81,6 +101,12 @@ export default function Sales() {
   // plus that form's draft values.
   const [quickAddRowNum, setQuickAddRowNum] = useState(null)
   const [quickAddForm, setQuickAddForm] = useState({ name: '', unit: '', category: '', selling_price: '', current_cost: '' })
+  // Same known-values dropdown (falling back to free text until any exist)
+  // that Products.jsx already uses for these two fields — quick-add
+  // shouldn't be a second, inconsistent way to enter a brand-new category
+  // or unit spelling.
+  const [categoryOptions, setCategoryOptions] = useState([])
+  const [unitOptions, setUnitOptions] = useState([])
   const [quickAddSaving, setQuickAddSaving] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importParsing, setImportParsing] = useState(false)
@@ -158,6 +184,13 @@ export default function Sales() {
     if (data) setInventoryTrackingStartDate(data.value)
   }
 
+  async function loadQuickAddLists() {
+    const { data } = await supabase.from('lists').select('list_type, value').eq('active', true).order('value')
+    if (!data) return
+    setCategoryOptions(data.filter((r) => r.list_type === 'Category').map((r) => r.value))
+    setUnitOptions(data.filter((r) => r.list_type === 'Unit').map((r) => r.value))
+  }
+
   async function loadExtraBarcodes() {
     const { data, error } = await fetchAllRows('product_barcodes', 'product_id, barcode')
     if (error) {
@@ -182,6 +215,7 @@ export default function Sales() {
     loadDiscountSetting()
     loadVatRateSetting()
     loadInventoryTrackingStartDate()
+    loadQuickAddLists()
     loadExtraBarcodes()
   }, [])
 
@@ -2134,17 +2168,17 @@ export default function Sales() {
                           className="input w-full"
                         />
                         <div className="grid grid-cols-2 gap-2">
-                          <input
+                          <SelectOrText
                             value={quickAddForm.unit}
-                            onChange={(e) => setQuickAddForm({ ...quickAddForm, unit: e.target.value })}
+                            onChange={(v) => setQuickAddForm({ ...quickAddForm, unit: v })}
+                            options={unitOptions}
                             placeholder="Unit (pcs, kg…)"
-                            className="input"
                           />
-                          <input
+                          <SelectOrText
                             value={quickAddForm.category}
-                            onChange={(e) => setQuickAddForm({ ...quickAddForm, category: e.target.value })}
+                            onChange={(v) => setQuickAddForm({ ...quickAddForm, category: v })}
+                            options={categoryOptions}
                             placeholder="Category"
-                            className="input"
                           />
                           <input
                             type="number"
