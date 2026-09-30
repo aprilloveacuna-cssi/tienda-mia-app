@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2, Check, Ban, AlertTriangle, Upload, FileDown, Pencil } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
@@ -84,6 +84,12 @@ export default function Sales() {
   const [pendingLines, setPendingLines] = useState([]) // not yet saved to DB
   const [viewedSale, setViewedSale] = useState(null)
   const [viewedLines, setViewedLines] = useState([])
+  // Editing a posted line's price — price only, quantity/inventory/FIFO
+  // cost are never touched here.
+  const [editingLineId, setEditingLineId] = useState(null)
+  const [editPriceDraft, setEditPriceDraft] = useState('')
+  const [editReasonDraft, setEditReasonDraft] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
@@ -239,10 +245,94 @@ export default function Sales() {
     setErrorMsg('')
     const { data } = await supabase
       .from('sale_lines')
-      .select('*, product:products(name, sku, unit, category)')
+      .select('*, product:products(name, sku, unit, category, selling_price)')
       .eq('sale_id', sale.id)
     setViewedLines(data ?? [])
     setPanelOpen(true)
+  }
+
+  function startEditPrice(line) {
+    setEditingLineId(line.id)
+    setEditPriceDraft(String(line.is_b1t1 ? line.b1t1_price : line.unit_price))
+    setEditReasonDraft('')
+  }
+
+  function cancelEditPrice() {
+    setEditingLineId(null)
+  }
+
+  // Recomputes everything downstream of a price correction — profit always,
+  // and for a Senior/PWD or Buy 1 Take 1 line, the discount/VAT-exempt
+  // split too, using the same formulas Sales.jsx uses when a line is first
+  // created. Never touches quantity, consumption, or fifo_cost — the price
+  // was wrong, not what physically left the shelf.
+  async function saveEditPrice(line) {
+    const newPriceInput = Number(editPriceDraft)
+    if (!newPriceInput || newPriceInput <= 0) return
+    if (!editReasonDraft.trim()) {
+      setErrorMsg('A reason is required to correct a posted price.')
+      return
+    }
+    setEditSaving(true)
+    setErrorMsg('')
+
+    const qty = Number(line.quantity)
+    const fifoCost = Number(line.fifo_cost ?? 0)
+    let payload = {
+      original_unit_price: line.original_unit_price ?? line.unit_price,
+      price_edited_at: new Date().toISOString(),
+      price_edit_reason: editReasonDraft.trim(),
+    }
+
+    if (line.is_b1t1) {
+      // Editing the price per set, not the blended per-unit price shown in
+      // the table — that's the number a cashier would actually recognize.
+      // fullValue uses the product's CURRENT selling price, same as when
+      // the line was first created — if that price has changed since this
+      // sale, the recomputed discount_amount reflects today's price, not
+      // what it was back then.
+      const newB1t1Price = newPriceInput
+      const sets = qty / 2
+      const chargedTotal = sets * newB1t1Price
+      const newUnitPrice = chargedTotal / qty
+      const fullValue = qty * Number(line.product?.selling_price ?? 0)
+      payload = {
+        ...payload,
+        unit_price: newUnitPrice,
+        b1t1_price: newB1t1Price,
+        discount_amount: fullValue - chargedTotal,
+        gross_profit: chargedTotal - fifoCost,
+      }
+    } else if (line.is_discounted) {
+      const newUnitPrice = newPriceInput
+      const vatExclusive = newUnitPrice / (1 - discountPct / 100)
+      const sellingPrice = vatExclusive * (1 + vatRatePct / 100)
+      payload = {
+        ...payload,
+        unit_price: newUnitPrice,
+        vat_exempt_amount: qty * (sellingPrice - vatExclusive),
+        discount_amount: qty * (vatExclusive - newUnitPrice),
+        gross_profit: qty * newUnitPrice - fifoCost,
+      }
+    } else {
+      const newUnitPrice = newPriceInput
+      payload = {
+        ...payload,
+        unit_price: newUnitPrice,
+        gross_profit: qty * newUnitPrice - fifoCost,
+      }
+    }
+
+    const { error } = await supabase.from('sale_lines').update(payload).eq('id', line.id)
+    if (error) {
+      setErrorMsg(`Could not update price: ${error.message}`)
+      setEditSaving(false)
+      return
+    }
+
+    await openView(viewedSale)
+    setEditingLineId(null)
+    setEditSaving(false)
   }
 
   function onProductPick(productId) {
@@ -2043,36 +2133,105 @@ export default function Sales() {
                     <th className="px-3 py-2">Price</th>
                     <th className="px-3 py-2">FIFO cost</th>
                     <th className="px-3 py-2">Profit</th>
+                    {viewedSale?.status === 'posted' && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
                 <tbody>
                   {viewedLines.map((l) => (
-                    <tr key={l.id} className="border-b border-[var(--color-line)] last:border-0">
-                      <td className="px-3 py-2">
-                        {l.product?.name}
-                        {l.is_discounted && (
-                          <span
-                            title={`Senior/PWD — ₱${(Number(l.discount_amount) + Number(l.vat_exempt_amount ?? 0)).toFixed(2)} off (₱${Number(l.vat_exempt_amount ?? 0).toFixed(2)} VAT exempt + ₱${Number(l.discount_amount).toFixed(2)} discount)`}
-                            className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
-                          >
-                            discounted
-                          </span>
+                    <Fragment key={l.id}>
+                      <tr className="border-b border-[var(--color-line)] last:border-0">
+                        <td className="px-3 py-2">
+                          {l.product?.name}
+                          {l.is_discounted && (
+                            <span
+                              title={`Senior/PWD — ₱${(Number(l.discount_amount) + Number(l.vat_exempt_amount ?? 0)).toFixed(2)} off (₱${Number(l.vat_exempt_amount ?? 0).toFixed(2)} VAT exempt + ₱${Number(l.discount_amount).toFixed(2)} discount)`}
+                              className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
+                            >
+                              discounted
+                            </span>
+                          )}
+                          {l.is_b1t1 && (
+                            <span
+                              title={`Buy 1 Take 1 — ₱${Number(l.b1t1_price).toFixed(2)} per set, ₱${Number(l.discount_amount).toFixed(2)} given away`}
+                              className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
+                            >
+                              B1T1
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.product?.category || '—'}</td>
+                        <td className="px-3 py-2">{l.quantity} {l.product?.unit}</td>
+                        <td className="px-3 py-2">
+                          {Number(l.unit_price).toFixed(2)}
+                          {l.price_edited_at && (
+                            <span
+                              title={`Corrected from ₱${Number(l.original_unit_price).toFixed(2)} — ${l.price_edit_reason}`}
+                              className="ml-1.5 rounded-full bg-[var(--color-amber-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-amber)]"
+                            >
+                              edited
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">{Number(l.fifo_cost).toFixed(2)}</td>
+                        <td className="px-3 py-2 text-[var(--color-herb)]">{Number(l.gross_profit).toFixed(2)}</td>
+                        {viewedSale?.status === 'posted' && (
+                          <td className="px-3 py-2">
+                            {editingLineId !== l.id && (
+                              <button
+                                onClick={() => startEditPrice(l)}
+                                className="text-xs font-medium text-[var(--color-ink-soft)] underline"
+                              >
+                                Edit price
+                              </button>
+                            )}
+                          </td>
                         )}
-                        {l.is_b1t1 && (
-                          <span
-                            title={`Buy 1 Take 1 — ₱${Number(l.b1t1_price).toFixed(2)} per set, ₱${Number(l.discount_amount).toFixed(2)} given away`}
-                            className="ml-1.5 rounded-full bg-[var(--color-herb-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-herb)]"
-                          >
-                            B1T1
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.product?.category || '—'}</td>
-                      <td className="px-3 py-2">{l.quantity} {l.product?.unit}</td>
-                      <td className="px-3 py-2">{Number(l.unit_price).toFixed(2)}</td>
-                      <td className="px-3 py-2">{Number(l.fifo_cost).toFixed(2)}</td>
-                      <td className="px-3 py-2 text-[var(--color-herb)]">{Number(l.gross_profit).toFixed(2)}</td>
-                    </tr>
+                      </tr>
+                      {editingLineId === l.id && (
+                        <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)]">
+                          <td colSpan={7} className="px-3 py-3">
+                            <div className="flex flex-wrap items-end gap-2 text-sm">
+                              <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                                {l.is_b1t1 ? 'New price per set' : 'New price'}
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={editPriceDraft}
+                                  onChange={(e) => setEditPriceDraft(e.target.value)}
+                                  className="input mt-0.5 block w-32"
+                                />
+                              </label>
+                              <label className="flex-1 text-xs font-medium text-[var(--color-ink-soft)]">
+                                Reason (required)
+                                <input
+                                  value={editReasonDraft}
+                                  onChange={(e) => setEditReasonDraft(e.target.value)}
+                                  placeholder="e.g. cashier punched the wrong price"
+                                  className="input mt-0.5 block w-full"
+                                />
+                              </label>
+                              <button
+                                onClick={() => saveEditPrice(l)}
+                                disabled={editSaving || !editPriceDraft || !editReasonDraft.trim()}
+                                className="rounded-md bg-[var(--color-ink)] px-3 py-1.5 text-xs font-medium text-[var(--color-paper)] disabled:opacity-40"
+                              >
+                                {editSaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button
+                                onClick={cancelEditPrice}
+                                className="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            <p className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
+                              Quantity, FIFO cost, and Inventory are never affected — only the price and everything
+                              that follows from it (profit{l.is_discounted ? ', the discount/VAT-exempt split,' : ''} etc.).
+                            </p>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
