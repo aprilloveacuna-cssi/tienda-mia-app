@@ -55,6 +55,7 @@ export default function Sales() {
   const [sales, setSales] = useState([])
 
   const { sortKey: saleSortKey, sortDir: saleSortDir, toggleSort: toggleSaleSort } = useSort('sale_date', 'desc')
+  const { sortKey: lineSortKey, sortDir: lineSortDir, toggleSort: toggleLineSort } = useSort(null)
   function saleSortAccessor(row, key) {
     if (key === 'total_amount') return Number(row.total_amount ?? 0)
     if (key === 'sale_date') return new Date(row.sale_date).getTime()
@@ -2285,17 +2286,19 @@ export default function Sales() {
               <table className="w-full whitespace-nowrap text-left text-sm">
                 <thead className="sticky top-0 border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-xs text-[var(--color-ink-soft)]">
                   <tr>
-                    <th className="px-3 py-2">Product</th>
-                    <th className="px-3 py-2">Category</th>
-                    <th className="px-3 py-2">Qty</th>
-                    <th className="px-3 py-2">Price</th>
-                    <th className="px-3 py-2">FIFO cost</th>
-                    <th className="px-3 py-2">Profit</th>
+                    <SortableTh label="Product" sortKey="product" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                    <SortableTh label="Category" sortKey="category" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                    <SortableTh label="Qty" sortKey="quantity" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                    <SortableTh label="Price" sortKey="unit_price" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                    <SortableTh label="FIFO cost" sortKey="fifo_cost" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
+                    <SortableTh label="Profit" sortKey="gross_profit" activeKey={lineSortKey} activeDir={lineSortDir} onSort={toggleLineSort} />
                     {viewedSale?.status === 'posted' && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
                 <tbody>
-                  {viewedLines.map((l) => (
+                  {sortRows(viewedLines, lineSortKey, lineSortDir, (row, key) =>
+                    key === 'product' ? row.product?.name : key === 'category' ? row.product?.category : row[key]
+                  ).map((l) => (
                     <Fragment key={l.id}>
                       <tr className="border-b border-[var(--color-line)] last:border-0">
                         <td className="px-3 py-2">
