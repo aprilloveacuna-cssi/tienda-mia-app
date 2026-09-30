@@ -98,6 +98,16 @@ export default function Sales() {
   const [editDiscountQtyDraft, setEditDiscountQtyDraft] = useState('')
   const [editDiscountQtyReason, setEditDiscountQtyReason] = useState('')
   const [editDiscountQtySaving, setEditDiscountQtySaving] = useState(false)
+  // Splitting off some quantity of a line at a different, arbitrary price —
+  // distinct from Edit discounted qty (which specifically moves quantity
+  // between the Senior/PWD-formula price and the regular price). This
+  // always creates a plain (not discounted, not B1T1) new line for the
+  // split-off portion, since a discounted split has its own tool already.
+  const [splitPriceLineId, setSplitPriceLineId] = useState(null)
+  const [splitQtyDraft, setSplitQtyDraft] = useState('')
+  const [splitPriceDraft, setSplitPriceDraft] = useState('')
+  const [splitReasonDraft, setSplitReasonDraft] = useState('')
+  const [splitSaving, setSplitSaving] = useState(false)
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
@@ -261,6 +271,7 @@ export default function Sales() {
 
   function startEditPrice(line) {
     setEditingDiscountQtyLineId(null) // mutually exclusive with a qty edit in progress
+    setSplitPriceLineId(null)
     setEditingLineId(line.id)
     setEditPriceDraft(String(line.is_b1t1 ? line.b1t1_price : line.unit_price))
     setEditReasonDraft('')
@@ -346,6 +357,7 @@ export default function Sales() {
 
   function startEditDiscountQty(line) {
     setEditingLineId(null) // mutually exclusive with a price edit in progress
+    setSplitPriceLineId(null)
     const sibling = viewedLines.find(
       (s) =>
         s.product_id === line.product_id &&
@@ -492,6 +504,92 @@ export default function Sales() {
       setErrorMsg(`Could not update discounted quantity: ${err.message}`)
     }
     setEditDiscountQtySaving(false)
+  }
+
+  function startSplitPrice(line) {
+    setEditingLineId(null)
+    setEditingDiscountQtyLineId(null)
+    setSplitPriceLineId(line.id)
+    setSplitQtyDraft('')
+    setSplitPriceDraft(String(line.unit_price))
+    setSplitReasonDraft('')
+  }
+
+  function cancelSplitPrice() {
+    setSplitPriceLineId(null)
+  }
+
+  // Splits off some quantity of a posted line at a different, arbitrary
+  // price, as its own new line — the original line's quantity shrinks by
+  // the same amount, so the combined total (and inventory/FIFO
+  // consumption, already fixed at the time of the original sale) never
+  // changes. Cost is reallocated between the two by weighted average, same
+  // approach as Edit discounted qty.
+  async function saveSplitPrice(line) {
+    const splitQty = Number(splitQtyDraft)
+    const newPrice = Number(splitPriceDraft)
+    if (!splitQty || splitQty <= 0 || splitQty > Number(line.quantity)) {
+      setErrorMsg(`Enter a quantity between 1 and ${line.quantity} to split off.`)
+      return
+    }
+    if (!newPrice || newPrice <= 0) return
+    if (!splitReasonDraft.trim()) {
+      setErrorMsg('A reason is required to split off a different price.')
+      return
+    }
+    setSplitSaving(true)
+    setErrorMsg('')
+
+    const remainingQty = Number(line.quantity) - splitQty
+    const avgCostPerUnit = Number(line.fifo_cost ?? 0) / Number(line.quantity)
+    const splitFifoCost = splitQty * avgCostPerUnit
+    const remainingFifoCost = Number(line.fifo_cost ?? 0) - splitFifoCost
+    const now = new Date().toISOString()
+    const reason = splitReasonDraft.trim()
+
+    try {
+      if (remainingQty === 0) {
+        // The whole line moves to the new price — still recorded as a
+        // fresh entry rather than edited in place, per what was asked.
+        const { error: delErr } = await supabase.from('sale_lines').delete().eq('id', line.id)
+        if (delErr) throw delErr
+      } else {
+        const { error } = await supabase
+          .from('sale_lines')
+          .update({
+            quantity: remainingQty,
+            fifo_cost: remainingFifoCost,
+            gross_profit: remainingQty * Number(line.unit_price) - remainingFifoCost,
+            price_edited_at: now,
+            price_edit_reason: reason,
+          })
+          .eq('id', line.id)
+        if (error) throw error
+      }
+
+      const { error: insErr } = await supabase.from('sale_lines').insert({
+        sale_id: line.sale_id,
+        product_id: line.product_id,
+        quantity: splitQty,
+        unit_price: newPrice,
+        is_discounted: false,
+        is_b1t1: false,
+        discount_amount: 0,
+        vat_exempt_amount: null,
+        fifo_cost: splitFifoCost,
+        gross_profit: splitQty * newPrice - splitFifoCost,
+        original_unit_price: Number(line.unit_price),
+        price_edited_at: now,
+        price_edit_reason: reason,
+      })
+      if (insErr) throw insErr
+
+      await openView(viewedSale)
+      setSplitPriceLineId(null)
+    } catch (err) {
+      setErrorMsg(`Could not split off a different price: ${err.message}`)
+    }
+    setSplitSaving(false)
   }
 
   function onProductPick(productId) {
@@ -2337,7 +2435,7 @@ export default function Sales() {
                         <td className="px-3 py-2 text-[var(--color-herb)]">{Number(l.gross_profit).toFixed(2)}</td>
                         {viewedSale?.status === 'posted' && (
                           <td className="px-3 py-2">
-                            {editingLineId !== l.id && editingDiscountQtyLineId !== l.id && (
+                            {editingLineId !== l.id && editingDiscountQtyLineId !== l.id && splitPriceLineId !== l.id && (
                               <div className="flex flex-col items-start gap-1">
                                 <button
                                   onClick={() => startEditPrice(l)}
@@ -2351,6 +2449,14 @@ export default function Sales() {
                                     className="text-xs font-medium text-[var(--color-ink-soft)] underline"
                                   >
                                     Edit discounted qty
+                                  </button>
+                                )}
+                                {!l.is_b1t1 && Number(l.quantity) > 1 && (
+                                  <button
+                                    onClick={() => startSplitPrice(l)}
+                                    className="text-xs font-medium text-[var(--color-ink-soft)] underline"
+                                  >
+                                    Split at different price
                                   </button>
                                 )}
                               </div>
@@ -2452,6 +2558,64 @@ export default function Sales() {
                               Only moves quantity between the discounted and regular price for this product —
                               the total quantity sold, inventory, and FIFO consumption are never touched. Cost is
                               split between the two by weighted average, not re-traced to specific batches.
+                            </p>
+                          </td>
+                        </tr>
+                      )}
+                      {splitPriceLineId === l.id && (
+                        <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)]">
+                          <td colSpan={7} className="px-3 py-3">
+                            <div className="flex flex-wrap items-end gap-2 text-sm">
+                              <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                                Qty to split off (of {l.quantity})
+                                <input
+                                  type="number"
+                                  step="1"
+                                  min="1"
+                                  max={Number(l.quantity) - 1}
+                                  value={splitQtyDraft}
+                                  onChange={(e) => setSplitQtyDraft(e.target.value)}
+                                  className="input mt-0.5 block w-32"
+                                />
+                              </label>
+                              <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                                New price
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={splitPriceDraft}
+                                  onChange={(e) => setSplitPriceDraft(e.target.value)}
+                                  className="input mt-0.5 block w-32"
+                                />
+                              </label>
+                              <label className="flex-1 text-xs font-medium text-[var(--color-ink-soft)]">
+                                Reason (required)
+                                <input
+                                  value={splitReasonDraft}
+                                  onChange={(e) => setSplitReasonDraft(e.target.value)}
+                                  placeholder="e.g. manager approved a special price for 2 of these"
+                                  className="input mt-0.5 block w-full"
+                                />
+                              </label>
+                              <button
+                                onClick={() => saveSplitPrice(l)}
+                                disabled={splitSaving || !splitQtyDraft || !splitPriceDraft || !splitReasonDraft.trim()}
+                                className="rounded-md bg-[var(--color-ink)] px-3 py-1.5 text-xs font-medium text-[var(--color-paper)] disabled:opacity-40"
+                              >
+                                {splitSaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button
+                                onClick={cancelSplitPrice}
+                                className="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            <p className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
+                              Creates a new, separate line for the split-off quantity at the new price — the
+                              original line's quantity shrinks to match, so the combined total, inventory, and
+                              FIFO consumption never change. This is a plain price, not a Senior/PWD discount —
+                              use "Edit discounted qty" for that instead.
                             </p>
                           </td>
                         </tr>
