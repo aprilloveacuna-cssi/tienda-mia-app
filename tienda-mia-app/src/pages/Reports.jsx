@@ -997,7 +997,9 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           if (!day || !withinRange(day, dateFrom, dateTo)) continue
           const terminal = l.sale?.pos_terminal?.trim() || 'Unspecified'
           const key = `${terminal}|${day}`
-          byGroup[key] = byGroup[key] ?? { terminal, date: day, qty: 0, sales: 0, vat: 0, discounts: 0, discountsOther: 0, vatExempt: 0, cost: 0 }
+          byGroup[key] = byGroup[key] ?? {
+            terminal, date: day, qty: 0, sales: 0, vat: 0, discounts: 0, discountsOther: 0, vatExempt: 0, exemptCharged: 0, cost: 0,
+          }
           const lineTotal = Number(l.quantity) * Number(l.unit_price)
           byGroup[key].qty += Number(l.quantity)
           byGroup[key].sales += lineTotal
@@ -1006,21 +1008,22 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           // of those. Regular lines charge the VAT-inclusive price, so VAT is
           // the portion above the VAT-exclusive amount.
           byGroup[key].vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
-          // Since migration 0037, discount_amount and vat_exempt_amount are
-          // two separate figures for a Senior/PWD line — tracked separately
-          // here too, rather than folded back into one combined number.
+          // "Discounts" here means only the Z-read's TOTAL DISCOUNTS line —
+          // Senior/PWD only. A Buy 1 Take 1 giveaway never appears as a
+          // separate line on the physical Z-read at all: the terminal is
+          // just rung up at the lower price directly, with no discount
+          // transaction recorded — so it's tracked separately below
+          // (discountsOther) rather than folded in here.
           // Guarded to only trust these on a line actually flagged
-          // is_discounted or is_b1t1 — bad historical data has shown up as
-          // a stray non-zero value on plain lines before (see migration
-          // 0040), so this never sums a value that shouldn't be there.
-          byGroup[key].discounts += l.is_discounted || l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+          // is_discounted/is_b1t1 — bad historical data has shown up as a
+          // stray non-zero value on plain lines before (see migration 0040).
+          byGroup[key].discounts += l.is_discounted ? Number(l.discount_amount ?? 0) : 0
           byGroup[key].vatExempt += l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
-          // Buy 1 Take 1 lines aren't VAT-exempt (is_discounted stays false
-          // for those — see migration 0032) but do carry a real discount_amount
-          // (the giveaway). Needed separately from the Senior/PWD portion for
-          // Net Sales below, since that giveaway isn't backed out by VAT
-          // Exempt the way a Senior/PWD reduction is.
           byGroup[key].discountsOther += l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+          // The actual amount charged for Senior/PWD lines specifically —
+          // needed to get VATable Sales and VAT Exempt Sales to match the
+          // Z-read exactly (see the derivation below).
+          byGroup[key].exemptCharged += l.is_discounted ? lineTotal : 0
 
           if (isKitchen) {
             const periodIdx = (marketExpenses ?? []).findIndex((e) => day >= e.week_start && day <= e.week_end)
@@ -1031,32 +1034,29 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           }
         }
 
-        // "Sales" is already what was actually charged — for a discounted
-        // line, that's the discounted price, not the regular one.
-        // "Discounts" and "VAT Exempt" are separate, informational amounts
-        // given up — neither sits inside Sales waiting to be subtracted
-        // again. Gross Sales (what would've been charged at full price) is
-        // Sales with both added back — never Sales minus either one.
-        //
-        // Net Sales uses two different formulas depending on the line, per
-        // how this report is meant to work:
-        //   Senior/PWD (is_discounted): Gross Sales − VAT Exempt − Discount
-        //     — which works out to exactly what was collected (Sales),
-        //     since VAT is already 0 on these lines.
-        //   Everything else (regular sales, and Buy 1 Take 1 — not
-        //     VAT-exempt, but does carry a real discount): Gross Sales − VAT.
-        // Summed across a mix of both, this reduces to:
-        //   Sales − VAT + discountsOther
-        // (VAT is already 0 on Senior/PWD lines, so subtracting the group's
-        // total VAT only ever affects non-exempt lines; discountsOther adds
-        // back just the non-exempt discount — Buy 1 Take 1's giveaway —
-        // since that one isn't already accounted for by VAT Exempt.)
+        // Every figure below is verified against a real printed Z-read
+        // (POS1, 2026-09-28), matched to the centavo:
+        //   Gross            = Sales + Discounts + Less VAT
+        //     (a Buy 1 Take 1 giveaway is deliberately NOT added back here —
+        //     the real terminal never recorded one as a separate discount,
+        //     it just rang up the lower price, so Gross wouldn't include it
+        //     either)
+        //   VATable Sales    = Sales − (amount charged for exempt lines) − VAT
+        //   VAT Exempt Sales = (amount charged for exempt lines) + Discounts
+        //     (this is the VAT-exclusive value of exempt sales — NOT the
+        //     same thing as "Less VAT"; the Z-read prints both as separate
+        //     lines and they mean genuinely different things)
+        //   Net Sales        = Sales − VAT
         const allRows = Object.values(byGroup).map((g) => {
           const grossSales = g.sales + g.discounts + g.vatExempt
+          const vatableSales = g.sales - g.exemptCharged - g.vat
+          const vatExemptSales = g.exemptCharged + g.discounts
           return {
             ...g,
             grossSales,
-            netSales: g.sales - g.vat + g.discountsOther,
+            vatableSales,
+            vatExemptSales,
+            netSales: g.sales - g.vat,
             profit: g.sales - g.vat - g.cost,
           }
         })
@@ -1088,13 +1088,19 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
               grossSales: acc.grossSales + r.grossSales,
               sales: acc.sales + r.sales,
               vat: acc.vat + r.vat,
+              vatableSales: acc.vatableSales + r.vatableSales,
               discounts: acc.discounts + r.discounts,
               vatExempt: acc.vatExempt + r.vatExempt,
+              vatExemptSales: acc.vatExemptSales + r.vatExemptSales,
               netSales: acc.netSales + r.netSales,
+              discountsOther: acc.discountsOther + r.discountsOther,
               cost: acc.cost + r.cost,
               profit: acc.profit + r.profit,
             }),
-            { qty: 0, grossSales: 0, sales: 0, vat: 0, discounts: 0, vatExempt: 0, netSales: 0, cost: 0, profit: 0 }
+            {
+              qty: 0, grossSales: 0, sales: 0, vat: 0, vatableSales: 0, discounts: 0, vatExempt: 0, vatExemptSales: 0,
+              netSales: 0, discountsOther: 0, cost: 0, profit: 0,
+            }
           )
           return { terminal, rows, totals }
         })
@@ -1116,11 +1122,21 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     const sections = []
     for (const g of terminalGroups) {
       sections.push([`POS ${g.terminal}`])
-      sections.push(['Date', 'Qty Sold', 'Gross Sales', 'Sales', 'VAT', 'Discounts', 'VAT Exempt', 'Net Sales', 'Cost', 'Profit'])
+      sections.push([
+        'Date', 'Qty Sold', 'Gross', 'Sales', 'VAT', 'VATable Sales', 'Discounts', 'Less VAT', 'VAT Exempt Sales', 'Net Sales', 'B1T1 Giveaway', 'Cost', 'Profit',
+      ])
       for (const r of g.rows) {
-        sections.push([r.date, r.qty, r.grossSales.toFixed(2), r.sales.toFixed(2), r.vat.toFixed(2), r.discounts.toFixed(2), r.vatExempt.toFixed(2), r.netSales.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2)])
+        sections.push([
+          r.date, r.qty, r.grossSales.toFixed(2), r.sales.toFixed(2), r.vat.toFixed(2), r.vatableSales.toFixed(2),
+          r.discounts.toFixed(2), r.vatExempt.toFixed(2), r.vatExemptSales.toFixed(2), r.netSales.toFixed(2),
+          r.discountsOther.toFixed(2), r.cost.toFixed(2), r.profit.toFixed(2),
+        ])
       }
-      sections.push(['Total', g.totals.qty, g.totals.grossSales.toFixed(2), g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.discounts.toFixed(2), g.totals.vatExempt.toFixed(2), g.totals.netSales.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2)])
+      sections.push([
+        'Total', g.totals.qty, g.totals.grossSales.toFixed(2), g.totals.sales.toFixed(2), g.totals.vat.toFixed(2), g.totals.vatableSales.toFixed(2),
+        g.totals.discounts.toFixed(2), g.totals.vatExempt.toFixed(2), g.totals.vatExemptSales.toFixed(2), g.totals.netSales.toFixed(2),
+        g.totals.discountsOther.toFixed(2), g.totals.cost.toFixed(2), g.totals.profit.toFixed(2),
+      ])
       sections.push([])
     }
     const csv = sections.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -1180,6 +1196,9 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           <div className="text-xs text-[var(--color-ink-soft)]">
             {dateFrom} to {dateTo} — one table per terminal, voided sales excluded
           </div>
+          <div className="mt-1 text-xs text-[var(--color-ink-soft)]">
+            Every column here is named and computed to match your terminal's own Z-reading line for line — verified against a real printed Z-read to the centavo. "VAT Exempt Sales" and "Less VAT" are deliberately different figures, same as on the Z-read itself: Less VAT is the small VAT amount excused from a Senior/PWD sale; VAT Exempt Sales is the full VAT-exclusive value of those same sales. "B1T1 Giveaway" has no equivalent line on the physical Z-read at all — a Buy 1 Take 1 sale rings up at its lower price directly, with nothing recorded as a discount — so it's shown here only for your own margin tracking, and isn't part of Gross, Discounts, or Net Sales above.
+          </div>
         </div>
 
         {loading && <div className="py-10 text-center text-sm text-[var(--color-ink-soft)]">Loading…</div>}
@@ -1195,17 +1214,21 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                 {g.terminal === 'Unspecified' || g.terminal.includes(',') ? g.terminal : `POS ${g.terminal}`}
               </div>
               <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+                <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
                     <tr>
                       <th className="px-4 py-3">Date</th>
                       <th className="px-4 py-3">Qty Sold</th>
-                      <th className="px-4 py-3">Gross Sales</th>
+                      <th className="px-4 py-3">Gross</th>
                       <th className="px-4 py-3">Sales</th>
                       <th className="px-4 py-3">VAT</th>
+                      <th className="px-4 py-3">VATable Sales</th>
                       <th className="px-4 py-3">Discounts</th>
-                      <th className="px-4 py-3">VAT Exempt</th>
+                      <th className="px-4 py-3">Less VAT</th>
+                      <th className="px-4 py-3">VAT Exempt Sales</th>
                       <th className="px-4 py-3">Net Sales</th>
+                      <th className="px-4 py-3">B1T1 Giveaway</th>
                       <th className="px-4 py-3">Cost</th>
                       <th className="px-4 py-3">Profit</th>
                     </tr>
@@ -1218,9 +1241,12 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                         <td className="px-4 py-3">{r.grossSales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.sales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.vat.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.vatableSales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.discounts.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.vatExempt.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.vatExemptSales.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.netSales.toFixed(2)}</td>
+                        <td className="px-4 py-3">{r.discountsOther.toFixed(2)}</td>
                         <td className="px-4 py-3">{r.cost.toFixed(2)}</td>
                         <td className="px-4 py-3 font-medium">{r.profit.toFixed(2)}</td>
                       </tr>
@@ -1231,14 +1257,18 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
                       <td className="px-4 py-3">{g.totals.grossSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.sales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.vat.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.vatableSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.discounts.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.vatExempt.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.vatExemptSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.netSales.toFixed(2)}</td>
+                      <td className="px-4 py-3">{g.totals.discountsOther.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.cost.toFixed(2)}</td>
                       <td className="px-4 py-3">{g.totals.profit.toFixed(2)}</td>
                     </tr>
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           ))}

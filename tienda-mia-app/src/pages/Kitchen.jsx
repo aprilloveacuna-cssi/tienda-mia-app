@@ -339,6 +339,7 @@ export default function Kitchen() {
       let discounts = 0
       let discountsOther = 0
       let vatExempt = 0
+      let exemptCharged = 0
       for (const l of kitchenLines) {
         // sale_date is a timestamptz, so it comes back with a time/timezone
         // suffix (e.g. "2026-09-04T00:00:00+00:00"). Comparing that directly
@@ -356,21 +357,20 @@ export default function Kitchen() {
           // at the VAT-exclusive price, so there's no VAT to back out of
           // those — only regular lines carry embedded VAT.
           vat += l.is_discounted ? 0 : lineTotal * (vatRatePct / 100 / (1 + vatRatePct / 100))
-          // Since migration 0037, discount_amount and vat_exempt_amount are
-          // two separate figures for a Senior/PWD line — tracked separately
-          // here too, same as Daily POS Summary. Guarded to only trust these
-          // on a line actually flagged is_discounted or is_b1t1 — bad
-          // historical data has shown up as a stray non-zero value on plain
-          // lines before (see migration 0040).
-          discounts += l.is_discounted || l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+          // "Discounts" means only Senior/PWD, matching the physical
+          // Z-read's own TOTAL DISCOUNTS line — see Daily POS Summary for
+          // the full reasoning, including why Buy 1 Take 1 is tracked
+          // separately (discountsOther) instead of folded in here.
+          // Guarded to only trust these on a line actually flagged
+          // is_discounted/is_b1t1 — bad historical data has shown up as a
+          // stray non-zero value on plain lines before (see migration 0040).
+          discounts += l.is_discounted ? Number(l.discount_amount ?? 0) : 0
           vatExempt += l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
-          // Buy 1 Take 1 lines aren't VAT-exempt but do carry a real
-          // discount_amount (the giveaway) — needed separately for Net
-          // Sales below, same reasoning as Daily POS Summary.
           discountsOther += l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+          exemptCharged += l.is_discounted ? lineTotal : 0
         }
       }
-      statsByExpense[exp.id] = { revenue, vat, discounts, vatExempt, discountsOther }
+      statsByExpense[exp.id] = { revenue, vat, discounts, vatExempt, discountsOther, exemptCharged }
     }
     setKitchenRevenueByExpense(statsByExpense)
   }
@@ -1843,17 +1843,21 @@ export default function Kitchen() {
           </form>
 
           <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
+            <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
                 <tr>
                   <th className="px-4 py-3">Week</th>
                   <th className="px-4 py-3">Market Expense</th>
-                  <th className="px-4 py-3">Gross Sales</th>
+                  <th className="px-4 py-3">Gross</th>
                   <th className="px-4 py-3">Kitchen Sales Revenue</th>
                   <th className="px-4 py-3">VAT</th>
+                  <th className="px-4 py-3">VATable Sales</th>
                   <th className="px-4 py-3">Discounts</th>
-                  <th className="px-4 py-3">VAT Exempt</th>
+                  <th className="px-4 py-3">Less VAT</th>
+                  <th className="px-4 py-3">VAT Exempt Sales</th>
                   <th className="px-4 py-3">Net Sales</th>
+                  <th className="px-4 py-3">B1T1 Giveaway</th>
                   <th className="px-4 py-3">Profit</th>
                   <th className="px-4 py-3">Notes</th>
                   <th className="px-4 py-3" />
@@ -1861,30 +1865,19 @@ export default function Kitchen() {
               </thead>
               <tbody>
                 {marketExpenses.length === 0 && (
-                  <tr><td colSpan={11} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                  <tr><td colSpan={14} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                     No weekly expenses logged yet.
                   </td></tr>
                 )}
                 {marketExpenses.map((exp) => {
-                  const stats = kitchenRevenueByExpense[exp.id] ?? { revenue: 0, vat: 0, discounts: 0, vatExempt: 0, discountsOther: 0 }
-                  // Gross Sales (what would've been charged at full price)
-                  // is revenue with Discounts and VAT Exempt both added
-                  // back — revenue is already the actual charged amount, so
-                  // neither sits inside it waiting to be subtracted again.
+                  const stats = kitchenRevenueByExpense[exp.id] ?? { revenue: 0, vat: 0, discounts: 0, vatExempt: 0, discountsOther: 0, exemptCharged: 0 }
+                  // Every formula here matches Daily POS Summary exactly
+                  // (verified there against a real printed Z-read) — see
+                  // that file for the full derivation and reasoning.
                   const grossSales = stats.revenue + stats.discounts + stats.vatExempt
-                  // Net Sales: Senior/PWD lines use Gross Sales − VAT Exempt
-                  // − Discount (which works out to exactly what was
-                  // collected, since VAT is already 0 on those); regular
-                  // and Buy 1 Take 1 lines use Gross Sales − VAT. Summed
-                  // together this reduces to revenue − VAT + discountsOther
-                  // (the Buy 1 Take 1 giveaway) — see Reports.jsx for the
-                  // full derivation.
-                  const netSales = stats.revenue - stats.vat + stats.discountsOther
-                  // Same rule as Daily POS Summary: revenue is already the
-                  // actual charged amount (post-discount), so discounts
-                  // isn't subtracted again here — it's shown for visibility,
-                  // not as a further deduction. VAT is backed out since it's
-                  // never really the business's own revenue.
+                  const vatableSales = stats.revenue - stats.exemptCharged - stats.vat
+                  const vatExemptSales = stats.exemptCharged + stats.discounts
+                  const netSales = stats.revenue - stats.vat
                   const profit = stats.revenue - stats.vat - Number(exp.amount)
                   return (
                     <tr key={exp.id} className="border-b border-[var(--color-line)] last:border-0">
@@ -1893,9 +1886,12 @@ export default function Kitchen() {
                       <td className="px-4 py-3">{grossSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.revenue.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.vat.toFixed(2)}</td>
+                      <td className="px-4 py-3">{vatableSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.discounts.toFixed(2)}</td>
                       <td className="px-4 py-3">{stats.vatExempt.toFixed(2)}</td>
+                      <td className="px-4 py-3">{vatExemptSales.toFixed(2)}</td>
                       <td className="px-4 py-3">{netSales.toFixed(2)}</td>
+                      <td className="px-4 py-3">{stats.discountsOther.toFixed(2)}</td>
                       <td className="px-4 py-3">
                         <StatusChip tone={profit >= 0 ? 'ok' : 'critical'}>{profit.toFixed(2)}</StatusChip>
                       </td>
@@ -1913,6 +1909,7 @@ export default function Kitchen() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       ) : tab === 'dailyMeals' ? (
