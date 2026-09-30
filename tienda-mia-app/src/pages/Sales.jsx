@@ -90,6 +90,13 @@ export default function Sales() {
   const [editPriceDraft, setEditPriceDraft] = useState('')
   const [editReasonDraft, setEditReasonDraft] = useState('')
   const [editSaving, setEditSaving] = useState(false)
+  // Moving quantity between a discounted line and its regular-price
+  // sibling — a separate action from the price edit above, since it
+  // touches two rows (or creates/removes one) instead of one.
+  const [editingDiscountQtyLineId, setEditingDiscountQtyLineId] = useState(null)
+  const [editDiscountQtyDraft, setEditDiscountQtyDraft] = useState('')
+  const [editDiscountQtyReason, setEditDiscountQtyReason] = useState('')
+  const [editDiscountQtySaving, setEditDiscountQtySaving] = useState(false)
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
@@ -252,6 +259,7 @@ export default function Sales() {
   }
 
   function startEditPrice(line) {
+    setEditingDiscountQtyLineId(null) // mutually exclusive with a qty edit in progress
     setEditingLineId(line.id)
     setEditPriceDraft(String(line.is_b1t1 ? line.b1t1_price : line.unit_price))
     setEditReasonDraft('')
@@ -333,6 +341,155 @@ export default function Sales() {
     await openView(viewedSale)
     setEditingLineId(null)
     setEditSaving(false)
+  }
+
+  function startEditDiscountQty(line) {
+    setEditingLineId(null) // mutually exclusive with a price edit in progress
+    setEditingDiscountQtyLineId(line.id)
+    setEditDiscountQtyDraft(String(line.quantity))
+    setEditDiscountQtyReason('')
+  }
+
+  function cancelEditDiscountQty() {
+    setEditingDiscountQtyLineId(null)
+  }
+
+  // Moves quantity between a discounted line and its regular-price sibling
+  // (same product, same sale) — never changes their combined total, so
+  // inventory and quantity sold are untouched. Cost is reallocated between
+  // the two by weighted average (combined fifo_cost ÷ combined quantity),
+  // not re-traced to specific batches — an honest approximation, since the
+  // physical consumption already happened and wasn't recorded per
+  // discount-status, only per line.
+  async function saveEditDiscountQty(discountedLine) {
+    const newDiscountedQty = Number(editDiscountQtyDraft)
+    if (isNaN(newDiscountedQty) || newDiscountedQty < 0) return
+    if (!editDiscountQtyReason.trim()) {
+      setErrorMsg('A reason is required to change the discounted quantity.')
+      return
+    }
+    setEditDiscountQtySaving(true)
+    setErrorMsg('')
+
+    const regularLine = viewedLines.find(
+      (l) => l.product_id === discountedLine.product_id && l.id !== discountedLine.id && !l.is_discounted && !l.is_b1t1
+    )
+    const totalQty = Number(discountedLine.quantity) + Number(regularLine?.quantity ?? 0)
+
+    if (newDiscountedQty > totalQty) {
+      setErrorMsg(`Can't discount more than the ${totalQty} ${discountedLine.product?.unit ?? ''} sold on this line.`)
+      setEditDiscountQtySaving(false)
+      return
+    }
+
+    const newRegularQty = totalQty - newDiscountedQty
+    const discountPerUnit = Number(discountedLine.discount_amount) / Number(discountedLine.quantity)
+    const vatExemptPerUnit = Number(discountedLine.vat_exempt_amount) / Number(discountedLine.quantity)
+    const combinedFifoCost = Number(discountedLine.fifo_cost ?? 0) + Number(regularLine?.fifo_cost ?? 0)
+    const regularUnitPrice = regularLine ? Number(regularLine.unit_price) : Number(discountedLine.product?.selling_price ?? 0)
+    const now = new Date().toISOString()
+    const reason = editDiscountQtyReason.trim()
+
+    try {
+      if (newDiscountedQty === 0) {
+        // Fully un-discount: delete the discounted line, fold its total
+        // into the regular line — creating one if it didn't already exist.
+        const { error: delErr } = await supabase.from('sale_lines').delete().eq('id', discountedLine.id)
+        if (delErr) throw delErr
+        const regularPayload = {
+          quantity: totalQty,
+          fifo_cost: combinedFifoCost,
+          gross_profit: totalQty * regularUnitPrice - combinedFifoCost,
+          discounted_qty_edited_at: now,
+          discounted_qty_edit_reason: reason,
+        }
+        if (regularLine) {
+          const { error } = await supabase.from('sale_lines').update(regularPayload).eq('id', regularLine.id)
+          if (error) throw error
+        } else {
+          const { error } = await supabase.from('sale_lines').insert({
+            sale_id: discountedLine.sale_id,
+            product_id: discountedLine.product_id,
+            unit_price: regularUnitPrice,
+            is_discounted: false,
+            is_b1t1: false,
+            discount_amount: 0,
+            vat_exempt_amount: null,
+            ...regularPayload,
+          })
+          if (error) throw error
+        }
+      } else if (newRegularQty === 0) {
+        // Fully discount: delete the regular sibling (if any), expand the
+        // discounted line to the full total.
+        if (regularLine) {
+          const { error: delErr } = await supabase.from('sale_lines').delete().eq('id', regularLine.id)
+          if (delErr) throw delErr
+        }
+        const { error } = await supabase
+          .from('sale_lines')
+          .update({
+            quantity: totalQty,
+            discount_amount: totalQty * discountPerUnit,
+            vat_exempt_amount: totalQty * vatExemptPerUnit,
+            fifo_cost: combinedFifoCost,
+            gross_profit: totalQty * Number(discountedLine.unit_price) - combinedFifoCost,
+            discounted_qty_edited_at: now,
+            discounted_qty_edit_reason: reason,
+          })
+          .eq('id', discountedLine.id)
+        if (error) throw error
+      } else {
+        // Genuine split between both.
+        const avgCostPerUnit = totalQty > 0 ? combinedFifoCost / totalQty : 0
+        const newDiscountedFifoCost = newDiscountedQty * avgCostPerUnit
+        const newRegularFifoCost = combinedFifoCost - newDiscountedFifoCost
+
+        const { error: err1 } = await supabase
+          .from('sale_lines')
+          .update({
+            quantity: newDiscountedQty,
+            discount_amount: newDiscountedQty * discountPerUnit,
+            vat_exempt_amount: newDiscountedQty * vatExemptPerUnit,
+            fifo_cost: newDiscountedFifoCost,
+            gross_profit: newDiscountedQty * Number(discountedLine.unit_price) - newDiscountedFifoCost,
+            discounted_qty_edited_at: now,
+            discounted_qty_edit_reason: reason,
+          })
+          .eq('id', discountedLine.id)
+        if (err1) throw err1
+
+        const regularPayload = {
+          quantity: newRegularQty,
+          fifo_cost: newRegularFifoCost,
+          gross_profit: newRegularQty * regularUnitPrice - newRegularFifoCost,
+          discounted_qty_edited_at: now,
+          discounted_qty_edit_reason: reason,
+        }
+        if (regularLine) {
+          const { error: err2 } = await supabase.from('sale_lines').update(regularPayload).eq('id', regularLine.id)
+          if (err2) throw err2
+        } else {
+          const { error: err2 } = await supabase.from('sale_lines').insert({
+            sale_id: discountedLine.sale_id,
+            product_id: discountedLine.product_id,
+            unit_price: regularUnitPrice,
+            is_discounted: false,
+            is_b1t1: false,
+            discount_amount: 0,
+            vat_exempt_amount: null,
+            ...regularPayload,
+          })
+          if (err2) throw err2
+        }
+      }
+
+      await openView(viewedSale)
+      setEditingDiscountQtyLineId(null)
+    } catch (err) {
+      setErrorMsg(`Could not update discounted quantity: ${err.message}`)
+    }
+    setEditDiscountQtySaving(false)
   }
 
   function onProductPick(productId) {
@@ -2176,13 +2333,23 @@ export default function Sales() {
                         <td className="px-3 py-2 text-[var(--color-herb)]">{Number(l.gross_profit).toFixed(2)}</td>
                         {viewedSale?.status === 'posted' && (
                           <td className="px-3 py-2">
-                            {editingLineId !== l.id && (
-                              <button
-                                onClick={() => startEditPrice(l)}
-                                className="text-xs font-medium text-[var(--color-ink-soft)] underline"
-                              >
-                                Edit price
-                              </button>
+                            {editingLineId !== l.id && editingDiscountQtyLineId !== l.id && (
+                              <div className="flex flex-col items-start gap-1">
+                                <button
+                                  onClick={() => startEditPrice(l)}
+                                  className="text-xs font-medium text-[var(--color-ink-soft)] underline"
+                                >
+                                  Edit price
+                                </button>
+                                {l.is_discounted && (
+                                  <button
+                                    onClick={() => startEditDiscountQty(l)}
+                                    className="text-xs font-medium text-[var(--color-ink-soft)] underline"
+                                  >
+                                    Edit discounted qty
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </td>
                         )}
@@ -2227,6 +2394,57 @@ export default function Sales() {
                             <p className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
                               Quantity, FIFO cost, and Inventory are never affected — only the price and everything
                               that follows from it (profit{l.is_discounted ? ', the discount/VAT-exempt split,' : ''} etc.).
+                            </p>
+                          </td>
+                        </tr>
+                      )}
+                      {editingDiscountQtyLineId === l.id && (
+                        <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)]">
+                          <td colSpan={7} className="px-3 py-3">
+                            <div className="flex flex-wrap items-end gap-2 text-sm">
+                              <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                                New discounted qty (of {(() => {
+                                  const sibling = viewedLines.find(
+                                    (s) => s.product_id === l.product_id && s.id !== l.id && !s.is_discounted && !s.is_b1t1
+                                  )
+                                  return Number(l.quantity) + Number(sibling?.quantity ?? 0)
+                                })()} total)
+                                <input
+                                  type="number"
+                                  step="1"
+                                  min="0"
+                                  value={editDiscountQtyDraft}
+                                  onChange={(e) => setEditDiscountQtyDraft(e.target.value)}
+                                  className="input mt-0.5 block w-32"
+                                />
+                              </label>
+                              <label className="flex-1 text-xs font-medium text-[var(--color-ink-soft)]">
+                                Reason (required)
+                                <input
+                                  value={editDiscountQtyReason}
+                                  onChange={(e) => setEditDiscountQtyReason(e.target.value)}
+                                  placeholder="e.g. should have been 2 discounted, not 1"
+                                  className="input mt-0.5 block w-full"
+                                />
+                              </label>
+                              <button
+                                onClick={() => saveEditDiscountQty(l)}
+                                disabled={editDiscountQtySaving || editDiscountQtyDraft === '' || !editDiscountQtyReason.trim()}
+                                className="rounded-md bg-[var(--color-ink)] px-3 py-1.5 text-xs font-medium text-[var(--color-paper)] disabled:opacity-40"
+                              >
+                                {editDiscountQtySaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button
+                                onClick={cancelEditDiscountQty}
+                                className="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            <p className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
+                              Only moves quantity between the discounted and regular price for this product —
+                              the total quantity sold, inventory, and FIFO consumption are never touched. Cost is
+                              split between the two by weighted average, not re-traced to specific batches.
                             </p>
                           </td>
                         </tr>
