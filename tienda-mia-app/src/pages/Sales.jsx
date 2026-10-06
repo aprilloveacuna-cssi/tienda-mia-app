@@ -108,6 +108,12 @@ export default function Sales() {
   const [splitPriceDraft, setSplitPriceDraft] = useState('')
   const [splitReasonDraft, setSplitReasonDraft] = useState('')
   const [splitSaving, setSplitSaving] = useState(false)
+  // Download of sales detail for a date or date range — one row per sale line.
+  const [exportFrom, setExportFrom] = useState(today())
+  const [exportTo, setExportTo] = useState(today())
+  const [exportIncludeVoided, setExportIncludeVoided] = useState(false)
+  const [exportBusy, setExportBusy] = useState(false)
+  const [exportMsg, setExportMsg] = useState('')
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
@@ -182,6 +188,155 @@ export default function Sales() {
       setSales(data ?? [])
     }
     setLoading(false)
+  }
+
+  // Downloads every sale line for the chosen date(s) as a CSV — one row per
+  // line, with a totals row at the bottom, so a single day can be checked
+  // straight against a terminal's Z-reading (the Line Total sum is the
+  // Z-read's DAILY SALES). Voided sales are left out by default, same as the
+  // Daily POS Summary and the Z-read itself.
+  //
+  // Dates follow the same convention as Reports.jsx: the calendar date of
+  // sale_date as stored (first 10 characters), not shifted to local time.
+  async function downloadSalesExport() {
+    if (!exportFrom || !exportTo || exportFrom > exportTo) {
+      setExportMsg('Pick a valid date range — "From" can\'t be after "To".')
+      return
+    }
+    setExportBusy(true)
+    setExportMsg('')
+
+    // PostgREST silently stops at 1000 rows per request, so everything here
+    // is paged — same reason fetchAllRows exists.
+    async function fetchPaged(buildQuery) {
+      const pageSize = 1000
+      let all = []
+      let from = 0
+      while (true) {
+        const { data, error } = await buildQuery().range(from, from + pageSize - 1)
+        if (error) throw error
+        all = all.concat(data ?? [])
+        if (!data || data.length < pageSize) break
+        from += pageSize
+      }
+      return all
+    }
+
+    try {
+      const startIso = `${exportFrom}T00:00:00Z`
+      const endExclusive = new Date(`${exportTo}T00:00:00Z`)
+      endExclusive.setUTCDate(endExclusive.getUTCDate() + 1)
+      const endIso = endExclusive.toISOString()
+
+      const salesInRange = await fetchPaged(() =>
+        supabase
+          .from('sales')
+          .select('id, sale_number, sale_date, pos_terminal, cashier, status')
+          .gte('sale_date', startIso)
+          .lt('sale_date', endIso)
+          .order('sale_date', { ascending: true })
+          .order('id', { ascending: true })
+      )
+      const included = salesInRange.filter((s) => exportIncludeVoided || s.status !== 'voided')
+      if (included.length === 0) {
+        setExportMsg(
+          `No ${exportIncludeVoided ? '' : 'non-voided '}sales found for ${exportFrom === exportTo ? exportFrom : `${exportFrom} to ${exportTo}`}.`
+        )
+        setExportBusy(false)
+        return
+      }
+
+      const saleById = Object.fromEntries(included.map((s) => [s.id, s]))
+      const ids = included.map((s) => s.id)
+      let lines = []
+      for (let i = 0; i < ids.length; i += 50) {
+        const chunk = ids.slice(i, i + 50)
+        const chunkLines = await fetchPaged(() =>
+          supabase
+            .from('sale_lines')
+            .select('*, product:products(name, sku, barcode, unit, category)')
+            .in('sale_id', chunk)
+            .order('id', { ascending: true })
+        )
+        lines = lines.concat(chunkLines)
+      }
+
+      const rows = lines
+        .map((l) => ({ l, sale: saleById[l.sale_id] }))
+        .filter((r) => r.sale)
+        .sort((a, b) => {
+          const ad = String(a.sale.sale_date)
+          const bd = String(b.sale.sale_date)
+          if (ad !== bd) return ad < bd ? -1 : 1
+          const an = String(a.sale.pos_terminal ?? '')
+          const bn = String(b.sale.pos_terminal ?? '')
+          if (an !== bn) return an.localeCompare(bn, undefined, { numeric: true })
+          const sn = String(a.sale.sale_number).localeCompare(String(b.sale.sale_number), undefined, { numeric: true })
+          if (sn !== 0) return sn
+          return String(a.l.product?.name ?? '').localeCompare(String(b.l.product?.name ?? ''))
+        })
+
+      const q = (v) => {
+        const s = v == null ? '' : String(v)
+        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+      }
+      const money = (n) => Number(n || 0).toFixed(2)
+
+      const header = [
+        'Date', 'Sale #', 'Terminal', 'Cashier', 'Status', 'Barcode', 'SKU', 'Product', 'Category', 'Qty', 'Unit',
+        'Unit Price', 'Line Total', 'Type', 'Discount (SC/PWD)', 'Less VAT', 'B1T1 Giveaway', 'FIFO Cost', 'Profit', 'Corrected After Posting',
+      ]
+      const totals = { qty: 0, lineTotal: 0, discount: 0, lessVat: 0, b1t1: 0, cost: 0, profit: 0 }
+      const out = [header.map(q).join(',')]
+
+      for (const { l, sale } of rows) {
+        const qty = Number(l.quantity)
+        const lineTotal = qty * Number(l.unit_price)
+        // Same guard as the reports: these two columns are only meaningful on
+        // a line actually flagged as Senior/PWD (or B1T1 for the giveaway).
+        const discount = l.is_discounted ? Number(l.discount_amount ?? 0) : 0
+        const lessVat = l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
+        const b1t1 = l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+        const type = l.is_discounted ? 'Senior/PWD' : l.is_b1t1 ? 'B1T1' : 'Regular'
+        const counted = sale.status !== 'voided'
+        if (counted) {
+          totals.qty += qty
+          totals.lineTotal += lineTotal
+          totals.discount += discount
+          totals.lessVat += lessVat
+          totals.b1t1 += b1t1
+          totals.cost += Number(l.fifo_cost ?? 0)
+          totals.profit += Number(l.gross_profit ?? 0)
+        }
+        out.push(
+          [
+            String(sale.sale_date).slice(0, 10), sale.sale_number, sale.pos_terminal ?? '', sale.cashier ?? '', sale.status,
+            l.product?.barcode ?? '', l.product?.sku ?? '', l.product?.name ?? '', l.product?.category ?? '',
+            qty, l.product?.unit ?? '', money(l.unit_price), money(lineTotal), type, money(discount), money(lessVat), money(b1t1),
+            money(l.fifo_cost), money(l.gross_profit), l.price_edited_at || l.discounted_qty_edited_at ? 'Yes' : '',
+          ]
+            .map(q)
+            .join(',')
+        )
+      }
+      out.push('')
+      out.push(
+        [
+          'TOTAL (voided excluded)', '', '', '', '', '', '', '', '', totals.qty, '', '', money(totals.lineTotal), '',
+          money(totals.discount), money(totals.lessVat), money(totals.b1t1), money(totals.cost), money(totals.profit), '',
+        ]
+          .map(q)
+          .join(',')
+      )
+
+      const fileName = exportFrom === exportTo ? `sales_${exportFrom}.csv` : `sales_${exportFrom}_to_${exportTo}.csv`
+      // BOM so Excel opens it as UTF-8 instead of guessing an encoding.
+      downloadFile(fileName, '\uFEFF' + out.join('\r\n'), 'text/csv;charset=utf-8;')
+      setExportMsg(`Downloaded ${rows.length} line${rows.length === 1 ? '' : 's'} from ${included.length} sale${included.length === 1 ? '' : 's'}.`)
+    } catch (err) {
+      setExportMsg(`Could not download: ${err.message ?? err}`)
+    }
+    setExportBusy(false)
   }
 
   async function loadProducts() {
@@ -1880,6 +2035,45 @@ export default function Sales() {
           {errorMsg}
         </div>
       )}
+
+      <div className="mb-4 flex flex-wrap items-end gap-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-3.5 py-3">
+        <div className="text-sm font-medium">Download sales</div>
+        <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+          From
+          <input
+            type="date"
+            value={exportFrom}
+            onChange={(e) => setExportFrom(e.target.value)}
+            className="input mt-0.5 block"
+          />
+        </label>
+        <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+          To
+          <input
+            type="date"
+            value={exportTo}
+            onChange={(e) => setExportTo(e.target.value)}
+            className="input mt-0.5 block"
+          />
+        </label>
+        <label className="flex items-center gap-1.5 pb-2 text-xs text-[var(--color-ink-soft)]">
+          <input
+            type="checkbox"
+            checked={exportIncludeVoided}
+            onChange={(e) => setExportIncludeVoided(e.target.checked)}
+          />
+          Include voided
+        </label>
+        <button
+          onClick={downloadSalesExport}
+          disabled={exportBusy}
+          className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-40"
+        >
+          <FileDown size={15} />
+          {exportBusy ? 'Preparing…' : 'Download CSV'}
+        </button>
+        {exportMsg && <div className="basis-full text-xs text-[var(--color-ink-soft)]">{exportMsg}</div>}
+      </div>
 
       <SearchBar value={search} onChange={setSearch} placeholder="Search by sale #, terminal, or cashier" />
 
