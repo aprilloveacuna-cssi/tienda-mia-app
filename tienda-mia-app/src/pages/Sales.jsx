@@ -113,6 +113,98 @@ function buildSalesCsv(rows) {
   return out.join('\r\n')
 }
 
+// Takes the first `n` units out of a FIFO consumption list, splitting a batch
+// entry in two if the cut falls inside it. Returns [taken, rest].
+function takeUnits(consumption, n) {
+  const taken = []
+  const rest = []
+  let need = n
+  for (const c of consumption) {
+    if (need <= 1e-9) {
+      rest.push(c)
+    } else if (c.qty <= need + 1e-9) {
+      taken.push(c)
+      need -= c.qty
+    } else {
+      taken.push({ ...c, qty: need })
+      rest.push({ ...c, qty: c.qty - need })
+      need = 0
+    }
+  }
+  return [taken, rest]
+}
+
+// Splits `splitQty` units off a line being built and gives them a different
+// price, as their own line. Nothing is posted yet, so stock can be divided
+// exactly: the units run in order — real batch units first (in FIFO order),
+// then any open/oversold tail — the original line keeps the first
+// (quantity − splitQty) of them and the new line takes the rest. Total
+// quantity, total batch consumption, and total cost are unchanged.
+//
+// If the original was a Senior/PWD line, it keeps its status (discount and
+// VAT-exempt scale down with its quantity) and the split-off units become a
+// plain line at the new price — a discounted split has its own tool.
+// Returns [remainingLine, splitLine].
+function splitLineAtPrice(line, splitQty, newPrice) {
+  const total = Number(line.quantity)
+  const remainingQty = total - splitQty
+  const consumption = line.consumption ?? []
+  const consumedTotal = consumption.reduce((sum, c) => sum + c.qty, 0)
+  const consumptionCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+
+  const [remainTaken, splitTaken] = takeUnits(consumption, Math.min(remainingQty, consumedTotal))
+
+  // Cost of units not covered by a batch (open/oversold, or a backfilled
+  // line with no batches at all) is whatever the line already carried beyond
+  // its batch cost, spread evenly over those units.
+  const uncoveredUnits = Math.max(0, total - consumedTotal)
+  const uncoveredCostPerUnit = uncoveredUnits > 1e-9 ? (Number(line.fifo_cost ?? 0) - consumptionCost) / uncoveredUnits : 0
+  const remainingUncovered = Math.max(0, remainingQty - consumedTotal)
+  const remainingCost =
+    remainTaken.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + remainingUncovered * uncoveredCostPerUnit
+  const splitCost = Number(line.fifo_cost ?? 0) - remainingCost
+
+  // Open/oversold quantity as the line itself declared it (the tail units).
+  const declaredOpen = line.openQty
+  const remainingOpen =
+    declaredOpen === undefined ? undefined : Math.max(0, remainingQty - (total - declaredOpen))
+  const splitOpen = declaredOpen === undefined ? undefined : declaredOpen - remainingOpen
+
+  const ratio = remainingQty / total
+  const remainingLine = {
+    ...line,
+    quantity: remainingQty,
+    line_total: remainingQty * Number(line.unit_price),
+    consumption: remainTaken,
+    fifo_cost: remainingCost,
+    gross_profit: remainingQty * Number(line.unit_price) - remainingCost,
+    ...(remainingOpen === undefined ? {} : { openQty: remainingOpen, isOversold: Boolean(line.isOversold) && remainingOpen > 0 }),
+    ...(line.is_discounted
+      ? {
+          discount_amount: Number(line.discount_amount ?? 0) * ratio,
+          vat_exempt_amount: line.vat_exempt_amount == null ? line.vat_exempt_amount : Number(line.vat_exempt_amount) * ratio,
+        }
+      : {}),
+  }
+  const splitLine = {
+    ...line,
+    tempId: crypto.randomUUID(),
+    quantity: splitQty,
+    unit_price: newPrice,
+    line_total: splitQty * newPrice,
+    consumption: splitTaken,
+    fifo_cost: splitCost,
+    gross_profit: splitQty * newPrice - splitCost,
+    is_discounted: false,
+    discount_amount: 0,
+    vat_exempt_amount: null,
+    ...(splitOpen === undefined ? {} : { openQty: splitOpen, isOversold: Boolean(line.isOversold) && splitOpen > 0 }),
+    oversoldNote: null,
+    splitOff: true,
+  }
+  return [remainingLine, splitLine]
+}
+
 export default function Sales() {
   const [sales, setSales] = useState([])
 
@@ -180,6 +272,11 @@ export default function Sales() {
   // the new-sale form to that day and makes the POS file import refuse a file
   // for any other day or terminal.
   const [reimportContext, setReimportContext] = useState(null)
+  // Splitting a line of the sale being built (imported or typed) at a
+  // different price — the form for it opens under the line.
+  const [splitPendingId, setSplitPendingId] = useState(null)
+  const [splitPendingQty, setSplitPendingQty] = useState('')
+  const [splitPendingPrice, setSplitPendingPrice] = useState('')
   useEffect(() => {
     if (!panelOpen) setReimportContext(null)
   }, [panelOpen])
@@ -935,12 +1032,18 @@ export default function Sales() {
     const discountedUnitPrice = Math.round(vatExclusivePrice * (1 - discountPct / 100) * 100) / 100
     const vatExemptPerUnit = Number(product.selling_price) - vatExclusivePrice
     const discountPerUnit = vatExclusivePrice - discountedUnitPrice
-    await ensureKitchenStock(product, totalQty, headerForm.sale_date)
+    // A sale dated before inventory tracking started touches no stock at all —
+    // no batches, no ledger rows; cost is approximated from today's cost.
+    if (!isBackfillSale) await ensureKitchenStock(product, totalQty, headerForm.sale_date)
     const stockGroupIds = resolveStockGroupIds(product)
 
     if (discountedQty > 0) {
-      const { consumption } = await computeFifoConsumption(stockGroupIds, discountedQty, reservationSource)
-      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+      const consumption = isBackfillSale
+        ? []
+        : (await computeFifoConsumption(stockGroupIds, discountedQty, reservationSource)).consumption
+      const fifoCost = isBackfillSale
+        ? discountedQty * Number(product.current_cost ?? 0)
+        : consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
       const lineTotal = discountedQty * discountedUnitPrice
       lines.push({
         tempId: crypto.randomUUID(),
@@ -961,8 +1064,12 @@ export default function Sales() {
     }
 
     if (regularQty > 0) {
-      const { consumption } = await computeFifoConsumption(stockGroupIds, regularQty, [...reservationSource, ...lines])
-      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
+      const consumption = isBackfillSale
+        ? []
+        : (await computeFifoConsumption(stockGroupIds, regularQty, [...reservationSource, ...lines])).consumption
+      const fifoCost = isBackfillSale
+        ? regularQty * Number(product.current_cost ?? 0)
+        : consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0)
       const lineTotal = regularQty * Number(product.selling_price)
       lines.push({
         tempId: crypto.randomUUID(),
@@ -1349,38 +1456,57 @@ export default function Sales() {
   // Shared by resolveMismatchUpdatePrice and resolveMismatchUseOnce — both
   // end up doing the same stock check and building the same kind of line,
   // just with different opinions on whether products.selling_price changes.
-  async function addResolvedMismatchLine(mismatch, product, unitPrice) {
-    try {
+  // Builds the line for a mismatched import row at a given unit price, with
+  // its stock allocation — or, for a sale dated before inventory tracking
+  // started, with no stock touched at all (same rule as every other way of
+  // adding a line; see inventoryTrackingStartDate).
+  async function buildResolvedMismatchLine(mismatch, product, unitPrice) {
+    const lineTotal = mismatch.qty * unitPrice
+    let consumption = []
+    let openQty = 0
+    let isOversold = false
+    let oversoldNote = null
+    let fifoCost
+
+    if (isBackfillSale) {
+      fifoCost = mismatch.qty * Number(product.current_cost ?? 0)
+    } else {
       const reservationSource = [...pendingLines, ...importPreviewValid]
       await ensureKitchenStock(product, mismatch.qty, headerForm.sale_date)
       const stockGroupIds = resolveStockGroupIds(product)
-      const { consumption, satisfied, totalAvailable } = await computeFifoConsumption(stockGroupIds, mismatch.qty, reservationSource)
-      const isOversold = !satisfied && !product.unlimited_stock
-      const lineTotal = mismatch.qty * unitPrice
+      const result = await computeFifoConsumption(stockGroupIds, mismatch.qty, reservationSource)
+      consumption = result.consumption
+      isOversold = !result.satisfied && !product.unlimited_stock
       const consumedQty = consumption.reduce((sum, c) => sum + c.qty, 0)
-      const openQty = mismatch.qty - consumedQty
-      const fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
-      setImportPreviewValid([
-        ...importPreviewValid,
-        {
-          tempId: crypto.randomUUID(),
-          product_id: product.id,
-          product_name: product.name,
-          category: product.category,
-          unit: product.unit,
-          quantity: mismatch.qty,
-          unit_price: unitPrice,
-          line_total: lineTotal,
-          fifo_cost: fifoCost,
-          gross_profit: lineTotal - fifoCost,
-          consumption,
-          openQty,
-          isOversold,
-          oversoldNote: isOversold ? `only ${totalAvailable} ${product.unit} were in stock — sold anyway, now negative` : null,
-          is_discounted: false,
-          discount_amount: 0,
-        },
-      ])
+      openQty = mismatch.qty - consumedQty
+      fifoCost = consumption.reduce((sum, c) => sum + c.qty * c.unit_cost, 0) + openQty * Number(product.current_cost ?? 0)
+      oversoldNote = isOversold ? `only ${result.totalAvailable} ${product.unit} were in stock — sold anyway, now negative` : null
+    }
+
+    return {
+      tempId: crypto.randomUUID(),
+      product_id: product.id,
+      product_name: product.name,
+      category: product.category,
+      unit: product.unit,
+      quantity: mismatch.qty,
+      unit_price: unitPrice,
+      line_total: lineTotal,
+      fifo_cost: fifoCost,
+      gross_profit: lineTotal - fifoCost,
+      consumption,
+      openQty,
+      isOversold,
+      oversoldNote,
+      is_discounted: false,
+      discount_amount: 0,
+    }
+  }
+
+  async function addResolvedMismatchLine(mismatch, product, unitPrice) {
+    try {
+      const line = await buildResolvedMismatchLine(mismatch, product, unitPrice)
+      setImportPreviewValid([...importPreviewValid, line])
     } catch {
       setImportPreviewSkipped([
         ...importPreviewSkipped,
@@ -1391,6 +1517,59 @@ export default function Sales() {
           barcode: product.barcode,
           qty: mismatch.qty,
           price: unitPrice,
+          priceLabel: 'unit price',
+        },
+      ])
+    }
+    setImportMismatches(importMismatches.filter((m) => m.tempId !== mismatch.tempId))
+  }
+
+  function patchMismatch(tempId, patch) {
+    setImportMismatches(importMismatches.map((m) => (m.tempId === tempId ? { ...m, ...patch } : m)))
+  }
+
+  // Typing a quantity pre-fills the price that makes the split add up to the
+  // file's own total for this row (the rest staying at the recorded price),
+  // until the price is typed over by hand.
+  function onMismatchSplitQty(m, value) {
+    const k = Number(value)
+    const patch = { splitQtyDraft: value }
+    if (!m.splitPriceTouched && k > 0 && k < m.qty) {
+      const fileTotal = m.givenUnitPrice * m.qty
+      const x = (fileTotal - (m.qty - k) * m.recordedPrice) / k
+      patch.splitPriceDraft = x > 0 ? x.toFixed(2) : ''
+    }
+    patchMismatch(m.tempId, patch)
+  }
+
+  function onMismatchSplitPrice(m, value) {
+    patchMismatch(m.tempId, { splitPriceDraft: value, splitPriceTouched: true })
+  }
+
+  // Some units at the recorded price, the rest at a different one — instead
+  // of averaging them into one line that matches neither.
+  async function resolveMismatchSplit(mismatch) {
+    const k = Number(mismatch.splitQtyDraft)
+    const price = Number(mismatch.splitPriceDraft)
+    if (!k || k <= 0 || k >= mismatch.qty || !price || price <= 0) {
+      setErrorMsg(`Enter a quantity from 1 to ${mismatch.qty - 1} and a price for those units.`)
+      return
+    }
+    setErrorMsg('')
+    try {
+      const base = await buildResolvedMismatchLine(mismatch, mismatch.product, mismatch.recordedPrice)
+      const parts = splitLineAtPrice(base, k, price)
+      setImportPreviewValid([...importPreviewValid, ...parts])
+    } catch {
+      setImportPreviewSkipped([
+        ...importPreviewSkipped,
+        {
+          rowNum: mismatch.rowNum,
+          reason: 'Could not check stock for this row',
+          productName: mismatch.product.name,
+          barcode: mismatch.product.barcode,
+          qty: mismatch.qty,
+          price: mismatch.givenUnitPrice,
           priceLabel: 'unit price',
         },
       ])
@@ -1810,6 +1989,33 @@ export default function Sales() {
     }
   }
 
+
+  function startSplitPending(line) {
+    setSplitPendingId(line.tempId)
+    setSplitPendingQty('')
+    setSplitPendingPrice(String(line.unit_price))
+  }
+
+  function cancelSplitPending() {
+    setSplitPendingId(null)
+  }
+
+  function confirmSplitPending(line) {
+    const k = Number(splitPendingQty)
+    const price = Number(splitPendingPrice)
+    if (!k || k <= 0 || k >= Number(line.quantity)) {
+      setErrorMsg(`Enter a quantity from 1 to ${Number(line.quantity) - 1} to split off. To change the whole line's price, use the pencil instead.`)
+      return
+    }
+    if (!price || price <= 0) {
+      setErrorMsg('Enter the new price for the split-off units.')
+      return
+    }
+    setErrorMsg('')
+    const parts = splitLineAtPrice(line, k, price)
+    setPendingLines(pendingLines.flatMap((l) => (l.tempId === line.tempId ? parts : [l])))
+    setSplitPendingId(null)
+  }
 
   function removeLine(tempId) {
     setPendingLines(pendingLines.filter((l) => l.tempId !== tempId))
@@ -2370,7 +2576,8 @@ export default function Sales() {
                     </tr>
                   )}
                   {pendingLines.map((l) => (
-                    <tr key={l.tempId} className="border-b border-[var(--color-line)] last:border-0">
+                    <Fragment key={l.tempId}>
+                    <tr className="border-b border-[var(--color-line)] last:border-0">
                       <td className="px-3 py-2">
                         {l.product_name}
                         {l.isOversold ? (
@@ -2398,6 +2605,14 @@ export default function Sales() {
                             discounted
                           </span>
                         )}
+                        {l.splitOff && (
+                          <span
+                            title="Split off from another line at a different price — the units and their cost came out of that line, so quantity and stock are unchanged"
+                            className="ml-1.5 rounded-full bg-[var(--color-amber-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-amber)]"
+                          >
+                            split price
+                          </span>
+                        )}
                         {l.is_b1t1 && (
                           <span
                             title={`Buy 1 Take 1 — ₱${Number(l.b1t1_price).toFixed(2)} per set, ₱${l.discount_amount.toFixed(2)} given away`}
@@ -2413,7 +2628,15 @@ export default function Sales() {
                       <td className="px-3 py-2">{l.line_total.toFixed(2)}</td>
                       <td className="px-3 py-2 text-[var(--color-herb)]">{l.gross_profit.toFixed(2)}</td>
                       <td className="px-3 py-2">
-                        <div className="flex gap-1">
+                        <div className="flex items-center gap-1">
+                          {!l.is_b1t1 && Number(l.quantity) > 1 && (
+                            <button
+                              onClick={() => startSplitPending(l)}
+                              className="mr-1 text-xs font-medium text-[var(--color-ink-soft)] underline"
+                            >
+                              Split price
+                            </button>
+                          )}
                           <button
                             onClick={() => startEditLine(l)}
                             aria-label="Edit line"
@@ -2431,6 +2654,66 @@ export default function Sales() {
                         </div>
                       </td>
                     </tr>
+                    {splitPendingId === l.tempId && (
+                      <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)]">
+                        <td colSpan={7} className="px-3 py-3">
+                          <div className="flex flex-wrap items-end gap-2 text-sm">
+                            <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                              Qty to split off (of {l.quantity})
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                max={Number(l.quantity) - 1}
+                                value={splitPendingQty}
+                                onChange={(e) => setSplitPendingQty(e.target.value)}
+                                className="input mt-0.5 block w-32"
+                              />
+                            </label>
+                            <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                              New price
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={splitPendingPrice}
+                                onChange={(e) => setSplitPendingPrice(e.target.value)}
+                                className="input mt-0.5 block w-32"
+                              />
+                            </label>
+                            <button
+                              onClick={() => confirmSplitPending(l)}
+                              disabled={!splitPendingQty || !splitPendingPrice}
+                              className="rounded-md bg-[var(--color-ink)] px-3 py-1.5 text-xs font-medium text-[var(--color-paper)] disabled:opacity-40"
+                            >
+                              Split
+                            </button>
+                            <button
+                              onClick={cancelSplitPending}
+                              className="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          {Number(splitPendingQty) > 0 && Number(splitPendingQty) < Number(l.quantity) && Number(splitPendingPrice) > 0 && (
+                            <p className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
+                              {Number(l.quantity) - Number(splitPendingQty)} × ₱{Number(l.unit_price).toFixed(2)} +{' '}
+                              {Number(splitPendingQty)} × ₱{Number(splitPendingPrice).toFixed(2)} = ₱
+                              {(
+                                (Number(l.quantity) - Number(splitPendingQty)) * Number(l.unit_price) +
+                                Number(splitPendingQty) * Number(splitPendingPrice)
+                              ).toFixed(2)}{' '}
+                              for the line (was ₱{Number(l.line_total).toFixed(2)})
+                            </p>
+                          )}
+                          <p className="mt-1.5 text-xs text-[var(--color-ink-soft)]">
+                            The split-off units become their own line at the new price; the rest stay as they are. The
+                            stock behind this line is divided between the two in FIFO order, so total quantity and
+                            inventory don't change.
+                          </p>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   ))}
                 </tbody>
                 <tfoot className="sticky bottom-0 bg-[var(--color-paper-raised)]">
@@ -3210,6 +3493,46 @@ export default function Sales() {
                     >
                       Skip row
                     </button>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2 border-t border-[var(--color-line)] pt-2">
+                    <label className="block">
+                      <span className="mb-1 block text-[var(--color-ink-soft)]">Qty at a different price</span>
+                      <input
+                        type="number" min="1" max={m.qty - 1} step="1"
+                        value={m.splitQtyDraft ?? ''}
+                        onChange={(e) => onMismatchSplitQty(m, e.target.value)}
+                        className="input w-20"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[var(--color-ink-soft)]">That price</span>
+                      <input
+                        type="number" step="0.01"
+                        value={m.splitPriceDraft ?? ''}
+                        onChange={(e) => onMismatchSplitPrice(m, e.target.value)}
+                        className="input w-24"
+                      />
+                    </label>
+                    <button
+                      onClick={() => resolveMismatchSplit(m)}
+                      title="Some units at the recorded price, the rest at a different price — as two separate lines, instead of one averaged price."
+                      className="rounded-md border border-[var(--color-ink)] px-2 py-1 font-medium"
+                    >
+                      Split price
+                    </button>
+                    {Number(m.splitQtyDraft) > 0 && Number(m.splitQtyDraft) < m.qty && Number(m.splitPriceDraft) > 0 && (() => {
+                      const k = Number(m.splitQtyDraft)
+                      const total = (m.qty - k) * m.recordedPrice + k * Number(m.splitPriceDraft)
+                      const fileTotal = m.givenUnitPrice * m.qty
+                      const diff = total - fileTotal
+                      return (
+                        <span className="basis-full text-[var(--color-ink-soft)]">
+                          {m.qty - k} × ₱{m.recordedPrice.toFixed(2)} + {k} × ₱{Number(m.splitPriceDraft).toFixed(2)} = ₱{total.toFixed(2)}
+                          {' '}— file says ₱{fileTotal.toFixed(2)}
+                          {Math.abs(diff) < 0.005 ? ' (matches)' : ` (${diff > 0 ? '+' : '−'}₱${Math.abs(diff).toFixed(2)} off)`}
+                        </span>
+                      )
+                    })()}
                   </div>
                 </div>
               ))}
