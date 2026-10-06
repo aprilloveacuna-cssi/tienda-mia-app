@@ -51,6 +51,68 @@ function statusTone(status) {
   return status === 'voided' ? 'critical' : 'ok'
 }
 
+// Builds the CSV text for a set of sale lines — one row per line plus a
+// TOTAL row (voided sales are listed but never counted in the totals). Shared
+// by the date-range download on the Sales list and the single-sale download
+// in the detail panel, so both always produce the same columns and the same
+// numbers. Each row is { l: saleLine, sale: saleHeader }; callers decide the
+// row order.
+function buildSalesCsv(rows) {
+  const q = (v) => {
+    const s = v == null ? '' : String(v)
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const money = (n) => Number(n || 0).toFixed(2)
+
+  const header = [
+    'Date', 'Sale #', 'Terminal', 'Cashier', 'Status', 'Barcode', 'SKU', 'Product', 'Category', 'Qty', 'Unit',
+    'Unit Price', 'Line Total', 'Type', 'Discount (SC/PWD)', 'Less VAT', 'B1T1 Giveaway', 'FIFO Cost', 'Profit', 'Corrected After Posting',
+  ]
+  const totals = { qty: 0, lineTotal: 0, discount: 0, lessVat: 0, b1t1: 0, cost: 0, profit: 0 }
+  const out = [header.map(q).join(',')]
+
+  for (const { l, sale } of rows) {
+    const qty = Number(l.quantity)
+    const lineTotal = qty * Number(l.unit_price)
+    // Same guard as the reports: these two columns are only meaningful on
+    // a line actually flagged as Senior/PWD (or B1T1 for the giveaway).
+    const discount = l.is_discounted ? Number(l.discount_amount ?? 0) : 0
+    const lessVat = l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
+    const b1t1 = l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
+    const type = l.is_discounted ? 'Senior/PWD' : l.is_b1t1 ? 'B1T1' : 'Regular'
+    const counted = sale.status !== 'voided'
+    if (counted) {
+      totals.qty += qty
+      totals.lineTotal += lineTotal
+      totals.discount += discount
+      totals.lessVat += lessVat
+      totals.b1t1 += b1t1
+      totals.cost += Number(l.fifo_cost ?? 0)
+      totals.profit += Number(l.gross_profit ?? 0)
+    }
+    out.push(
+      [
+        String(sale.sale_date).slice(0, 10), sale.sale_number, sale.pos_terminal ?? '', sale.cashier ?? '', sale.status,
+        l.product?.barcode ?? '', l.product?.sku ?? '', l.product?.name ?? '', l.product?.category ?? '',
+        qty, l.product?.unit ?? '', money(l.unit_price), money(lineTotal), type, money(discount), money(lessVat), money(b1t1),
+        money(l.fifo_cost), money(l.gross_profit), l.price_edited_at || l.discounted_qty_edited_at ? 'Yes' : '',
+      ]
+        .map(q)
+        .join(',')
+    )
+  }
+  out.push('')
+  out.push(
+    [
+      'TOTAL (voided excluded)', '', '', '', '', '', '', '', '', totals.qty, '', '', money(totals.lineTotal), '',
+      money(totals.discount), money(totals.lessVat), money(totals.b1t1), money(totals.cost), money(totals.profit), '',
+    ]
+      .map(q)
+      .join(',')
+  )
+  return out.join('\r\n')
+}
+
 export default function Sales() {
   const [sales, setSales] = useState([])
 
@@ -276,62 +338,11 @@ export default function Sales() {
           return String(a.l.product?.name ?? '').localeCompare(String(b.l.product?.name ?? ''))
         })
 
-      const q = (v) => {
-        const s = v == null ? '' : String(v)
-        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-      }
-      const money = (n) => Number(n || 0).toFixed(2)
-
-      const header = [
-        'Date', 'Sale #', 'Terminal', 'Cashier', 'Status', 'Barcode', 'SKU', 'Product', 'Category', 'Qty', 'Unit',
-        'Unit Price', 'Line Total', 'Type', 'Discount (SC/PWD)', 'Less VAT', 'B1T1 Giveaway', 'FIFO Cost', 'Profit', 'Corrected After Posting',
-      ]
-      const totals = { qty: 0, lineTotal: 0, discount: 0, lessVat: 0, b1t1: 0, cost: 0, profit: 0 }
-      const out = [header.map(q).join(',')]
-
-      for (const { l, sale } of rows) {
-        const qty = Number(l.quantity)
-        const lineTotal = qty * Number(l.unit_price)
-        // Same guard as the reports: these two columns are only meaningful on
-        // a line actually flagged as Senior/PWD (or B1T1 for the giveaway).
-        const discount = l.is_discounted ? Number(l.discount_amount ?? 0) : 0
-        const lessVat = l.is_discounted ? Number(l.vat_exempt_amount ?? 0) : 0
-        const b1t1 = l.is_b1t1 ? Number(l.discount_amount ?? 0) : 0
-        const type = l.is_discounted ? 'Senior/PWD' : l.is_b1t1 ? 'B1T1' : 'Regular'
-        const counted = sale.status !== 'voided'
-        if (counted) {
-          totals.qty += qty
-          totals.lineTotal += lineTotal
-          totals.discount += discount
-          totals.lessVat += lessVat
-          totals.b1t1 += b1t1
-          totals.cost += Number(l.fifo_cost ?? 0)
-          totals.profit += Number(l.gross_profit ?? 0)
-        }
-        out.push(
-          [
-            String(sale.sale_date).slice(0, 10), sale.sale_number, sale.pos_terminal ?? '', sale.cashier ?? '', sale.status,
-            l.product?.barcode ?? '', l.product?.sku ?? '', l.product?.name ?? '', l.product?.category ?? '',
-            qty, l.product?.unit ?? '', money(l.unit_price), money(lineTotal), type, money(discount), money(lessVat), money(b1t1),
-            money(l.fifo_cost), money(l.gross_profit), l.price_edited_at || l.discounted_qty_edited_at ? 'Yes' : '',
-          ]
-            .map(q)
-            .join(',')
-        )
-      }
-      out.push('')
-      out.push(
-        [
-          'TOTAL (voided excluded)', '', '', '', '', '', '', '', '', totals.qty, '', '', money(totals.lineTotal), '',
-          money(totals.discount), money(totals.lessVat), money(totals.b1t1), money(totals.cost), money(totals.profit), '',
-        ]
-          .map(q)
-          .join(',')
-      )
+      const csv = buildSalesCsv(rows)
 
       const fileName = exportFrom === exportTo ? `sales_${exportFrom}.csv` : `sales_${exportFrom}_to_${exportTo}.csv`
       // BOM so Excel opens it as UTF-8 instead of guessing an encoding.
-      downloadFile(fileName, '\uFEFF' + out.join('\r\n'), 'text/csv;charset=utf-8;')
+      downloadFile(fileName, '\uFEFF' + csv, 'text/csv;charset=utf-8;')
       setExportMsg(`Downloaded ${rows.length} line${rows.length === 1 ? '' : 's'} from ${included.length} sale${included.length === 1 ? '' : 's'}.`)
     } catch (err) {
       setExportMsg(`Could not download: ${err.message ?? err}`)
@@ -412,13 +423,27 @@ export default function Sales() {
     loadProducts()
   }
 
+  // Downloads just the sale open in the detail panel — same columns and
+  // numbers as the date-range download on the list, in the order currently
+  // shown on screen (so sorting the table first sorts the file too). Works
+  // for voided sales as well; those lines are listed but not counted in the
+  // totals.
+  function downloadViewedSale() {
+    if (!viewedSale) return
+    const ordered = sortRows(viewedLines, lineSortKey, lineSortDir, (row, key) =>
+      key === 'product' ? row.product?.name : key === 'category' ? row.product?.category : row[key]
+    )
+    const csv = buildSalesCsv(ordered.map((l) => ({ l, sale: viewedSale })))
+    downloadFile(`${viewedSale.sale_number}.csv`, '\uFEFF' + csv, 'text/csv;charset=utf-8;')
+  }
+
   async function openView(sale) {
     setMode('view')
     setViewedSale(sale)
     setErrorMsg('')
     const { data } = await supabase
       .from('sale_lines')
-      .select('*, product:products(name, sku, unit, category, selling_price)')
+      .select('*, product:products(name, sku, barcode, unit, category, selling_price)')
       .eq('sale_id', sale.id)
     setViewedLines(data ?? [])
     setPanelOpen(true)
@@ -2819,6 +2844,14 @@ export default function Sales() {
                 </tbody>
               </table>
             </div>
+
+            <button
+              onClick={downloadViewedSale}
+              className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2.5 text-sm font-medium hover:bg-[var(--color-paper)]"
+            >
+              <FileDown size={15} />
+              Download this sale (CSV)
+            </button>
 
             {viewedSale?.status === 'posted' && (
               <button
