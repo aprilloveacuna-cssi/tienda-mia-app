@@ -217,6 +217,10 @@ export default function Sales() {
   }
   const sortedSales = sortRows(sales, saleSortKey, saleSortDir, saleSortAccessor)
 
+  // Ticking sales in the list to void several at once.
+  const [selectedSaleIds, setSelectedSaleIds] = useState([])
+  const [bulkVoidBusy, setBulkVoidBusy] = useState(false)
+  const [bulkVoidMsg, setBulkVoidMsg] = useState('')
   const [search, setSearch] = useState('')
   const searchedSales = search.trim()
     ? sortedSales.filter((s) => {
@@ -228,6 +232,25 @@ export default function Sales() {
         )
       })
     : sortedSales
+
+  // Selection only ever counts sales that are visible right now (so a search
+  // can't leave hidden, still-ticked sales to be voided by surprise) and not
+  // already voided.
+  const selectedSaleIdSet = new Set(selectedSaleIds)
+  const votableSales = searchedSales.filter((s) => s.status === 'posted')
+  const selectedVisibleSales = votableSales.filter((s) => selectedSaleIdSet.has(s.id))
+  const allVotableSelected = votableSales.length > 0 && selectedVisibleSales.length === votableSales.length
+
+  function toggleSaleSelected(id) {
+    setSelectedSaleIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
+  }
+
+  function toggleAllVotable() {
+    const visibleIds = new Set(votableSales.map((s) => s.id))
+    setSelectedSaleIds((cur) =>
+      allVotableSelected ? cur.filter((id) => !visibleIds.has(id)) : [...new Set([...cur, ...visibleIds])]
+    )
+  }
   const [products, setProducts] = useState([])
   const [extraBarcodeMap, setExtraBarcodeMap] = useState({}) // cleanedBarcode -> product_id, for additional barcodes beyond the primary one
   const activeProducts = products.filter((p) => p.status === 'active')
@@ -2258,6 +2281,24 @@ export default function Sales() {
       originalLedgerRows = originalLedgerRows.concat(data ?? [])
     }
 
+    // Skip lines that were already reversed — a void that wrote its reversal
+    // rows but failed before marking the sale voided, then got retried, would
+    // otherwise give the same stock back twice.
+    if (originalLedgerRows.length > 0) {
+      const reversedRefs = new Set()
+      const refs = [...new Set(originalLedgerRows.map((r) => r.source_reference_id))]
+      for (const ids of chunk(refs, 50)) {
+        const { data, error } = await supabase
+          .from('inventory_ledger')
+          .select('source_reference_id')
+          .in('source_reference_id', ids)
+          .eq('transaction_type', 'Void')
+        if (error) throw error
+        for (const r of data ?? []) reversedRefs.add(r.source_reference_id)
+      }
+      originalLedgerRows = originalLedgerRows.filter((r) => !reversedRefs.has(r.source_reference_id))
+    }
+
     // Entries stamped with this sale's timestamp that no current line owns.
     // Skipped if they belong to a line that still exists (a different sale
     // that happens to share the exact same second) or were already reversed.
@@ -2331,6 +2372,72 @@ export default function Sales() {
       setErrorMsg(err.message ?? String(err))
     }
     setSaving(false)
+  }
+
+  // Voids every ticked sale, one at a time, each with the same routine as the
+  // single Void button. One failing doesn't stop the rest, and any that fail
+  // stay posted — safe to tick and try again, since a void never reverses the
+  // same stock twice.
+  async function voidSelectedSales() {
+    const targets = selectedVisibleSales
+    if (targets.length === 0) return
+    const total = targets.reduce((sum, s) => sum + Number(s.total_amount ?? 0), 0)
+    const listed =
+      targets.slice(0, 8).map((s) => s.sale_number).join(', ') +
+      (targets.length > 8 ? `, and ${targets.length - 8} more` : '')
+    if (
+      !confirm(
+        `Void ${targets.length} sale${targets.length === 1 ? '' : 's'}?\n\n${listed}\n\nTotal ₱${total.toFixed(2)}. This restores the stock they sold — the records stay, nothing is deleted. It can't be undone from here.`
+      )
+    ) {
+      return
+    }
+    if (targets.length > 10) {
+      const typed = prompt(`You're about to void ${targets.length} sales. Type VOID to confirm.`)
+      if (String(typed ?? '').trim().toUpperCase() !== 'VOID') return
+    }
+
+    async function fetchLineIds(saleId) {
+      const pageSize = 1000
+      let all = []
+      let from = 0
+      while (true) {
+        const { data, error } = await supabase
+          .from('sale_lines')
+          .select('id')
+          .eq('sale_id', saleId)
+          .order('id', { ascending: true })
+          .range(from, from + pageSize - 1)
+        if (error) throw error
+        all = all.concat(data ?? [])
+        if (!data || data.length < pageSize) break
+        from += pageSize
+      }
+      return all
+    }
+
+    setBulkVoidBusy(true)
+    setBulkVoidMsg('')
+    const failed = []
+    let done = 0
+    for (let i = 0; i < targets.length; i++) {
+      const sale = targets[i]
+      setBulkVoidMsg(`Voiding ${i + 1} of ${targets.length} (${sale.sale_number})…`)
+      try {
+        const lines = await fetchLineIds(sale.id)
+        await performVoid(sale, lines)
+        done++
+      } catch (err) {
+        failed.push(`${sale.sale_number} (${err.message ?? err})`)
+      }
+    }
+    await loadSales()
+    setSelectedSaleIds([])
+    setBulkVoidBusy(false)
+    setBulkVoidMsg(
+      `Voided ${done} of ${targets.length} sale${targets.length === 1 ? '' : 's'}.` +
+        (failed.length > 0 ? ` Couldn't void: ${failed.join('; ')}. Those are still posted — you can tick them and try again.` : '')
+    )
   }
 
   // Redo one day's sale from its POS report. A posted sale is voided first
@@ -2438,10 +2545,49 @@ export default function Sales() {
 
       <SearchBar value={search} onChange={setSearch} placeholder="Search by sale #, terminal, or cashier" />
 
+      {(selectedVisibleSales.length > 0 || bulkVoidMsg) && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-3.5 py-2.5 text-sm">
+          {selectedVisibleSales.length > 0 && (
+            <>
+              <span className="font-medium">
+                {selectedVisibleSales.length} selected · ₱
+                {selectedVisibleSales.reduce((sum, s) => sum + Number(s.total_amount ?? 0), 0).toFixed(2)}
+              </span>
+              <button
+                onClick={voidSelectedSales}
+                disabled={bulkVoidBusy}
+                className="flex items-center gap-1.5 rounded-md border border-[var(--color-rust)] px-3 py-1.5 text-sm font-medium text-[var(--color-rust)] disabled:opacity-60"
+              >
+                <Ban size={14} />
+                {bulkVoidBusy ? 'Voiding…' : 'Void selected'}
+              </button>
+              <button
+                onClick={() => setSelectedSaleIds([])}
+                disabled={bulkVoidBusy}
+                className="text-xs text-[var(--color-ink-soft)] underline disabled:opacity-50"
+              >
+                Clear selection
+              </button>
+            </>
+          )}
+          {bulkVoidMsg && <span className="basis-full text-xs text-[var(--color-ink-soft)]">{bulkVoidMsg}</span>}
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)]">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-[var(--color-line)] text-xs uppercase tracking-wide text-[var(--color-ink-soft)]">
             <tr>
+              <th className="w-10 px-4 py-3">
+                <input
+                  type="checkbox"
+                  checked={allVotableSelected}
+                  onChange={toggleAllVotable}
+                  disabled={bulkVoidBusy || votableSales.length === 0}
+                  title="Select every posted sale shown below"
+                  aria-label="Select all posted sales shown"
+                />
+              </th>
               <SortableTh label="Sale #" sortKey="sale_number" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
               <SortableTh label="Date" sortKey="sale_date" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
               <SortableTh label="Terminal" sortKey="pos_terminal" activeKey={saleSortKey} activeDir={saleSortDir} onSort={toggleSaleSort} />
@@ -2453,14 +2599,14 @@ export default function Sales() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={7} className="px-4 py-8 text-center text-[var(--color-ink-soft)]">
                   Loading sales…
                 </td>
               </tr>
             )}
             {!loading && searchedSales.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                <td colSpan={7} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                   No sales yet — record one to see it deduct from Inventory.
                 </td>
               </tr>
@@ -2471,6 +2617,17 @@ export default function Sales() {
                 onClick={() => openView(s)}
                 className="cursor-pointer border-b border-[var(--color-line)] last:border-0 hover:bg-[var(--color-paper)]"
               >
+                <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                  {s.status === 'posted' && (
+                    <input
+                      type="checkbox"
+                      checked={selectedSaleIdSet.has(s.id)}
+                      onChange={() => toggleSaleSelected(s.id)}
+                      disabled={bulkVoidBusy}
+                      aria-label={`Select ${s.sale_number}`}
+                    />
+                  )}
+                </td>
                 <td className="font-mono px-4 py-3 text-xs text-[var(--color-ink-soft)]">{s.sale_number}</td>
                 <td className="px-4 py-3">{new Date(s.sale_date).toLocaleString()}</td>
                 <td className="px-4 py-3 text-[var(--color-ink-soft)]">{s.pos_terminal || '—'}</td>
