@@ -176,6 +176,13 @@ export default function Sales() {
   const [exportIncludeVoided, setExportIncludeVoided] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
   const [exportMsg, setExportMsg] = useState('')
+  // Set while a day is being reimported: { date, terminal, saleNumber }. Locks
+  // the new-sale form to that day and makes the POS file import refuse a file
+  // for any other day or terminal.
+  const [reimportContext, setReimportContext] = useState(null)
+  useEffect(() => {
+    if (!panelOpen) setReimportContext(null)
+  }, [panelOpen])
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
@@ -410,8 +417,13 @@ export default function Sales() {
   }, [])
 
   function openNew() {
+    openNewPrefilled({ pos_terminal: '', cashier: '', sale_date: today() }, null)
+  }
+
+  function openNewPrefilled(header, reimport) {
     setMode('new')
-    setHeaderForm({ pos_terminal: '', cashier: '', sale_date: today() })
+    setReimportContext(reimport)
+    setHeaderForm(header)
     setPendingLines([])
     setLineForm(EMPTY_LINE_FORM)
     setLineWarning('')
@@ -1299,6 +1311,32 @@ export default function Sales() {
       .map((g) => ({ ...g, terminals: [...g.terminals].sort() }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
+    // Reimporting a specific day: refuse a file for any other day or terminal
+    // rather than quietly posting it somewhere else.
+    if (reimportContext) {
+      const wrongDate = sortedGroups.find((g) => g.date !== reimportContext.date)
+      if (wrongDate) {
+        setImportParsing(false)
+        setErrorMsg(
+          `That file is dated ${wrongDate.date}, but you're reimporting ${reimportContext.date}. Pick the file for ${reimportContext.date}.`
+        )
+        return
+      }
+      const wanted = String(reimportContext.terminal ?? '').match(/\d+/g) ?? []
+      if (wanted.length === 1) {
+        const wrongTerminal = sortedGroups.find(
+          (g) => g.terminals.length > 0 && !g.terminals.some((t) => String(t).replace(/\D/g, '') === wanted[0])
+        )
+        if (wrongTerminal) {
+          setImportParsing(false)
+          setErrorMsg(
+            `That file is for POS ${wrongTerminal.terminals.join(', ')}, but you're reimporting POS ${wanted[0]}. Pick that terminal's file.`
+          )
+          return
+        }
+      }
+    }
+
     setDateImportQueueTotal(sortedGroups.length)
     setDateImportQueue(sortedGroups.slice(1))
     await startDateGroupImport(sortedGroups[0])
@@ -1882,7 +1920,14 @@ export default function Sales() {
     // instead of landing at exactly midnight.
     const now = new Date()
     const [year, month, day] = headerForm.sale_date.split('-').map(Number)
-    const saleDateTime = new Date(year, month - 1, day, now.getHours(), now.getMinutes(), now.getSeconds())
+    let saleDateTime = new Date(year, month - 1, day, now.getHours(), now.getMinutes(), now.getSeconds())
+    // Reports and exports group sales by the calendar date of the stored UTC
+    // timestamp. Entering a sale for date D early in the morning local time
+    // (before 8 AM in the Philippines) would store it as D-1 in UTC and
+    // silently put it on the wrong day — so in that case, use midday instead.
+    if (saleDateTime.toISOString().slice(0, 10) !== headerForm.sale_date) {
+      saleDateTime = new Date(year, month - 1, day, 12, 0, 0)
+    }
 
     const { data: sale, error: saleErr } = await supabase
       .from('sales')
@@ -1981,27 +2026,66 @@ export default function Sales() {
     }
   }
 
-  async function voidSale() {
-    if (!confirm(`Void ${viewedSale.sale_number}? This restores the stock it sold — the record stays, it doesn't get deleted.`)) {
-      return
+  // Reverses the stock a sale took and marks it voided. Ledger entries are found
+  // two ways: through the lines currently on the sale, and by timestamp for
+  // entries whose line has since been deleted — Edit discounted qty and Split
+  // at different price can remove a line outright, and without the second
+  // pass that line's stock would never be given back. (Every sale's ledger
+  // entries are stamped with the sale's own timestamp.)
+  async function performVoid(sale, lines) {
+    const chunk = (arr, n) => {
+      const out = []
+      for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n))
+      return out
     }
-    setSaving(true)
-    setErrorMsg('')
+    const lineIds = lines.map((l) => l.id)
+    const lineIdSet = new Set(lineIds)
 
-    const lineIds = viewedLines.map((l) => l.id)
-    const { data: originalLedgerRows, error: fetchErr } = await supabase
+    let originalLedgerRows = []
+    for (const ids of chunk(lineIds, 50)) {
+      const { data, error } = await supabase
+        .from('inventory_ledger')
+        .select('*')
+        .in('source_reference_id', ids)
+        .eq('transaction_type', 'Sale')
+      if (error) throw error
+      originalLedgerRows = originalLedgerRows.concat(data ?? [])
+    }
+
+    // Entries stamped with this sale's timestamp that no current line owns.
+    // Skipped if they belong to a line that still exists (a different sale
+    // that happens to share the exact same second) or were already reversed.
+    const { data: stamped, error: stampErr } = await supabase
       .from('inventory_ledger')
       .select('*')
-      .in('source_reference_id', lineIds)
       .eq('transaction_type', 'Sale')
-
-    if (fetchErr) {
-      setErrorMsg(fetchErr.message)
-      setSaving(false)
-      return
+      .eq('source_module', 'Sales')
+      .eq('occurred_at', sale.sale_date)
+    if (stampErr) throw stampErr
+    const candidates = (stamped ?? []).filter((r) => !lineIdSet.has(r.source_reference_id))
+    let stranded = []
+    if (candidates.length > 0) {
+      const refs = [...new Set(candidates.map((r) => r.source_reference_id))]
+      const existingLineRefs = new Set()
+      const alreadyReversedRefs = new Set()
+      for (const ids of chunk(refs, 50)) {
+        const { data: found, error: e1 } = await supabase.from('sale_lines').select('id').in('id', ids)
+        if (e1) throw e1
+        for (const r of found ?? []) existingLineRefs.add(r.id)
+        const { data: reversed, error: e2 } = await supabase
+          .from('inventory_ledger')
+          .select('source_reference_id')
+          .in('source_reference_id', ids)
+          .eq('transaction_type', 'Void')
+        if (e2) throw e2
+        for (const r of reversed ?? []) alreadyReversedRefs.add(r.source_reference_id)
+      }
+      stranded = candidates.filter(
+        (r) => !existingLineRefs.has(r.source_reference_id) && !alreadyReversedRefs.has(r.source_reference_id)
+      )
     }
 
-    const reversalRows = (originalLedgerRows ?? []).map((row) => ({
+    const reversalRows = [...originalLedgerRows, ...stranded].map((row) => ({
       product_id: row.product_id,
       batch_id: row.batch_id,
       transaction_type: 'Void',
@@ -2009,32 +2093,78 @@ export default function Sales() {
       unit_cost_at_transaction: row.unit_cost_at_transaction,
       source_module: 'Sales',
       source_reference_id: row.source_reference_id,
-      remarks: `Reversal of voided sale ${viewedSale.sale_number}`,
+      remarks: `Reversal of voided sale ${sale.sale_number}`,
     }))
 
     if (reversalRows.length > 0) {
       const { error: insErr } = await supabase.from('inventory_ledger').insert(reversalRows)
-      if (insErr) {
-        setErrorMsg(insErr.message)
-        setSaving(false)
-        return
-      }
+      if (insErr) throw insErr
     }
 
     const { data: updated, error: updErr } = await supabase
       .from('sales')
       .update({ status: 'voided' })
-      .eq('id', viewedSale.id)
+      .eq('id', sale.id)
       .select()
       .single()
+    if (updErr) throw updErr
+    return updated
+  }
 
-    setSaving(false)
-    if (updErr) {
-      setErrorMsg(updErr.message)
+  async function voidSale() {
+    if (!confirm(`Void ${viewedSale.sale_number}? This restores the stock it sold — the record stays, it doesn't get deleted.`)) {
       return
     }
-    setViewedSale(updated)
-    loadSales()
+    setSaving(true)
+    setErrorMsg('')
+    try {
+      const updated = await performVoid(viewedSale, viewedLines)
+      setViewedSale(updated)
+      loadSales()
+    } catch (err) {
+      setErrorMsg(err.message ?? String(err))
+    }
+    setSaving(false)
+  }
+
+  // Redo one day's sale from its POS report. A posted sale is voided first
+  // (stock restored, record kept) so the new import picks its batches from
+  // the restored stock — importing first would attribute the wrong batches.
+  // Then a new sale opens locked to the same day and terminal.
+  async function startReimport() {
+    if (!viewedSale) return
+    const sale = viewedSale
+    const d = new Date(sale.sale_date)
+    const pad = (n) => String(n).padStart(2, '0')
+    const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    const terminal = sale.pos_terminal ? String(sale.pos_terminal).trim() : null
+    const label = `${sale.sale_number} (${day}${terminal ? `, POS ${terminal}` : ''})`
+
+    if (sale.status === 'posted') {
+      if (
+        !confirm(
+          `Reimport ${label}?\n\nThis voids ${sale.sale_number} first — the stock it sold is restored and the record stays — then opens a new sale for ${day} so you can import the POS report again.\n\nUntil you finish the new import, that day has no active sale for this terminal.`
+        )
+      ) {
+        return
+      }
+      setSaving(true)
+      setErrorMsg('')
+      try {
+        await performVoid(sale, viewedLines)
+      } catch (err) {
+        setErrorMsg(`Could not void ${sale.sale_number}: ${err.message ?? err}`)
+        setSaving(false)
+        return
+      }
+      setSaving(false)
+      loadSales()
+    }
+
+    openNewPrefilled(
+      { pos_terminal: terminal ?? '', cashier: sale.cashier ?? '', sale_date: day },
+      { date: day, terminal, saleNumber: sale.sale_number }
+    )
   }
 
   return (
@@ -2167,6 +2297,15 @@ export default function Sales() {
 
         {mode === 'new' ? (
           <div>
+            {reimportContext && (
+              <div className="mb-4 rounded-md bg-[var(--color-amber-soft)] px-3.5 py-2.5 text-sm text-[var(--color-amber)]">
+                Reimporting {reimportContext.saleNumber} — {reimportContext.date}
+                {reimportContext.terminal ? `, POS ${reimportContext.terminal}` : ''}. {reimportContext.saleNumber} is voided and its
+                stock restored. Import the POS report for that day below — only a file for that date
+                {reimportContext.terminal ? ' and terminal' : ''} will be accepted. Closing this without completing leaves that day
+                with no active sale.
+              </div>
+            )}
             {dateImportQueueTotal > 1 && (
               <div className="mb-4 rounded-md bg-[var(--color-amber-soft)] px-3.5 py-2.5 text-sm text-[var(--color-amber)]">
                 Sale {dateImportQueueTotal - dateImportQueue.length} of {dateImportQueueTotal} from this import — completing this one will automatically open the next date.
@@ -2185,6 +2324,7 @@ export default function Sales() {
                   max={today()}
                   value={headerForm.sale_date}
                   onChange={(e) => setHeaderForm({ ...headerForm, sale_date: e.target.value })}
+                  disabled={Boolean(reimportContext)}
                   className="input"
                 />
               </Field>
@@ -2851,6 +2991,15 @@ export default function Sales() {
             >
               <FileDown size={15} />
               Download this sale (CSV)
+            </button>
+
+            <button
+              onClick={startReimport}
+              disabled={saving}
+              className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-line)] py-2.5 text-sm font-medium hover:bg-[var(--color-paper)] disabled:opacity-60"
+            >
+              <Upload size={15} />
+              {viewedSale?.status === 'posted' ? 'Reimport this day (voids this sale first)' : 'Reimport this day'}
             </button>
 
             {viewedSale?.status === 'posted' && (
