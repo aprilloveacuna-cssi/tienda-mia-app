@@ -1,5 +1,5 @@
 import { useEffect, useState, Fragment } from 'react'
-import { Printer, Download } from 'lucide-react'
+import { Printer, Download, RefreshCw } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import { fetchAllRows } from '../lib/fetchAllRows'
 import StatusChip from '../components/StatusChip'
@@ -950,6 +950,10 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
   const [errorMsg, setErrorMsg] = useState('')
   const [terminalGroups, setTerminalGroups] = useState([]) // [{ terminal, rows: [...], totals: {...} }]
   const [itemFilter, setItemFilter] = useState('all') // 'all' | 'retail' | 'kitchen'
+  // Bumped by the Refresh button to re-run the load below — lets the report
+  // pick up changes made elsewhere (edited sales, a reimport, SQL fixes)
+  // without reloading the app or losing the dates/filter picked here.
+  const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -1116,7 +1120,7 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     return () => {
       cancelled = true
     }
-  }, [dateFrom, dateTo, itemFilter])
+  }, [dateFrom, dateTo, itemFilter, refreshKey])
 
   function exportCsv() {
     const sections = []
@@ -1165,6 +1169,15 @@ function PosDailySummary({ dateFrom, dateTo, setDateFrom, setDateTo }) {
           </label>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => setRefreshKey((k) => k + 1)}
+            disabled={loading}
+            title="Reload this report from the database — keeps your dates and filter"
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-line)] px-3.5 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
           <button
             onClick={exportCsv}
             disabled={loading || terminalGroups.length === 0}
