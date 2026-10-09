@@ -76,6 +76,32 @@ export default function Adjustments() {
   const [countImportSkipped, setCountImportSkipped] = useState([])
   const [countSearch, setCountSearch] = useState('')
   const countFileInputRef = useRef(null)
+  // What posting would do for each product, straight from the database's own
+  // preview — the same code that does the posting, so the two can't disagree.
+  const [countPlan, setCountPlan] = useState({}) // product_id -> plan
+  const [countPlanError, setCountPlanError] = useState('')
+  useEffect(() => {
+    if (!selectedCount) {
+      setCountPlan({})
+      return
+    }
+    let cancelled = false
+    supabase.rpc('count_posting_plan', { p_count_id: selectedCount.id }).then(({ data, error }) => {
+      if (cancelled) return
+      if (error) {
+        setCountPlanError(error.message)
+        setCountPlan({})
+        return
+      }
+      setCountPlanError('')
+      const map = {}
+      for (const plan of data ?? []) map[plan.product_id] = plan
+      setCountPlan(map)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedCount?.id, selectedCount?.count_date, countLines])
 
   // ---------- Negative Stock ----------
   const [negativeStockRows, setNegativeStockRows] = useState([]) // [{ product, current_stock, first_negative_date }]
@@ -437,9 +463,12 @@ export default function Adjustments() {
     // creating a confusing duplicate row.
     const existing = countLines.find((r) => r.product_id === p.id && (r.expiration_date ?? null) === newDate)
 
-    if (existing?.posted) {
+    // Once an item has been posted in this count, its total has been reconciled
+    // against its batches — adding more lines for it now would be compared
+    // against a total that no longer means the same thing.
+    if (countLines.some((r) => r.product_id === p.id && r.posted)) {
       setCountError(
-        `${p.name}'s count for this date was already posted as an adjustment — its quantity can't be combined into silently. Use Adjustments directly if the count needs correcting now.`
+        `${p.name} was already posted in this count, so more can't be added to it here. Use Adjustments directly if it needs correcting now.`
       )
       return
     }
@@ -623,51 +652,20 @@ export default function Adjustments() {
     reader.readAsText(file)
   }
 
-  // One rule, one place: a positive count with an expiration date is
-  // genuinely new stock — most commonly kickstarting inventory after a wipe
-  // — so it gets a real batch with that shelf life, not just a number
-  // correction. Everything else (no date, or a decrease) stays a plain
-  // product-level adjustment, same as before.
-  async function postCountVariance(line) {
-    const systemQty = inventoryCacheMap[line.product_id] ?? 0
-    const variance = line.counted_qty - systemQty
-
-    if (line.expiration_date && variance > 0) {
-      const product = products.find((p) => p.id === line.product_id)
-      const { data: newBatch, error: batchErr } = await supabase
-        .from('batches')
-        .insert({
-          product_id: line.product_id,
-          source_type: 'BeginningInventory',
-          received_quantity: variance,
-          unit_cost: Number(product?.current_cost ?? 0),
-          expiration_date: line.expiration_date,
-          received_date: selectedCount.count_date,
-        })
-        .select()
-        .single()
-      if (batchErr) return { error: batchErr }
-
-      const { error } = await supabase.from('adjustments').insert({
-        product_id: line.product_id,
-        batch_id: newBatch.id,
-        adjustment_type: 'Count Correction',
-        reason: countReason.trim(),
-        old_value: 0,
-        new_value: variance,
-      })
-      return { error }
-    }
-
-    const { error } = await supabase.from('adjustments').insert({
-      product_id: line.product_id,
-      batch_id: null,
-      adjustment_type: 'Count Correction',
-      reason: countReason.trim(),
-      old_value: systemQty,
-      new_value: line.counted_qty,
+  // Posting is done by the database, one item at a time, all-or-nothing per
+  // item (see migration 0044). All of an item's lines in this count are added
+  // up and compared with the system quantity as of the count date, and the
+  // difference is applied to its batches: shortages come off the OLDEST batch
+  // first, extras go onto the MOST RECENT batch with stock. An expiration date
+  // typed on a line is only used when the item has no batch with stock at all
+  // (starting inventory), where each line becomes its own batch.
+  async function applyCountForProduct(productId) {
+    return supabase.rpc('apply_count_for_product', {
+      p_count_id: selectedCount.id,
+      p_product_id: productId,
+      p_reason: countReason.trim(),
+      p_dry_run: false,
     })
-    return { error }
   }
 
   async function postCountLine(line) {
@@ -675,13 +673,14 @@ export default function Adjustments() {
       setCountError('Add a reason before posting — it applies to every adjustment this creates.')
       return
     }
-    const { error } = await postCountVariance(line)
+    const { error } = await applyCountForProduct(line.product_id)
     if (error) {
       setCountError(`${line.product?.name}: ${error.message}`)
       return
     }
-    await supabase.from('physical_count_lines').update({ posted: true }).eq('id', line.id)
+    setCountError('')
     await loadCountLines(selectedCount.id)
+    loadAdjustments()
     loadInventoryAsOf(selectedCount.count_date)
   }
 
@@ -690,30 +689,65 @@ export default function Adjustments() {
       setCountError('Add a reason before posting — it applies to every adjustment this creates.')
       return
     }
+    const toPost = Object.values(countPlan).filter((plan) => plan.status === 'planned')
+    if (
+      !confirm(
+        `Post ${toPost.length} item${toPost.length === 1 ? '' : 's'}? Each item's difference is applied to its batches exactly as shown in the Plan column — shortages come off the oldest batch first, extras go on the most recent batch. This can't be undone from here.`
+      )
+    ) {
+      return
+    }
     setCountPosting(true)
     setCountError('')
-    const toPost = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0))
     const failed = []
-
-    for (const line of toPost) {
-      const { error } = await postCountVariance(line)
-      if (error) {
-        failed.push(line.product?.name)
-      } else {
-        await supabase.from('physical_count_lines').update({ posted: true }).eq('id', line.id)
-      }
+    for (const plan of toPost) {
+      const { error } = await applyCountForProduct(plan.product_id)
+      if (error) failed.push(`${plan.product_name} (${error.message})`)
     }
-
     setCountPosting(false)
-    if (failed.length > 0) setCountError(`Posted the rest, but failed for: ${failed.join(', ')}`)
+    if (failed.length > 0) setCountError(`Posted the rest, but failed for: ${failed.join('; ')}`)
     await loadCountLines(selectedCount.id)
     loadAdjustments()
     loadInventoryAsOf(selectedCount.count_date)
   }
 
   const { sortKey: countSortKey, sortDir: countSortDir, toggleSort: toggleCountSort } = useSort('added', 'desc')
+  // An item counted under several lines (e.g. different dates) is ONE count:
+  // its lines are added up and compared with the system quantity once. These
+  // numbers are the same ones the database uses when posting.
+  const countedByProduct = {}
+  const linesPerProduct = {}
+  const primaryLineByProduct = {} // the line that carries the item's variance, plan and Post button
+  const linesOldestFirst = [...countLines].sort(
+    (x, y) => String(x.created_at).localeCompare(String(y.created_at)) || String(x.id).localeCompare(String(y.id))
+  )
+  for (const r of linesOldestFirst) {
+    countedByProduct[r.product_id] = (countedByProduct[r.product_id] ?? 0) + Number(r.counted_qty)
+    linesPerProduct[r.product_id] = (linesPerProduct[r.product_id] ?? 0) + 1
+    const current = primaryLineByProduct[r.product_id]
+    // The first line — unless it's already posted and a later one isn't, so
+    // the Post button never disappears from an item that still has work left.
+    if (!current || (current.posted && !r.posted)) primaryLineByProduct[r.product_id] = r
+  }
+  function isPrimaryLine(row) {
+    return primaryLineByProduct[row.product_id]?.id === row.id
+  }
+  function rowVariance(row) {
+    const plan = countPlan[row.product_id]
+    if (!row.posted && plan && plan.variance !== undefined) return Number(plan.variance)
+    return (countedByProduct[row.product_id] ?? 0) - (inventoryCacheMap[row.product_id] ?? 0)
+  }
+  function describePlanStep(step) {
+    const exp = step.expiration_date ? `exp ${step.expiration_date}` : 'no expiry'
+    if (step.kind === 'remove_from_batch') return `Remove ${step.quantity} from the batch received ${step.received_date} (${exp}), which holds ${step.batch_remaining}`
+    if (step.kind === 'add_to_batch') return `Add ${step.quantity} to the most recent batch, received ${step.received_date} (${exp})`
+    if (step.kind === 'new_batch') return `New starting batch of ${step.quantity} (${exp})`
+    return `${step.quantity > 0 ? 'Add' : 'Remove'} ${Math.abs(step.quantity)} that sit in no batch`
+  }
+
   function countSortAccessor(row, key) {
     const systemQty = inventoryCacheMap[row.product_id] ?? 0
+    const variance = rowVariance(row)
     if (key === 'added') return new Date(row.created_at).getTime()
     if (key === 'product') return row.product?.name
     if (key === 'category') return row.product?.category
@@ -722,8 +756,8 @@ export default function Adjustments() {
     if (key === 'unitCost') return Number(row.product?.current_cost ?? 0)
     if (key === 'inventoryCost') return Number(row.counted_qty ?? 0) * Number(row.product?.current_cost ?? 0)
     if (key === 'expiration') return row.expiration_date ?? ''
-    if (key === 'variance') return Math.abs(row.counted_qty - systemQty)
-    if (key === 'valueImpact') return (row.counted_qty - systemQty) * Number(row.product?.current_cost ?? 0)
+    if (key === 'variance') return Math.abs(variance)
+    if (key === 'valueImpact') return variance * Number(row.product?.current_cost ?? 0)
     return row[key]
   }
   const countSearchFiltered = countSearch.trim()
@@ -739,19 +773,23 @@ export default function Adjustments() {
       })
     : countLines
   const visibleCountRows = showOnlyMismatches
-    ? countSearchFiltered.filter((r) => r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0))
+    ? countSearchFiltered.filter((r) => rowVariance(r) !== 0)
     : countSearchFiltered
   const sortedCountRows = sortRows(visibleCountRows, countSortKey, countSortDir, countSortAccessor)
-  const pendingVarianceCount = countLines.filter((r) => !r.posted && r.counted_qty !== (inventoryCacheMap[r.product_id] ?? 0)).length
+  const pendingVarianceCount = Object.values(countPlan).filter((plan) => plan.status === 'planned').length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance', 'Value Impact', 'Status']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance (item total)', 'Value Impact', 'Status', 'Plan']
     const rows = sortedCountRows.map((row) => {
       const systemQty = inventoryCacheMap[row.product_id] ?? 0
-      const variance = row.counted_qty - systemQty
+      // Variance and value impact belong to the ITEM, so they're only written
+      // on one of its lines — otherwise summing the column would count it twice.
+      const primary = isPrimaryLine(row)
+      const variance = rowVariance(row)
       const unitCost = Number(row.product?.current_cost ?? 0)
       const inventoryCost = Number(row.counted_qty ?? 0) * unitCost
       const valueImpact = variance * unitCost
+      const plan = countPlan[row.product_id]
       return [
         new Date(row.created_at).toLocaleString(),
         row.product?.barcode ?? '',
@@ -762,13 +800,14 @@ export default function Adjustments() {
         unitCost.toFixed(2),
         inventoryCost.toFixed(2),
         row.expiration_date ?? '',
-        variance,
-        valueImpact.toFixed(2),
+        primary ? variance : '',
+        primary ? valueImpact.toFixed(2) : '',
         row.posted ? 'posted' : variance === 0 ? 'matches' : 'pending',
+        primary && !row.posted && plan?.status === 'planned' ? plan.steps.map(describePlanStep).join(' | ') : '',
       ]
     })
     const totalInventoryCost = sortedCountRows.reduce((sum, l) => sum + Number(l.counted_qty ?? 0) * Number(l.product?.current_cost ?? 0), 0)
-    const totalRow = ['', '', '', '', '', '', '', totalInventoryCost.toFixed(2), '', '', '', 'TOTAL']
+    const totalRow = ['', '', '', '', '', '', '', totalInventoryCost.toFixed(2), '', '', '', 'TOTAL', '']
     const csv = [headers, ...rows, totalRow]
       .map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
       .join('\n')
@@ -995,6 +1034,17 @@ export default function Adjustments() {
             System Qty below reflects stock exactly as it stood on the count date above — not today's live numbers.
             Change this if the count represents an earlier date than when you're actually entering it.
           </p>
+          <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
+            When you post, each item's total counted (all its lines added up) is compared with the system and the
+            difference is applied to its batches: fewer than the system says comes off the oldest batch first, more
+            goes onto the most recent batch. The Plan column shows exactly what will happen. An expiration date typed
+            here is only used when an item has no batch with stock yet (starting inventory).
+          </p>
+          {countPlanError && (
+            <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
+              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migration 0044 in Supabase.)
+            </div>
+          )}
 
           {countError && (
             <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
@@ -1018,7 +1068,7 @@ export default function Adjustments() {
                 />
               </label>
               <label className="block">
-                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Expiration date (optional)</span>
+                <span className="mb-1 block text-xs font-medium text-[var(--color-ink-soft)]">Expiration (starting inventory only)</span>
                 <input
                   type="date"
                   value={countForm.expiration_date}
@@ -1131,31 +1181,44 @@ export default function Adjustments() {
                       <SortableTh label="Expiration" sortKey="expiration" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Variance" sortKey="variance" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Value Impact" sortKey="valueImpact" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <th className="px-4 py-3">Plan</th>
                       <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody>
                     {sortedCountRows.length === 0 && (
-                      <tr><td colSpan={11} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
+                      <tr><td colSpan={12} className="px-4 py-10 text-center text-[var(--color-ink-soft)]">
                         {showOnlyMismatches ? 'No mismatches — everything counted matches the system.' : 'Nothing matches this search.'}
                       </td></tr>
                     )}
                     {sortedCountRows.map((row) => {
                       const systemQty = inventoryCacheMap[row.product_id] ?? 0
-                      const variance = row.counted_qty - systemQty
+                      const primary = isPrimaryLine(row)
+                      const variance = rowVariance(row)
                       const valueImpact = variance * Number(row.product?.current_cost ?? 0)
+                      const plan = countPlan[row.product_id]
+                      const multi = (linesPerProduct[row.product_id] ?? 0) > 1
                       return (
                         <tr key={row.id} className="border-b border-[var(--color-line)] last:border-0">
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{new Date(row.created_at).toLocaleString()}</td>
                           <td className="px-4 py-3 font-medium">{row.product?.name}</td>
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.product?.category || '—'}</td>
                           <td className="px-4 py-3">{systemQty} {row.product?.unit}</td>
-                          <td className="px-4 py-3">{row.counted_qty} {row.product?.unit}</td>
+                          <td className="px-4 py-3">
+                            {row.counted_qty} {row.product?.unit}
+                            {multi && primary && (
+                              <div className="text-xs text-[var(--color-ink-soft)]">
+                                item total {countedByProduct[row.product_id]} (all {linesPerProduct[row.product_id]} lines)
+                              </div>
+                            )}
+                          </td>
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{Number(row.product?.current_cost ?? 0).toFixed(2)}</td>
                           <td className="px-4 py-3">{(Number(row.counted_qty ?? 0) * Number(row.product?.current_cost ?? 0)).toFixed(2)}</td>
                           <td className="px-4 py-3 text-[var(--color-ink-soft)]">{row.expiration_date || '—'}</td>
                           <td className="px-4 py-3">
-                            {variance === 0 ? (
+                            {!primary ? (
+                              <span className="text-xs text-[var(--color-ink-soft)]" title="This item was counted on more than one line. The lines are added up and compared with the system together — the variance, plan and Post button are on the line that shows the item total.">counted with other line</span>
+                            ) : variance === 0 ? (
                               <StatusChip tone="ok">matches</StatusChip>
                             ) : (
                               <StatusChip tone={variance < 0 ? 'critical' : 'attention'}>
@@ -1163,12 +1226,21 @@ export default function Adjustments() {
                               </StatusChip>
                             )}
                           </td>
-                          <td className="px-4 py-3">{valueImpact.toFixed(2)}</td>
+                          <td className="px-4 py-3">{primary ? valueImpact.toFixed(2) : '—'}</td>
+                          <td className="min-w-[16rem] px-4 py-3 text-xs text-[var(--color-ink-soft)]">
+                            {!primary || row.posted ? '—' : plan?.status === 'planned' ? (
+                              <ul className="space-y-0.5">
+                                {plan.steps.map((step, i) => (
+                                  <li key={i}>{describePlanStep(step)}</li>
+                                ))}
+                              </ul>
+                            ) : plan?.status === 'matches' ? 'No change' : '…'}
+                          </td>
                           <td className="px-4 py-3">
                             <div className="flex gap-1">
                               {row.posted ? (
                                 <span className="flex items-center gap-1 text-xs text-[var(--color-herb)]"><Check size={13} /> posted</span>
-                              ) : variance !== 0 ? (
+                              ) : primary && plan?.status === 'planned' ? (
                                 <button
                                   onClick={() => postCountLine(row)}
                                   className="rounded-md border border-[var(--color-ink)] px-2 py-1 text-xs font-medium"

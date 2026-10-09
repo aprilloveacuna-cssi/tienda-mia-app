@@ -66,6 +66,14 @@ export default function Purchases() {
   const [headerForm, setHeaderForm] = useState(EMPTY_HEADER)
   const [lineForm, setLineForm] = useState(EMPTY_LINE)
   const [editingLineId, setEditingLineId] = useState(null)
+  // Moving stock off a posted line that was entered under the wrong item.
+  const [movingLineId, setMovingLineId] = useState(null)
+  const [moveTargetId, setMoveTargetId] = useState('')
+  const [moveQty, setMoveQty] = useState('')
+  const [moveReason, setMoveReason] = useState('')
+  const [moveOnHand, setMoveOnHand] = useState(null) // units from this line's batch still in stock
+  const [moveBusy, setMoveBusy] = useState(false)
+  const [moveMsg, setMoveMsg] = useState('')
   const [saving, setSaving] = useState(false)
 
   const lineFileInputRef = useRef(null)
@@ -192,6 +200,8 @@ export default function Purchases() {
     setSelected(purchase)
     setLineForm(EMPTY_LINE)
     setEditingLineId(null)
+    setMovingLineId(null)
+    setMoveMsg('')
     setErrorMsg('')
     await loadLines(purchase.id)
     setPanelOpen(true)
@@ -404,6 +414,71 @@ export default function Purchases() {
     await loadLines(selected.id)
   }
 
+  async function startMove(line) {
+    setErrorMsg('')
+    setMoveMsg('')
+    setMovingLineId(line.id)
+    setMoveTargetId('')
+    setMoveReason('')
+    setMoveOnHand(null)
+    setMoveQty(String(line.quantity))
+    // Only stock still on hand can be moved — whatever was already sold from
+    // this batch stays with the item it was sold as.
+    const { data } = await supabase.from('batch_cache').select('remaining_quantity').eq('batch_id', line.batch_id).maybeSingle()
+    const onHand = Number(data?.remaining_quantity ?? 0)
+    setMoveOnHand(onHand)
+    setMoveQty(String(Math.min(Number(line.quantity), onHand)))
+  }
+
+  function cancelMove() {
+    setMovingLineId(null)
+  }
+
+  // The move itself happens in one database function so it either completes
+  // entirely or changes nothing — see migration 0043.
+  async function confirmMove(line) {
+    const qty = Number(moveQty)
+    const target = products.find((p) => p.id === moveTargetId)
+    if (!target) {
+      setErrorMsg('Pick the item this stock actually belongs to.')
+      return
+    }
+    if (!qty || qty <= 0 || qty > Number(line.quantity) || qty > (moveOnHand ?? 0)) {
+      setErrorMsg(`Enter a quantity from 1 up to ${Math.min(Number(line.quantity), moveOnHand ?? 0)}.`)
+      return
+    }
+    const whole = qty === Number(line.quantity)
+    if (
+      !confirm(
+        `Move ${qty} ${line.product?.unit ?? ''} from ${line.product?.name} to ${target.name}?\n\n${
+          whole ? 'This whole line' : 'That part of this line'
+        } on ${selected.purchase_number} becomes ${target.name}, with its cost and expiry carried over. Nothing is deleted — the move is written to the ledger, and voiding the purchase later still nets everything back to zero.`
+      )
+    ) {
+      return
+    }
+    setMoveBusy(true)
+    setErrorMsg('')
+    const { data, error } = await supabase.rpc('move_purchase_line_to_product', {
+      p_line_id: line.id,
+      p_new_product_id: moveTargetId,
+      p_quantity: qty,
+      p_reason: moveReason.trim() || null,
+    })
+    setMoveBusy(false)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    let msg = `Moved ${data.moved_quantity} from ${data.from_product} to ${data.to_product}.`
+    if (data.whole_line && !data.old_cost_restored && Number(data.old_cost_now) === Number(line.unit_cost)) {
+      msg += ` ${data.from_product} still shows ₱${Number(data.old_cost_now).toFixed(2)} as its cost — that came from this purchase and there was no earlier purchase to put it back from, so check it on Products.`
+    }
+    setMoveMsg(msg)
+    setMovingLineId(null)
+    loadLines(selected.id)
+  }
+
   async function removeLine(lineId) {
     await supabase.from('purchase_lines').delete().eq('id', lineId)
     loadLines(selected.id)
@@ -480,6 +555,8 @@ export default function Purchases() {
   }
 
   const isDraft = selected?.status === 'draft'
+  const isPosted = selected?.status === 'posted'
+  const movingLine = lines.find((l) => l.id === movingLineId)
 
   return (
     <div>
@@ -569,6 +646,11 @@ export default function Purchases() {
             {errorMsg}
           </div>
         )}
+        {moveMsg && (
+          <div className="mb-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+            {moveMsg}
+          </div>
+        )}
 
         {!selected ? (
           <form onSubmit={handleCreateHeader} className="space-y-4">
@@ -629,7 +711,7 @@ export default function Purchases() {
                     <th className="px-3 py-2">Cost</th>
                     <th className="px-3 py-2">Expiry</th>
                     <th className="px-3 py-2">Total</th>
-                    {isDraft && <th className="px-3 py-2" />}
+                    {(isDraft || isPosted) && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -641,13 +723,24 @@ export default function Purchases() {
                     </tr>
                   )}
                   {lines.map((l) => (
-                    <tr key={l.id} className={`border-b border-[var(--color-line)] last:border-0 ${editingLineId === l.id ? 'bg-[var(--color-amber-soft)]' : ''}`}>
+                    <tr key={l.id} className={`border-b border-[var(--color-line)] last:border-0 ${editingLineId === l.id || movingLineId === l.id ? 'bg-[var(--color-amber-soft)]' : ''}`}>
                       <td className="px-3 py-2">{l.product?.name ?? '—'}</td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.product?.category || '—'}</td>
                       <td className="px-3 py-2">{l.quantity} {l.product?.unit}</td>
                       <td className="px-3 py-2">{Number(l.unit_cost).toFixed(2)}</td>
                       <td className="px-3 py-2 text-[var(--color-ink-soft)]">{l.expiration_date || '—'}</td>
                       <td className="px-3 py-2">{Number(l.total_cost).toFixed(2)}</td>
+                      {isPosted && (
+                        <td className="px-3 py-2">
+                          <button
+                            onClick={() => startMove(l)}
+                            disabled={moveBusy}
+                            className="text-xs font-medium text-[var(--color-ink-soft)] underline disabled:opacity-50"
+                          >
+                            Move to another item
+                          </button>
+                        </td>
+                      )}
                       {isDraft && (
                         <td className="px-3 py-2">
                           <div className="flex gap-1">
@@ -677,11 +770,80 @@ export default function Purchases() {
                       Total
                     </td>
                     <td className="px-3 py-2">{runningTotal.toFixed(2)}</td>
-                    {isDraft && <td />}
+                    {(isDraft || isPosted) && <td />}
                   </tr>
                 </tfoot>
               </table>
             </div>
+
+            {isPosted && movingLine && (
+              <div className="mb-4 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-3">
+                <div className="mb-2 text-sm font-medium">
+                  Move stock off {movingLine.product?.name}
+                </div>
+                <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
+                  Use this when a line was received under the wrong item. The quantity comes off{' '}
+                  {movingLine.product?.name} and goes onto the item you pick, with the same cost and expiry. Nothing is
+                  deleted.
+                </p>
+                <div className="space-y-3">
+                  <Field label="This stock actually belongs to" required>
+                    <ProductPicker
+                      products={activeProducts.filter((p) => p.id !== movingLine.product_id)}
+                      value={moveTargetId}
+                      onChange={setMoveTargetId}
+                    />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label={`Quantity to move (of ${movingLine.quantity})`} required>
+                      <input
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        max={Math.min(Number(movingLine.quantity), moveOnHand ?? 0)}
+                        value={moveQty}
+                        onChange={(e) => setMoveQty(e.target.value)}
+                        className="input"
+                      />
+                    </Field>
+                    <Field label="Reason (optional)">
+                      <input
+                        value={moveReason}
+                        onChange={(e) => setMoveReason(e.target.value)}
+                        placeholder="e.g. scanned the wrong barcode"
+                        className="input"
+                      />
+                    </Field>
+                  </div>
+                  <p className="text-xs text-[var(--color-ink-soft)]">
+                    {moveOnHand === null
+                      ? 'Checking how much is still in stock…'
+                      : moveOnHand >= Number(movingLine.quantity)
+                        ? `All ${movingLine.quantity} are still in stock, so the whole line can move.`
+                        : moveOnHand > 0
+                          ? `Only ${moveOnHand} of ${movingLine.quantity} are still in stock — the rest was already sold as ${movingLine.product?.name}, so at most ${moveOnHand} can be moved.`
+                          : `None of this is left in stock — it was all sold already, so there's nothing to move.`}
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => confirmMove(movingLine)}
+                      disabled={moveBusy || !moveTargetId || !moveQty || !moveOnHand}
+                      className="flex-1 rounded-md bg-[var(--color-ink)] py-2 text-sm font-medium text-white disabled:opacity-40"
+                    >
+                      {moveBusy ? 'Moving…' : 'Move stock'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelMove}
+                      className="rounded-md border border-[var(--color-line)] px-3 text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {isDraft && (
               <div className="mb-3 flex gap-2">
