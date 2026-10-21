@@ -10,6 +10,7 @@ import ProductPicker from '../components/ProductPicker'
 import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { normalizeSearchText } from '../lib/search'
+import { productTypeGroup } from '../lib/productType'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 
 export default function Adjustments() {
@@ -72,6 +73,8 @@ export default function Adjustments() {
   const [countReason, setCountReason] = useState('')
   const [showOnlyMismatches, setShowOnlyMismatches] = useState(true)
   const [countPosting, setCountPosting] = useState(false)
+  const [unlistedPosting, setUnlistedPosting] = useState(false)
+  const [showUnlisted, setShowUnlisted] = useState(false)
   const [countError, setCountError] = useState('')
   const [countImportSkipped, setCountImportSkipped] = useState([])
   const [countSearch, setCountSearch] = useState('')
@@ -101,7 +104,7 @@ export default function Adjustments() {
     return () => {
       cancelled = true
     }
-  }, [selectedCount?.id, selectedCount?.count_date, countLines])
+  }, [selectedCount?.id, selectedCount?.count_date, selectedCount?.zero_unlisted, JSON.stringify(selectedCount?.zero_scope ?? null), countLines])
 
   // ---------- Negative Stock ----------
   const [negativeStockRows, setNegativeStockRows] = useState([]) // [{ product, current_stock, first_negative_date }]
@@ -206,7 +209,7 @@ export default function Adjustments() {
   async function loadCountLines(countId) {
     const { data, error } = await supabase
       .from('physical_count_lines')
-      .select('*, product:products(name, sku, barcode, unit, category, current_cost)')
+      .select('*, product:products(name, sku, barcode, unit, category, current_cost, product_type, business_unit)')
       .eq('physical_count_id', countId)
       .order('created_at')
     if (!error) setCountLines(data ?? [])
@@ -240,6 +243,34 @@ export default function Adjustments() {
     if (!selectedCount) return
     await supabase.from('physical_counts').update({ label: labelDraft.trim() || null }).eq('id', selectedCount.id)
     loadPhysicalCounts()
+  }
+
+  async function saveCountZeroUnlisted(checked) {
+    if (!selectedCount) return
+    const { error } = await supabase.from('physical_counts').update({ zero_unlisted: checked }).eq('id', selectedCount.id)
+    if (error) {
+      setCountError(error.message)
+      return
+    }
+    setSelectedCount({ ...selectedCount, zero_unlisted: checked })
+    loadPhysicalCounts()
+  }
+
+  // types = a list of 'RETAIL' | 'KITCHEN' | 'INGREDIENT', or null for automatic
+  async function saveCountScope(types) {
+    if (!selectedCount) return
+    const { error } = await supabase.from('physical_counts').update({ zero_scope: types }).eq('id', selectedCount.id)
+    if (error) {
+      setCountError(error.message)
+      return
+    }
+    setSelectedCount({ ...selectedCount, zero_scope: types })
+    loadPhysicalCounts()
+  }
+
+  function toggleScopeType(type) {
+    const next = effectiveScope.includes(type) ? effectiveScope.filter((t) => t !== type) : [...effectiveScope, type]
+    saveCountScope(next)
   }
 
   async function saveCountDate(newDate) {
@@ -686,12 +717,43 @@ export default function Adjustments() {
     loadInventoryAsOf(selectedCount.count_date)
   }
 
+  // Sets every item that is not on this count's list to zero (as of the count date, plus
+  // whatever moved after it). Separate from "Post all" on purpose: it is the one action
+  // that changes items you did not enter.
+  async function setUnlistedToZero() {
+    if (!countReason.trim()) {
+      setCountError('Add a reason before posting — it applies to every adjustment this creates.')
+      return
+    }
+    const toZero = unlistedPlans
+    if (toZero.length === 0) return
+    if (
+      !confirm(
+        `Set ${toZero.length} item${toZero.length === 1 ? '' : 's'} that are NOT on this count to zero?\n\nNet change: ${unlistedUnitsChange > 0 ? '+' : ''}${unlistedUnitsChange} units (₱${unlistedValueChange.toFixed(2)} at current cost).\n\nOnly the types this count covers are touched, made-to-order items never are, and archived items stay archived. Look through the list first — an item you simply forgot to add would be zeroed too. This can't be undone from here.`
+      )
+    ) {
+      return
+    }
+    setUnlistedPosting(true)
+    setCountError('')
+    const failed = []
+    for (const plan of toZero) {
+      const { error } = await applyCountForProduct(plan.product_id)
+      if (error) failed.push(`${plan.product_name} (${error.message})`)
+    }
+    setUnlistedPosting(false)
+    if (failed.length > 0) setCountError(`Set the rest to zero, but failed for: ${failed.join('; ')}`)
+    await loadCountLines(selectedCount.id)
+    loadAdjustments()
+    loadInventoryAsOf(selectedCount.count_date)
+  }
+
   async function postAllCountVariances() {
     if (!countReason.trim()) {
       setCountError('Add a reason before posting — it applies to every adjustment this creates.')
       return
     }
-    const toPost = Object.values(countPlan).filter((plan) => plan.status === 'planned')
+    const toPost = Object.values(countPlan).filter((plan) => plan.status === 'planned' && !plan.unlisted)
     if (
       !confirm(
         `Post ${toPost.length} item${toPost.length === 1 ? '' : 's'}? Each item's difference is applied to its batches exactly as shown in the Plan column — shortages come off the oldest batch first, extras go on the most recent batch. This can't be undone from here.`
@@ -787,7 +849,23 @@ export default function Adjustments() {
     ? countSearchFiltered.filter((r) => rowVariance(r) !== 0)
     : countSearchFiltered
   const sortedCountRows = sortRows(visibleCountRows, countSortKey, countSortDir, countSortAccessor)
-  const pendingVarianceCount = Object.values(countPlan).filter((plan) => plan.status === 'planned').length
+  const pendingVarianceCount = Object.values(countPlan).filter((plan) => plan.status === 'planned' && !plan.unlisted).length
+
+  // Items that are NOT on this count's list. In a full count they are set to zero
+  // (plus whatever moved after the count date) — shown separately, with their own
+  // button, so they can't be zeroed by accident.
+  const unlistedPlans = Object.values(countPlan)
+    .filter((plan) => plan.unlisted)
+    .sort(
+      (a, b) =>
+        Math.abs(Number(b.variance) * Number(b.unit_cost ?? 0)) - Math.abs(Number(a.variance) * Number(a.unit_cost ?? 0)) ||
+        String(a.product_name).localeCompare(String(b.product_name))
+    )
+  const unlistedUnitsChange = unlistedPlans.reduce((sum, plan) => sum + Number(plan.variance), 0)
+  const unlistedValueChange = unlistedPlans.reduce((sum, plan) => sum + Number(plan.variance) * Number(plan.unit_cost ?? 0), 0)
+  // The product types this count covers: set by the user, or else the types of what was counted.
+  const countedTypes = [...new Set(countLines.map((r) => productTypeGroup(r.product ?? {})))]
+  const effectiveScope = selectedCount?.zero_scope ?? countedTypes
 
   function exportCountCsv() {
     const headers = ['Added', 'Barcode', 'Product', 'Category', 'System Qty (on count date)', 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance (item total)', 'Value Impact', 'Status', 'Plan']
@@ -1041,12 +1119,49 @@ export default function Adjustments() {
               />
             </label>
           </div>
+          <div className="mb-4 rounded-md border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-3.5 py-3 text-sm">
+            <label className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={selectedCount.zero_unlisted !== false}
+                onChange={(e) => saveCountZeroUnlisted(e.target.checked)}
+              />
+              <span>
+                <span className="font-medium">Full store count</span> — anything not on this list is set to zero
+                <span className="block text-xs text-[var(--color-ink-soft)]">
+                  A physical count is an overall count, so an item you didn't count wasn't on the shelves. Turn this off
+                  for a partial count (a few items, or one section).
+                </span>
+              </span>
+            </label>
+            {selectedCount.zero_unlisted !== false && (
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 pl-6 text-xs">
+                <span className="font-medium text-[var(--color-ink-soft)]">Covers:</span>
+                {[['RETAIL', 'Retail'], ['KITCHEN', 'Kitchen'], ['INGREDIENT', 'Ingredients']].map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-1.5">
+                    <input type="checkbox" checked={effectiveScope.includes(key)} onChange={() => toggleScopeType(key)} />
+                    {label}
+                  </label>
+                ))}
+                <span className="text-[var(--color-ink-soft)]">
+                  {selectedCount.zero_scope ? '(chosen by you)' : '(the types you counted)'}
+                </span>
+                {selectedCount.zero_scope && (
+                  <button type="button" onClick={() => saveCountScope(null)} className="underline">
+                    Back to automatic
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
             The count date is the day your quantities were true. Each item is set to hold what you counted on that
             date, plus every sale, purchase and other movement dated after it — so a count typed in weeks later still
             lines up with the sales and purchases you've already recorded. System Qty is what the system held on the
             count date, with any clean-up done since included. If you count and post on the same day, post right after
-            counting.
+            counting. In a full store count, items of the covered types that you did not count are set to zero the same
+            way (see the red box under the table); made-to-order items are never touched.
           </p>
           <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
             When you post, the item's batches are brought in line in the same move: fewer than the system says comes
@@ -1056,7 +1171,7 @@ export default function Adjustments() {
           </p>
           {countPlanError && (
             <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
-              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migrations 0044 to 0047 in Supabase.)
+              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migrations 0044 to 0049 in Supabase.)
             </div>
           )}
 
@@ -1277,6 +1392,70 @@ export default function Adjustments() {
                   </tbody>
                 </table>
               </div>
+
+              {selectedCount.zero_unlisted !== false && unlistedPlans.length > 0 && (
+                <div className="mt-4 rounded-md border border-[var(--color-rust)] bg-[var(--color-paper-raised)] p-3.5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-[var(--color-rust)]">
+                        Not on this list — {unlistedPlans.length} item{unlistedPlans.length === 1 ? '' : 's'} will be set to zero
+                      </div>
+                      <div className="mt-0.5 text-xs text-[var(--color-ink-soft)]">
+                        Net {unlistedUnitsChange > 0 ? '+' : ''}
+                        {unlistedUnitsChange} units · ₱{unlistedValueChange.toFixed(2)} at current cost. Types covered:{' '}
+                        {effectiveScope.map((t) => ({ RETAIL: 'Retail', KITCHEN: 'Kitchen', INGREDIENT: 'Ingredients' })[t]).join(', ')}.
+                        Look through this before you do it — an item you haven't added yet would be zeroed too. Items with 0
+                        change only have leftover batch quantities cleared.
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowUnlisted(!showUnlisted)}
+                        className="whitespace-nowrap rounded-md border border-[var(--color-line)] px-3 py-2 text-sm font-medium"
+                      >
+                        {showUnlisted ? 'Hide list' : 'Show list'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={setUnlistedToZero}
+                        disabled={unlistedPosting}
+                        className="whitespace-nowrap rounded-md border border-[var(--color-rust)] px-3 py-2 text-sm font-medium text-[var(--color-rust)] disabled:opacity-60"
+                      >
+                        {unlistedPosting ? 'Setting to zero…' : `Set ${unlistedPlans.length} item${unlistedPlans.length === 1 ? '' : 's'} to zero`}
+                      </button>
+                    </div>
+                  </div>
+                  {showUnlisted && (
+                    <div className="mt-3 max-h-80 overflow-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="text-[var(--color-ink-soft)]">
+                          <tr>
+                            <th className="py-1 pr-3">Product</th>
+                            <th className="py-1 pr-3">System now</th>
+                            <th className="py-1 pr-3">Will become</th>
+                            <th className="py-1 pr-3">Change</th>
+                            <th className="py-1">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {unlistedPlans.map((plan) => (
+                            <tr key={plan.product_id} className="border-t border-[var(--color-line)]">
+                              <td className="py-1 pr-3">{plan.product_name}</td>
+                              <td className="py-1 pr-3">{Number(plan.stock_now)}</td>
+                              <td className="py-1 pr-3">{Number(plan.target_qty)}</td>
+                              <td className="py-1 pr-3">
+                                {Number(plan.variance) === 0 ? 'batches only' : `${Number(plan.variance) > 0 ? '+' : ''}${Number(plan.variance)}`}
+                              </td>
+                              <td className="py-1">₱{(Number(plan.variance) * Number(plan.unit_cost ?? 0)).toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
