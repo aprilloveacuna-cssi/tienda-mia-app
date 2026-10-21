@@ -653,12 +653,13 @@ export default function Adjustments() {
   }
 
   // Posting is done by the database, one item at a time, all-or-nothing per
-  // item (see migration 0044). All of an item's lines in this count are added
-  // up and compared with the system quantity as of the count date, and the
-  // difference is applied to its batches: shortages come off the OLDEST batch
-  // first, extras go onto the MOST RECENT batch with stock. An expiration date
-  // typed on a line is only used when the item has no batch with stock at all
-  // (starting inventory), where each line becomes its own batch.
+  // item (see migrations 0044 and 0046). All of an item's lines in this count
+  // are added up; the item is set to that quantity (plus anything sold or
+  // received since the lines were entered) and its batches are brought in line:
+  // shortages come off the OLDEST batch first, extras go onto the MOST RECENT
+  // batch with stock. An expiration date typed on a line is only used when the
+  // item has no batch with stock at all (starting inventory), where each line
+  // becomes its own batch.
   async function applyCountForProduct(productId) {
     return supabase.rpc('apply_count_for_product', {
       p_count_id: selectedCount.id,
@@ -737,6 +738,15 @@ export default function Adjustments() {
     if (!row.posted && plan && plan.variance !== undefined) return Number(plan.variance)
     return (countedByProduct[row.product_id] ?? 0) - (inventoryCacheMap[row.product_id] ?? 0)
   }
+  // What the system held for this item when its line was entered — taken from
+  // the database's own plan for lines still waiting to be posted. A line that
+  // is already posted has no plan any more, so it falls back to the figure as of
+  // the count date (only used to show what was found at the time).
+  function rowSystemQty(row) {
+    const plan = countPlan[row.product_id]
+    if (!row.posted && plan && plan.system_qty !== undefined && plan.system_qty !== null) return Number(plan.system_qty)
+    return inventoryCacheMap[row.product_id] ?? 0
+  }
   function describePlanStep(step) {
     const exp = step.expiration_date ? `exp ${step.expiration_date}` : 'no expiry'
     if (step.kind === 'remove_from_batch') return `Remove ${step.quantity} from the batch received ${step.received_date} (${exp}), which holds ${step.batch_remaining}`
@@ -746,7 +756,7 @@ export default function Adjustments() {
   }
 
   function countSortAccessor(row, key) {
-    const systemQty = inventoryCacheMap[row.product_id] ?? 0
+    const systemQty = rowSystemQty(row)
     const variance = rowVariance(row)
     if (key === 'added') return new Date(row.created_at).getTime()
     if (key === 'product') return row.product?.name
@@ -779,9 +789,9 @@ export default function Adjustments() {
   const pendingVarianceCount = Object.values(countPlan).filter((plan) => plan.status === 'planned').length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', `System Qty (as of ${selectedCount.count_date})`, 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance (item total)', 'Value Impact', 'Status', 'Plan']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', 'System Qty (when counted)', 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance (item total)', 'Value Impact', 'Status', 'Plan']
     const rows = sortedCountRows.map((row) => {
-      const systemQty = inventoryCacheMap[row.product_id] ?? 0
+      const systemQty = rowSystemQty(row)
       // Variance and value impact belong to the ITEM, so they're only written
       // on one of its lines — otherwise summing the column would count it twice.
       const primary = isPrimaryLine(row)
@@ -1031,18 +1041,20 @@ export default function Adjustments() {
             </label>
           </div>
           <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
-            System Qty below reflects stock exactly as it stood on the count date above — not today's live numbers.
-            Change this if the count represents an earlier date than when you're actually entering it.
+            Each item ends up at the quantity you enter here. The count date is only the date this count is recorded
+            under — it doesn't change the numbers. System Qty is what the system held for the item at the moment you
+            entered its line (any clean-up done since is included). Anything sold or received after you entered a line
+            is kept on top of the quantity you typed, so counting over several days stays accurate.
           </p>
           <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
-            When you post, each item's total counted (all its lines added up) is compared with the system and the
-            difference is applied to its batches: fewer than the system says comes off the oldest batch first, more
-            goes onto the most recent batch. The Plan column shows exactly what will happen. An expiration date typed
-            here is only used when an item has no batch with stock yet (starting inventory).
+            When you post, the item's batches are brought in line in the same move: fewer than the system says comes
+            off the oldest batch first, more goes onto the most recent batch, and any units sitting outside a batch are
+            moved into one. The Plan column shows exactly what will happen. An expiration date typed here is only used
+            when an item has no batch with stock yet (starting inventory).
           </p>
           {countPlanError && (
             <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
-              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migration 0044 in Supabase.)
+              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migrations 0044, 0045 and 0046 in Supabase.)
             </div>
           )}
 
@@ -1174,7 +1186,7 @@ export default function Adjustments() {
                       <SortableTh label="Added" sortKey="added" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Product" sortKey="product" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
-                      <SortableTh label={`System Qty (as of ${selectedCount.count_date})`} sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="System Qty (when counted)" sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Cost" sortKey="unitCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Inventory Cost" sortKey="inventoryCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
@@ -1192,7 +1204,7 @@ export default function Adjustments() {
                       </td></tr>
                     )}
                     {sortedCountRows.map((row) => {
-                      const systemQty = inventoryCacheMap[row.product_id] ?? 0
+                      const systemQty = rowSystemQty(row)
                       const primary = isPrimaryLine(row)
                       const variance = rowVariance(row)
                       const valueImpact = variance * Number(row.product?.current_cost ?? 0)
