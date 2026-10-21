@@ -653,9 +653,10 @@ export default function Adjustments() {
   }
 
   // Posting is done by the database, one item at a time, all-or-nothing per
-  // item (see migrations 0044 and 0046). All of an item's lines in this count
-  // are added up; the item is set to that quantity (plus anything sold or
-  // received since the lines were entered) and its batches are brought in line:
+  // item (see migrations 0044 to 0047). All of an item's lines in this count
+  // are added up; the item is set to that quantity as of the count date (plus
+  // every sale, purchase or other movement dated after it) and its batches are
+  // brought in line:
   // shortages come off the OLDEST batch first, extras go onto the MOST RECENT
   // batch with stock. An expiration date typed on a line is only used when the
   // item has no batch with stock at all (starting inventory), where each line
@@ -738,10 +739,10 @@ export default function Adjustments() {
     if (!row.posted && plan && plan.variance !== undefined) return Number(plan.variance)
     return (countedByProduct[row.product_id] ?? 0) - (inventoryCacheMap[row.product_id] ?? 0)
   }
-  // What the system held for this item when its line was entered — taken from
-  // the database's own plan for lines still waiting to be posted. A line that
-  // is already posted has no plan any more, so it falls back to the figure as of
-  // the count date (only used to show what was found at the time).
+  // What the system held for this item on the count date (with any clean-up
+  // since included) — taken from the database's own plan for lines still waiting
+  // to be posted. A line that is already posted has no plan any more, so it falls
+  // back to the plain figure as of the count date.
   function rowSystemQty(row) {
     const plan = countPlan[row.product_id]
     if (!row.posted && plan && plan.system_qty !== undefined && plan.system_qty !== null) return Number(plan.system_qty)
@@ -789,7 +790,7 @@ export default function Adjustments() {
   const pendingVarianceCount = Object.values(countPlan).filter((plan) => plan.status === 'planned').length
 
   function exportCountCsv() {
-    const headers = ['Added', 'Barcode', 'Product', 'Category', 'System Qty (when counted)', 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance (item total)', 'Value Impact', 'Status', 'Plan']
+    const headers = ['Added', 'Barcode', 'Product', 'Category', 'System Qty (on count date)', 'Counted Qty', 'Cost', 'Inventory Cost', 'Expiration', 'Variance (item total)', 'Value Impact', 'Status', 'Plan']
     const rows = sortedCountRows.map((row) => {
       const systemQty = rowSystemQty(row)
       // Variance and value impact belong to the ITEM, so they're only written
@@ -1041,10 +1042,11 @@ export default function Adjustments() {
             </label>
           </div>
           <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
-            Each item ends up at the quantity you enter here. The count date is only the date this count is recorded
-            under — it doesn't change the numbers. System Qty is what the system held for the item at the moment you
-            entered its line (any clean-up done since is included). Anything sold or received after you entered a line
-            is kept on top of the quantity you typed, so counting over several days stays accurate.
+            The count date is the day your quantities were true. Each item is set to hold what you counted on that
+            date, plus every sale, purchase and other movement dated after it — so a count typed in weeks later still
+            lines up with the sales and purchases you've already recorded. System Qty is what the system held on the
+            count date, with any clean-up done since included. If you count and post on the same day, post right after
+            counting.
           </p>
           <p className="mb-4 text-xs text-[var(--color-ink-soft)]">
             When you post, the item's batches are brought in line in the same move: fewer than the system says comes
@@ -1054,7 +1056,7 @@ export default function Adjustments() {
           </p>
           {countPlanError && (
             <div className="mb-4 rounded-md bg-[var(--color-rust-soft)] px-3.5 py-2.5 text-sm text-[var(--color-rust)]">
-              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migrations 0044, 0045 and 0046 in Supabase.)
+              Couldn't work out what posting would do: {countPlanError} (If this mentions a missing function, run migrations 0044 to 0047 in Supabase.)
             </div>
           )}
 
@@ -1186,7 +1188,7 @@ export default function Adjustments() {
                       <SortableTh label="Added" sortKey="added" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Product" sortKey="product" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Category" sortKey="category" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
-                      <SortableTh label="System Qty (when counted)" sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
+                      <SortableTh label="System Qty (on count date)" sortKey="systemQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Counted Qty" sortKey="countedQty" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Cost" sortKey="unitCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
                       <SortableTh label="Inventory Cost" sortKey="inventoryCost" activeKey={countSortKey} activeDir={countSortDir} onSort={toggleCountSort} />
