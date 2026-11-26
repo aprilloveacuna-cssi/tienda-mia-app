@@ -10,7 +10,8 @@ import SearchBar from '../components/SearchBar'
 import { useSort, sortRows } from '../lib/sort'
 import { parseCsv, normalizeHeader, downloadFile } from '../lib/csv'
 import { normalizeSearchText } from '../lib/search'
-import { parsePosReportWorkbook, extractDateAndTerminalFromFilename } from '../lib/posReportParser'
+import { parsePosReportWorkbook } from '../lib/posReportParser'
+import { extractDateAndTerminalFromFilename } from '../lib/posFileName'
 import { resolveProductByCode } from '../lib/productMatch'
 
 const EMPTY_LINE_FORM = { product_id: '', quantity: '', unit_price: '' }
@@ -281,6 +282,14 @@ export default function Sales() {
   // always creates a plain (not discounted, not B1T1) new line for the
   // split-off portion, since a discounted split has its own tool already.
   const [splitPriceLineId, setSplitPriceLineId] = useState(null)
+  // Moving a posted line to a different item (the cashier punched the wrong one).
+  const [movingSaleLineId, setMovingSaleLineId] = useState(null)
+  const [moveSaleTargetId, setMoveSaleTargetId] = useState('')
+  const [moveSaleQty, setMoveSaleQty] = useState('')
+  const [moveSaleReason, setMoveSaleReason] = useState('')
+  const [moveSaleTargetStock, setMoveSaleTargetStock] = useState(null) // units the chosen item has in stock
+  const [moveSaleBusy, setMoveSaleBusy] = useState(false)
+  const [moveSaleMsg, setMoveSaleMsg] = useState('')
   const [splitQtyDraft, setSplitQtyDraft] = useState('')
   const [splitPriceDraft, setSplitPriceDraft] = useState('')
   const [splitReasonDraft, setSplitReasonDraft] = useState('')
@@ -303,6 +312,12 @@ export default function Sales() {
   useEffect(() => {
     if (!panelOpen) setReimportContext(null)
   }, [panelOpen])
+
+  // A move in progress, and the message after one, belong to the sale being looked at.
+  useEffect(() => {
+    setMovingSaleLineId(null)
+    setMoveSaleMsg('')
+  }, [viewedSale?.id, panelOpen])
   const [headerForm, setHeaderForm] = useState({ pos_terminal: '', cashier: '', sale_date: today() })
 
   const importFileInputRef = useRef(null)
@@ -329,6 +344,8 @@ export default function Sales() {
   const [quickAddSaving, setQuickAddSaving] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importParsing, setImportParsing] = useState(false)
+  // Files whose date could not be read with certainty, waiting for the user to confirm each date.
+  const [importFileCheck, setImportFileCheck] = useState(null)
   const [lineForm, setLineForm] = useState(EMPTY_LINE_FORM)
   const [lineWarning, setLineWarning] = useState('')
 
@@ -575,7 +592,7 @@ export default function Sales() {
     setErrorMsg('')
     const { data } = await supabase
       .from('sale_lines')
-      .select('*, product:products(name, sku, barcode, unit, category, selling_price)')
+      .select('*, product:products(name, sku, barcode, unit, category, selling_price, business_unit, product_type)')
       .eq('sale_id', sale.id)
     setViewedLines(data ?? [])
     setPanelOpen(true)
@@ -584,6 +601,7 @@ export default function Sales() {
   function startEditPrice(line) {
     setEditingDiscountQtyLineId(null) // mutually exclusive with a qty edit in progress
     setSplitPriceLineId(null)
+    setMovingSaleLineId(null)
     setEditingLineId(line.id)
     setEditPriceDraft(String(line.is_b1t1 ? line.b1t1_price : line.unit_price))
     setEditReasonDraft('')
@@ -598,6 +616,107 @@ export default function Sales() {
   // split too, using the same formulas Sales.jsx uses when a line is first
   // created. Never touches quantity, consumption, or fifo_cost — the price
   // was wrong, not what physically left the shelf.
+  // Kitchen meals and ingredients draw on production and recipes, which a move cannot redo.
+  function canMoveSaleLine(line) {
+    const p = line.product
+    return !(p?.business_unit === 'KITCHEN' || p?.category === 'KITCHEN' || p?.product_type === 'RAW MATERIAL')
+  }
+
+  function moveSaleTargets(line) {
+    return activeProducts.filter(
+      (p) =>
+        p.id !== line.product_id &&
+        p.business_unit !== 'KITCHEN' &&
+        p.category !== 'KITCHEN' &&
+        p.product_type !== 'RAW MATERIAL'
+    )
+  }
+
+  function startMoveSaleLine(line) {
+    setEditingLineId(null)
+    setEditingDiscountQtyLineId(null)
+    setSplitPriceLineId(null)
+    setErrorMsg('')
+    setMoveSaleMsg('')
+    setMovingSaleLineId(line.id)
+    setMoveSaleTargetId('')
+    setMoveSaleTargetStock(null)
+    setMoveSaleQty(String(Number(line.quantity)))
+    setMoveSaleReason('')
+  }
+
+  function cancelMoveSaleLine() {
+    setMovingSaleLineId(null)
+  }
+
+  // Shows how much the chosen item has, so it's clear before confirming whether it can cover the sale.
+  async function pickMoveSaleTarget(productId) {
+    setMoveSaleTargetId(productId)
+    setMoveSaleTargetStock(null)
+    if (!productId) return
+    const { data } = await supabase
+      .from('batch_cache')
+      .select('remaining_quantity')
+      .eq('product_id', productId)
+      .gt('remaining_quantity', 0)
+    setMoveSaleTargetStock((data ?? []).reduce((sum, b) => sum + Number(b.remaining_quantity), 0))
+  }
+
+  // The move itself happens in one database function so it either completes entirely
+  // or changes nothing — see migration 0051.
+  async function confirmMoveSaleLine(line) {
+    const qty = Number(moveSaleQty)
+    const target = products.find((p) => p.id === moveSaleTargetId)
+    if (!target) {
+      setErrorMsg('Pick the item the customer actually bought.')
+      return
+    }
+    if (!qty || qty <= 0 || qty > Number(line.quantity)) {
+      setErrorMsg(`Enter a quantity of more than 0, up to ${line.quantity}.`)
+      return
+    }
+    if (line.is_b1t1 && qty !== Number(line.quantity)) {
+      setErrorMsg('A Buy 1 Take 1 line can only be moved whole, so a pair is never split.')
+      return
+    }
+    const whole = qty === Number(line.quantity)
+    const short = moveSaleTargetStock !== null && moveSaleTargetStock < qty
+    if (
+      !confirm(
+        `Move ${qty} ${line.product?.unit ?? ''} on ${viewedSale.sale_number} from ${line.product?.name} to ${target.name}?\n\n${
+          whole ? 'This whole line' : 'That part of this line'
+        } becomes ${target.name}. The price, any discount and the sale total stay exactly as they were. The stock comes back on ${
+          line.product?.name
+        } and is taken from ${target.name}, oldest batch first${
+          short ? ` — it only has ${moveSaleTargetStock}, so ${qty - moveSaleTargetStock} of these will take it below zero` : ''
+        }. Nothing is deleted, and voiding the sale later still puts everything back.`
+      )
+    ) {
+      return
+    }
+    setMoveSaleBusy(true)
+    setErrorMsg('')
+    const { data, error } = await supabase.rpc('move_sale_line_to_product', {
+      p_line_id: line.id,
+      p_new_product_id: moveSaleTargetId,
+      p_quantity: qty,
+      p_reason: moveSaleReason.trim() || null,
+    })
+    setMoveSaleBusy(false)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    setMovingSaleLineId(null)
+    await openView(viewedSale)
+    loadSales()
+    let msg = `Moved ${data.moved_quantity} from ${data.from_product} to ${data.to_product}.`
+    if (Number(data.new_item_went_below_zero) > 0) {
+      msg += ` ${data.to_product} only had enough for part of it, so ${data.new_item_went_below_zero} of these went below zero.`
+    }
+    setMoveSaleMsg(msg)
+  }
+
   async function saveEditPrice(line) {
     const newPriceInput = Number(editPriceDraft)
     if (!newPriceInput || newPriceInput <= 0) return
@@ -670,6 +789,7 @@ export default function Sales() {
   function startEditDiscountQty(line) {
     setEditingLineId(null) // mutually exclusive with a price edit in progress
     setSplitPriceLineId(null)
+    setMovingSaleLineId(null)
     const sibling = viewedLines.find(
       (s) =>
         s.product_id === line.product_id &&
@@ -821,6 +941,7 @@ export default function Sales() {
   function startSplitPrice(line) {
     setEditingLineId(null)
     setEditingDiscountQtyLineId(null)
+    setMovingSaleLineId(null)
     setSplitPriceLineId(line.id)
     setSplitQtyDraft('')
     setSplitPriceDraft(String(line.unit_price))
@@ -1407,11 +1528,7 @@ export default function Sales() {
     setErrorMsg('')
     setPosReportValidationWarning(null)
 
-    // date -> { rows: [...], terminals: Set, warnings: [...] } — files with
-    // no detectable date fall back to whatever date is already in the form,
-    // same as before this grouped multiple dates at all.
-    const groups = new Map()
-
+    const entries = []
     for (const file of files) {
       try {
         const buffer = await readFileAsArrayBuffer(file)
@@ -1422,18 +1539,68 @@ export default function Sales() {
           return
         }
 
-        const { saleDate, posTerminal } = extractDateAndTerminalFromFilename(file.name)
-        const key = saleDate ?? headerForm.sale_date
-        if (!groups.has(key)) groups.set(key, { date: key, terminals: new Set(), warnings: [], rows: [] })
-        const group = groups.get(key)
-        if (posTerminal) group.terminals.add(posTerminal)
-        if (result.validationWarning) group.warnings.push(`${file.name}: ${result.validationWarning}`)
-        group.rows.push(...result.dataRows)
+        const { saleDate, posTerminal, dateConfidence } = extractDateAndTerminalFromFilename(file.name)
+        entries.push({
+          id: entries.length,
+          name: file.name,
+          rows: result.dataRows,
+          warning: result.validationWarning ? `${file.name}: ${result.validationWarning}` : null,
+          terminal: posTerminal,
+          date: saleDate,
+          confidence: dateConfidence,
+        })
       } catch {
         setImportParsing(false)
         setErrorMsg(`${file.name}: could not read this file — make sure it's the .xls "Items Sold" POS report.`)
         return
       }
+    }
+
+    // Reimporting one specific day: the day is already known, so a file whose
+    // name carries no date is fine.
+    if (reimportContext) {
+      for (const en of entries) {
+        if (!en.date) {
+          en.date = reimportContext.date
+          en.confidence = 'exact'
+        }
+      }
+    }
+
+    // Files with a clear date in the name go straight in. Anything less sure — no
+    // date, a format that could be read two ways, or a date in the future — is put
+    // in front of the user to confirm. Quietly filing it under whatever date the
+    // form happens to hold used to merge several days into one sale.
+    const todayStr = today()
+    const unsure = entries.some((en) => en.confidence !== 'exact' || en.date > todayStr)
+    if (!unsure) {
+      await beginImportFromEntries(entries)
+      return
+    }
+
+    setImportParsing(false)
+    setImportFileCheck({
+      entries: entries.map((en) => ({
+        ...en,
+        // A single file with no date keeps the old behaviour as the starting point (the
+        // date already in the form); with several files it stays empty so each is chosen.
+        date: en.date ?? (entries.length === 1 ? headerForm.sale_date : ''),
+        fromForm: !en.date && entries.length === 1,
+        edited: false,
+      })),
+    })
+  }
+
+  // One sale per date: files given the same date are combined into that day's sale.
+  async function beginImportFromEntries(entries) {
+    setImportParsing(true)
+    const groups = new Map()
+    for (const en of entries) {
+      if (!groups.has(en.date)) groups.set(en.date, { date: en.date, terminals: new Set(), warnings: [], rows: [] })
+      const group = groups.get(en.date)
+      if (en.terminal) group.terminals.add(en.terminal)
+      if (en.warning) group.warnings.push(en.warning)
+      group.rows.push(...en.rows)
     }
 
     // Oldest date first — matches how a backlog would actually get entered.
@@ -1470,6 +1637,19 @@ export default function Sales() {
     setDateImportQueueTotal(sortedGroups.length)
     setDateImportQueue(sortedGroups.slice(1))
     await startDateGroupImport(sortedGroups[0])
+  }
+
+  function setFileCheckDate(id, value) {
+    setImportFileCheck((c) =>
+      c ? { ...c, entries: c.entries.map((en) => (en.id === id ? { ...en, date: value, edited: true, fromForm: false } : en)) } : c
+    )
+  }
+
+  async function handleConfirmImportFileCheck() {
+    if (!importFileCheck) return
+    const entries = importFileCheck.entries
+    setImportFileCheck(null)
+    await beginImportFromEntries(entries)
   }
 
   function setMismatchDraft(tempId, draft) {
@@ -3175,6 +3355,12 @@ export default function Sales() {
               <StatusChip tone={statusTone(viewedSale?.status)}>{viewedSale?.status}</StatusChip>
             </div>
 
+            {moveSaleMsg && (
+              <div className="mb-3 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+                {moveSaleMsg}
+              </div>
+            )}
+
             <div className="mb-3 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
               Line items
             </div>
@@ -3234,7 +3420,7 @@ export default function Sales() {
                         <td className="px-3 py-2 text-[var(--color-herb)]">{Number(l.gross_profit).toFixed(2)}</td>
                         {viewedSale?.status === 'posted' && (
                           <td className="px-3 py-2">
-                            {editingLineId !== l.id && editingDiscountQtyLineId !== l.id && splitPriceLineId !== l.id && (
+                            {editingLineId !== l.id && editingDiscountQtyLineId !== l.id && splitPriceLineId !== l.id && movingSaleLineId !== l.id && (
                               <div className="flex flex-col items-start gap-1">
                                 <button
                                   onClick={() => startEditPrice(l)}
@@ -3256,6 +3442,14 @@ export default function Sales() {
                                     className="text-xs font-medium text-[var(--color-ink-soft)] underline"
                                   >
                                     Split at different price
+                                  </button>
+                                )}
+                                {canMoveSaleLine(l) && (
+                                  <button
+                                    onClick={() => startMoveSaleLine(l)}
+                                    className="text-xs font-medium text-[var(--color-ink-soft)] underline"
+                                  >
+                                    Move to another item
                                   </button>
                                 )}
                               </div>
@@ -3416,6 +3610,91 @@ export default function Sales() {
                               FIFO consumption never change. This is a plain price, not a Senior/PWD discount —
                               use "Edit discounted qty" for that instead.
                             </p>
+                          </td>
+                        </tr>
+                      )}
+                      {movingSaleLineId === l.id && (
+                        <tr className="border-b border-[var(--color-line)] bg-[var(--color-paper)]">
+                          <td colSpan={7} className="px-3 py-3">
+                            <div className="mb-2 text-sm font-medium">Move this sale to another item</div>
+                            <p className="mb-3 text-xs text-[var(--color-ink-soft)]">
+                              Use this when the cashier punched the wrong item (the wrong flavor, say). The price, any
+                              discount and the sale total stay as they are. The stock comes back on {l.product?.name} and
+                              is taken from the item you pick, oldest batch first. Nothing is deleted.
+                            </p>
+                            <div className="space-y-3 whitespace-normal">
+                              <label className="block text-xs font-medium text-[var(--color-ink-soft)]">
+                                The customer actually bought
+                                <div className="mt-0.5">
+                                  <ProductPicker
+                                    products={moveSaleTargets(l)}
+                                    value={moveSaleTargetId}
+                                    onChange={pickMoveSaleTarget}
+                                  />
+                                </div>
+                              </label>
+                              <div className="flex flex-wrap items-end gap-2">
+                                <label className="text-xs font-medium text-[var(--color-ink-soft)]">
+                                  Quantity to move (of {l.quantity})
+                                  <input
+                                    type="number"
+                                    step="0.001"
+                                    min="0"
+                                    max={l.quantity}
+                                    value={moveSaleQty}
+                                    onChange={(e) => setMoveSaleQty(e.target.value)}
+                                    disabled={l.is_b1t1}
+                                    className="input mt-0.5 block w-32 disabled:opacity-60"
+                                  />
+                                </label>
+                                <label className="flex-1 text-xs font-medium text-[var(--color-ink-soft)]">
+                                  Reason (optional)
+                                  <input
+                                    value={moveSaleReason}
+                                    onChange={(e) => setMoveSaleReason(e.target.value)}
+                                    placeholder="e.g. cashier punched the wrong flavor"
+                                    className="input mt-0.5 block w-full"
+                                  />
+                                </label>
+                              </div>
+                              {l.is_b1t1 && (
+                                <p className="text-xs text-[var(--color-ink-soft)]">
+                                  This is a Buy 1 Take 1 line, so it moves whole.
+                                </p>
+                              )}
+                              {moveSaleTargetId && (
+                                <p
+                                  className={`text-xs ${
+                                    moveSaleTargetStock !== null && moveSaleTargetStock < Number(moveSaleQty || 0)
+                                      ? 'text-[var(--color-rust)]'
+                                      : 'text-[var(--color-ink-soft)]'
+                                  }`}
+                                >
+                                  {moveSaleTargetStock === null
+                                    ? 'Checking its stock…'
+                                    : moveSaleTargetStock >= Number(moveSaleQty || 0)
+                                      ? `${products.find((p) => p.id === moveSaleTargetId)?.name} has ${moveSaleTargetStock} in stock — enough to cover this.`
+                                      : `${products.find((p) => p.id === moveSaleTargetId)?.name} only has ${moveSaleTargetStock} in stock. The other ${
+                                          Number(moveSaleQty || 0) - moveSaleTargetStock
+                                        } will take it below zero, the same as selling it with no stock.`}
+                                </p>
+                              )}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => confirmMoveSaleLine(l)}
+                                  disabled={moveSaleBusy || !moveSaleTargetId || !moveSaleQty}
+                                  className="rounded-md bg-[var(--color-ink)] px-3 py-1.5 text-xs font-medium text-[var(--color-paper)] disabled:opacity-40"
+                                >
+                                  {moveSaleBusy ? 'Moving…' : 'Move sale'}
+                                </button>
+                                <button
+                                  onClick={cancelMoveSaleLine}
+                                  className="rounded-md border border-[var(--color-line)] px-3 py-1.5 text-xs"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
                           </td>
                         </tr>
                       )}
@@ -3711,6 +3990,88 @@ export default function Sales() {
             ? `Resolve ${importMismatches.length} price mismatch${importMismatches.length === 1 ? '' : 'es'} first`
             : `Add ${importPreviewValid.length} line${importPreviewValid.length === 1 ? '' : 's'} to this sale`}
         </button>
+      </SlidePanel>
+
+      <SlidePanel
+        open={Boolean(importFileCheck)}
+        title="Check the dates"
+        onClose={() => setImportFileCheck(null)}
+      >
+        {importFileCheck && (() => {
+          const entries = importFileCheck.entries
+          const todayStr = today()
+          const dateOk = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d <= todayStr
+          const ready = entries.every((en) => dateOk(en.date))
+          const byDate = new Map()
+          entries.forEach((en) => {
+            if (dateOk(en.date)) byDate.set(en.date, (byDate.get(en.date) ?? 0) + 1)
+          })
+          const combined = [...byDate.entries()].filter(([, n]) => n > 1)
+          const saleCount = byDate.size
+          const noteFor = (en) => {
+            if (en.edited) return null
+            if (en.fromForm) return "No date in the file name — showing the date from the form. Change it if that isn't right."
+            if (!en.date) return 'No date found in the file name — pick one.'
+            if (en.date > todayStr) return 'This date is in the future — please check it.'
+            if (en.confidence === 'guessed') return 'Read as month-day-year from the file name — please check.'
+            return null
+          }
+          return (
+            <>
+              <p className="mb-4 text-sm text-[var(--color-ink-soft)]">
+                I couldn't be sure of the date for {entries.length === 1 ? 'this file' : 'some of these files'}. Each date
+                you confirm here becomes its own sale; files given the same date are combined into one sale.
+              </p>
+              <div className="space-y-3">
+                {entries.map((en) => {
+                  const note = noteFor(en)
+                  return (
+                    <div key={en.id} className="rounded-md border border-[var(--color-line)] p-3">
+                      <div className="break-all text-sm font-medium">{en.name}</div>
+                      <div className="mt-0.5 text-xs text-[var(--color-ink-soft)]">
+                        {en.rows.length} row{en.rows.length === 1 ? '' : 's'}
+                        {en.terminal ? ` · POS ${en.terminal}` : ''}
+                      </div>
+                      <input
+                        type="date"
+                        max={todayStr}
+                        value={en.date}
+                        onChange={(e) => setFileCheckDate(en.id, e.target.value)}
+                        aria-label={`Sale date for ${en.name}`}
+                        className="input mt-2"
+                      />
+                      {note && (
+                        <div className="mt-2 flex items-start gap-1.5 text-xs text-[var(--color-rust)]">
+                          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                          {note}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              {combined.length > 0 && (
+                <div className="mt-4 rounded-md bg-[var(--color-herb-soft)] px-3.5 py-2.5 text-sm text-[var(--color-herb)]">
+                  {combined.map(([d, n]) => (
+                    <div key={d}>
+                      {n} files share {d} and will be combined into one sale.
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button
+                onClick={handleConfirmImportFileCheck}
+                disabled={!ready}
+                className="mt-5 w-full rounded-md bg-[var(--color-ink)] py-2.5 text-sm font-medium text-white disabled:opacity-60"
+              >
+                {ready ? `Continue — ${saleCount} sale${saleCount === 1 ? '' : 's'}` : 'Pick a date for every file'}
+              </button>
+              <p className="mt-3 text-xs text-[var(--color-ink-soft)]">
+                Nothing is saved yet. You'll still review the lines and click "Complete sale" for each date.
+              </p>
+            </>
+          )
+        })()}
       </SlidePanel>
     </div>
   )
